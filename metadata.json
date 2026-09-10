@@ -1,0 +1,6 @@
+{
+  "name": "Pra onde eu vou",
+  "description": "Aplicativo de cadastro e consulta de eventos para descobrir shows, festivais e experiências.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
