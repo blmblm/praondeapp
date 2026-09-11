@@ -51,22 +51,11 @@ export const PresentationScreen: React.FC<PresentationScreenProps> = ({
       <div className="absolute top-12 left-1/2 -translate-x-1/2 w-[600px] h-[350px] bg-gradient-to-tr from-amber-600/15 via-orange-500/10 to-indigo-600/15 blur-3xl -z-10 pointer-events-none rounded-full" />
 
       {/* Top Bar on Initial Screen */}
-      <div className="w-full max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 pt-4 flex items-center justify-between z-10">
+      <div className="w-full max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 pt-4 flex items-center justify-start z-10">
         <span className="inline-flex items-center gap-1.5 px-3.5 py-1 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20 shadow-sm">
           <Sparkles className="w-3 h-3" />
           Guia de Eventos & Atrações
         </span>
-
-        {onOpenAdmin && (
-          <button
-            id="btn-home-admin-top"
-            onClick={onOpenAdmin}
-            className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-amber-400 border border-slate-800 hover:border-amber-400/50 text-xs font-semibold shadow-sm transition-all cursor-pointer"
-          >
-            <ShieldCheck className="w-4 h-4 text-amber-400" />
-            <span>Administração</span>
-          </button>
-        )}
       </div>
 
       {/* Main Hero Container */}

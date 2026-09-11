@@ -132,7 +132,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
           )}
 
-          {onOpenAdmin && (
+          {onOpenAdmin && currentScreen !== 'home' && (
             <button
               id="nav-admin-btn"
               onClick={onOpenAdmin}
@@ -144,29 +144,33 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
           )}
 
-          <button
-            id="nav-register-btn"
-            onClick={() => onNavigate('register')}
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-sm font-semibold transition-all ${
-              currentScreen === 'register' || currentScreen === 'advertiser_auth'
-                ? 'bg-emerald-500 text-slate-950 shadow-md shadow-emerald-500/20'
-                : 'bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 hover:from-amber-400 hover:to-orange-400 shadow-sm'
-            }`}
-          >
-            <PlusCircle className="w-4 h-4 text-slate-950" />
-            <span>Cadastrar Evento</span>
-          </button>
+          {currentScreen !== 'home' && (
+            <button
+              id="nav-register-btn"
+              onClick={() => onNavigate('register')}
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-sm font-semibold transition-all ${
+                currentScreen === 'register' || currentScreen === 'advertiser_auth'
+                  ? 'bg-emerald-500 text-slate-950 shadow-md shadow-emerald-500/20'
+                  : 'bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 hover:from-amber-400 hover:to-orange-400 shadow-sm'
+              }`}
+            >
+              <PlusCircle className="w-4 h-4 text-slate-950" />
+              <span>Cadastrar Evento</span>
+            </button>
+          )}
         </nav>
 
         {/* Mobile Right Bar (md:hidden) */}
         <div className="flex md:hidden items-center gap-2">
-          <button
-            onClick={() => onNavigate('register')}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 font-bold text-xs shadow-sm"
-          >
-            <PlusCircle className="w-3.5 h-3.5" />
-            <span>Cadastrar</span>
-          </button>
+          {currentScreen !== 'home' && (
+            <button
+              onClick={() => onNavigate('register')}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 font-bold text-xs shadow-sm"
+            >
+              <PlusCircle className="w-3.5 h-3.5" />
+              <span>Cadastrar</span>
+            </button>
+          )}
 
           <button
             id="btn-mobile-menu-toggle"

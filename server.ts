@@ -73,7 +73,7 @@ app.get('/api/events', (req, res) => {
       state: r.estado,
       latitude: r.latitude || undefined,
       longitude: r.longitude || undefined,
-      liberado: r.liberado || 'S',
+      liberado: r.liberado !== null && r.liberado !== undefined ? r.liberado : '',
       isFree: Boolean(r.is_gratuito),
       price: r.preco ?? undefined,
       priceDetails: r.detalhes_preco || undefined,
@@ -503,10 +503,11 @@ app.delete('/api/categories/:id', (req, res) => {
 // 7. Supervisors (CRUD na tabela supervisor do SQLite)
 app.get('/api/supervisors', (req, res) => {
   try {
-    const rows = db.prepare('SELECT id, nome, criado_em FROM supervisor ORDER BY id ASC;').all() as any[];
+    const rows = db.prepare('SELECT id, nome, senha, criado_em FROM supervisor ORDER BY id ASC;').all() as any[];
     const supervisors = rows.map((r) => ({
       id: r.id,
       nome: r.nome,
+      senha: r.senha || '',
       criadoEm: r.criado_em,
     }));
     res.json(supervisors);
@@ -529,6 +530,7 @@ app.post('/api/supervisors', (req, res) => {
     const newSup = {
       id: Number(result.lastInsertRowid),
       nome: nome.trim(),
+      senha: senha ? String(senha).trim() : '',
       criadoEm: new Date().toISOString(),
     };
     res.status(201).json(newSup);
@@ -540,12 +542,67 @@ app.post('/api/supervisors', (req, res) => {
   }
 });
 
+app.put('/api/supervisors/:id', (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nome, senha } = req.body;
+    if (!nome || !nome.trim()) {
+      return res.status(400).json({ error: 'Nome do supervisor é obrigatório' });
+    }
+    const stmt = db.prepare(`
+      UPDATE supervisor SET nome = ?, senha = ? WHERE id = ?;
+    `);
+    const result = stmt.run(nome.trim(), senha ? String(senha).trim() : null, id);
+    res.json({ success: true, changes: result.changes, id: Number(id), nome: nome.trim() });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.delete('/api/supervisors/:id', (req, res) => {
   try {
     const { id } = req.params;
     const stmt = db.prepare('DELETE FROM supervisor WHERE id = ?;');
     const result = stmt.run(id);
     res.json({ success: true, changes: result.changes });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 8. Verificação de Senha Administrativa (Padrão 0612 ou senha na tabela supervisor)
+app.post('/api/admin/verify-password', (req, res) => {
+  try {
+    const { password } = req.body;
+    const clean = String(password || '').trim();
+    if (!clean) {
+      return res.status(400).json({ valid: false, message: 'Senha é obrigatória' });
+    }
+
+    // A. Senha padrão default: 0612
+    if (clean === '0612') {
+      return res.json({
+        valid: true,
+        user: 'Administrador Master',
+        role: 'master',
+      });
+    }
+
+    // B. Senha cadastrada na tabela supervisor
+    const supervisor = db.prepare('SELECT id, nome, senha FROM supervisor WHERE senha = ?;').get(clean) as any;
+    if (supervisor) {
+      return res.json({
+        valid: true,
+        user: supervisor.nome,
+        supervisorId: supervisor.id,
+        role: 'supervisor',
+      });
+    }
+
+    return res.status(401).json({
+      valid: false,
+      message: 'Senha incorreta. Digite a senha padrão (0612) ou a senha cadastrada na tabela supervisor.',
+    });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }

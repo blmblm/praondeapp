@@ -31,9 +31,11 @@ import {
   Edit2,
   LayoutGrid,
   Clock,
-  Filter
+  Filter,
+  ImageIcon
 } from 'lucide-react';
 import { EventItem, Advertiser, Supervisor, CityItem, CategoryItem } from '../types';
+import { EventLiberationModal } from './EventLiberationModal';
 
 interface AdminModalProps {
   isOpen: boolean;
@@ -46,6 +48,7 @@ interface AdminModalProps {
   onDeleteCategory: (category: string) => void;
   onDeleteEvent: (id: string) => void;
   onToggleLiberado?: (id: string, currentLiberado: string) => void;
+  onSetLiberado?: (id: string, liberado: 'S' | 'N') => Promise<void> | void;
   onSelectEvent: (event: EventItem) => void;
   onOpenSqlConsole: () => void;
 }
@@ -83,6 +86,7 @@ const INITIAL_SUPERVISORS: Supervisor[] = [
   {
     id: 'sup-1',
     name: 'Carlos Alberto Silva',
+    senha: '123456',
     email: 'carlos.supervisor@praonde.com',
     phone: '(11) 99887-1122',
     city: 'São Paulo',
@@ -94,6 +98,7 @@ const INITIAL_SUPERVISORS: Supervisor[] = [
   {
     id: 'sup-2',
     name: 'Mariana Fernandes Costa',
+    senha: '654321',
     email: 'mariana.costa@praonde.com',
     phone: '(81) 98765-4321',
     city: 'Recife',
@@ -115,14 +120,24 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   onDeleteCategory,
   onDeleteEvent,
   onToggleLiberado,
+  onSetLiberado,
   onSelectEvent,
   onOpenSqlConsole,
 }) => {
-  // Auth state - direct access to management screen
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(true);
+  // Auth state - tela de senha ao clicar em administração (senha default: 0612 ou senha de supervisor)
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [isMasterAdmin, setIsMasterAdmin] = useState<boolean>(false);
+  const [authenticatedUser, setAuthenticatedUser] = useState<string>('');
+  const [isVerifying, setIsVerifying] = useState<boolean>(false);
   const [passwordInput, setPasswordInput] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string>('');
+
+  // Master Prompt para opções restritas exclusivamente à senha "0612" (Categorias, Supervisores, Cidades)
+  const [masterPromptTarget, setMasterPromptTarget] = useState<AdminPageView | null>(null);
+  const [masterPromptPin, setMasterPromptPin] = useState<string>('');
+  const [masterPromptError, setMasterPromptError] = useState<string>('');
+  const [showMasterPromptPin, setShowMasterPromptPin] = useState<boolean>(false);
 
   // Page view
   const [currentView, setCurrentView] = useState<AdminPageView>('menu');
@@ -137,7 +152,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [newCategoryName, setNewCategoryName] = useState<string>('');
   const [categoryFeedback, setCategoryFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
 
-  // State for "Cadastrar Supervisor"
+  // State for "Cadastrar Supervisor" e Atualização
   const [supervisors, setSupervisors] = useState<Supervisor[]>(() => {
     try {
       const saved = localStorage.getItem(SUPERVISORS_STORAGE_KEY);
@@ -147,6 +162,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     }
     return INITIAL_SUPERVISORS;
   });
+  const [editingSupervisorId, setEditingSupervisorId] = useState<string | null>(null);
   const [supName, setSupName] = useState('');
   const [supPassword, setSupPassword] = useState('');
   const [showSupPassword, setShowSupPassword] = useState(false);
@@ -174,9 +190,51 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [cityFeedback, setCityFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
   const [citySearchQuery, setCitySearchQuery] = useState('');
 
-  // State for "Liberar Eventos"
-  const [eventFilterStatus, setEventFilterStatus] = useState<'all' | 'pending' | 'approved'>('all');
+  // State for "Liberar Eventos" - por padrão exibe somente registros se o campo liberado estiver em branco
+  const [eventFilterStatus, setEventFilterStatus] = useState<'blank' | 'rejected' | 'approved' | 'all'>('blank');
   const [selectedCategoryForLiberation, setSelectedCategoryForLiberation] = useState<string>('Todas');
+  const [selectedEventForAnalysis, setSelectedEventForAnalysis] = useState<EventItem | null>(null);
+
+  // Sincronizar supervisores do SQLite ao abrir
+  useEffect(() => {
+    if (!isOpen) return;
+    const fetchSupervisorsFromDb = async () => {
+      try {
+        const res = await fetch('/api/supervisors');
+        if (res.ok) {
+          const dbSups = await res.json();
+          if (Array.isArray(dbSups) && dbSups.length > 0) {
+            setSupervisors((prev) => {
+              const map = new Map<string, Supervisor>();
+              prev.forEach((s) => map.set(s.name.toLowerCase(), s));
+              dbSups.forEach((d: any) => {
+                const key = d.nome.toLowerCase();
+                const existing = map.get(key);
+                if (existing) {
+                  map.set(key, { ...existing, dbId: d.id, senha: d.senha || existing.senha });
+                } else {
+                  map.set(key, {
+                    id: `sup-db-${d.id}`,
+                    dbId: d.id,
+                    name: d.nome,
+                    senha: d.senha || undefined,
+                    email: `${d.nome.toLowerCase().replace(/\s+/g, '.')}@praonde.com`,
+                    role: 'geral',
+                    status: 'ativo',
+                    createdAt: d.criadoEm ? d.criadoEm.split('T')[0] : '2026-09-10',
+                  });
+                }
+              });
+              return Array.from(map.values());
+            });
+          }
+        }
+      } catch (err) {
+        console.warn('Erro ao sincronizar supervisores do SQLite:', err);
+      }
+    };
+    fetchSupervisorsFromDb();
+  }, [isOpen]);
 
   // Save supervisors to localStorage
   useEffect(() => {
@@ -208,17 +266,26 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   // Reset state on open/close
   useEffect(() => {
     if (!isOpen) {
-      setIsAuthenticated(true);
+      setIsAuthenticated(false);
+      setIsMasterAdmin(false);
+      setAuthenticatedUser('');
+      setIsVerifying(false);
       setPasswordInput('');
       setShowPassword(false);
       setErrorMessage('');
       setCurrentView('menu');
+      setMasterPromptTarget(null);
+      setMasterPromptPin('');
+      setMasterPromptError('');
+      setShowMasterPromptPin(false);
       setNewPin('');
       setConfirmPin('');
       setPinFeedback(null);
       setNewCategoryName('');
       setCategoryFeedback(null);
       setSupFeedback(null);
+      setEditingSupervisorId(null);
+      setSupName('');
       setSupPassword('');
       setShowSupPassword(false);
       setCityFeedback(null);
@@ -259,8 +326,8 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     return list;
   }, [categories, categoryItems, events]);
 
-  // Handle password submission
-  const handlePasswordSubmit = (e?: React.FormEvent) => {
+  // Handle password submission (Validação da Senha Master "0612" ou senha cadastrada na tabela supervisor)
+  const handlePasswordSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     const stored = getStoredPin();
     const cleaned = passwordInput.trim();
@@ -270,13 +337,98 @@ export const AdminModal: React.FC<AdminModalProps> = ({
       return;
     }
 
+    setIsVerifying(true);
+    setErrorMessage('');
+
+    // 1. Senha Master Padrão (0612) ou personalizada
     if (cleaned === stored || cleaned === INITIAL_PIN) {
+      setAuthenticatedUser('Administrador Master');
       setIsAuthenticated(true);
+      setIsMasterAdmin(true);
       setCurrentView('menu');
       setErrorMessage('');
       setPasswordInput('');
+      setIsVerifying(false);
+      return;
+    }
+
+    // 2. Senha de supervisor cadastrada localmente/em memória
+    const matchedSupervisor = supervisors.find(
+      (s) => s.senha && s.senha.trim() === cleaned && s.status !== 'inativo'
+    );
+    if (matchedSupervisor) {
+      setAuthenticatedUser(`Supervisor: ${matchedSupervisor.name}`);
+      setIsAuthenticated(true);
+      setIsMasterAdmin(false);
+      setCurrentView('menu');
+      setErrorMessage('');
+      setPasswordInput('');
+      setIsVerifying(false);
+      return;
+    }
+
+    // 3. Senha cadastrada na tabela supervisor do banco de dados SQLite
+    try {
+      const res = await fetch('/api/admin/verify-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: cleaned }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAuthenticatedUser(data.user ? `Supervisor: ${data.user}` : 'Supervisor');
+        setIsAuthenticated(true);
+        setIsMasterAdmin(false);
+        setCurrentView('menu');
+        setErrorMessage('');
+        setPasswordInput('');
+        setIsVerifying(false);
+        return;
+      }
+    } catch (err) {
+      console.warn('Erro ao consultar verificação de senha no servidor:', err);
+    }
+
+    setIsVerifying(false);
+    setErrorMessage('Senha incorreta. Verifique a senha e tente novamente.');
+  };
+
+  // Validação das opções restritas à senha "0612" (Categorias, Supervisores, Cidades)
+  const handleOpenOption = (view: AdminPageView) => {
+    if (view === 'liberar_eventos') {
+      setCurrentView('liberar_eventos');
+      return;
+    }
+
+    // "Cadastrar Categoria", "Cadastrar Supervisor", "Cadastrar Cidades", "Alterar Senha"
+    if (!isMasterAdmin) {
+      setMasterPromptTarget(view);
+      setMasterPromptPin('');
+      setMasterPromptError('');
+      setShowMasterPromptPin(false);
+      return;
+    }
+
+    setCurrentView(view);
+  };
+
+  // Verificação no prompt modal quando supervisor tenta acessar opção restrita
+  const handleVerifyMasterPrompt = (e: React.FormEvent) => {
+    e.preventDefault();
+    const stored = getStoredPin();
+    const cleaned = masterPromptPin.trim();
+
+    if (cleaned === INITIAL_PIN || cleaned === stored) {
+      setIsMasterAdmin(true);
+      setAuthenticatedUser('Administrador Master');
+      if (masterPromptTarget) {
+        setCurrentView(masterPromptTarget);
+      }
+      setMasterPromptTarget(null);
+      setMasterPromptPin('');
+      setMasterPromptError('');
     } else {
-      setErrorMessage('Senha incorreta. A senha inicial padrão é 0612.');
+      setMasterPromptError('Senha incorreta. Acesso não autorizado.');
     }
   };
 
@@ -314,10 +466,10 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   };
 
   const handleResetDefaultPin = () => {
-    if (window.confirm('Deseja realmente restaurar a senha inicial para "0612"?')) {
+    if (window.confirm('Deseja realmente restaurar a senha inicial padrão?')) {
       try {
         localStorage.setItem(ADMIN_PIN_KEY, INITIAL_PIN);
-        setPinFeedback({ type: 'success', msg: 'Senha restaurada para o padrão inicial "0612" com sucesso!' });
+        setPinFeedback({ type: 'success', msg: 'Senha restaurada para o padrão inicial com sucesso!' });
       } catch {
         setPinFeedback({ type: 'error', msg: 'Erro ao restaurar a senha.' });
       }
@@ -345,7 +497,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     setNewCategoryName('');
   };
 
-  // Handle Cadastrar Supervisor
+  // Handle Cadastrar ou Atualizar Supervisor
   const handleCreateSupervisor = async (e: React.FormEvent) => {
     e.preventDefault();
     setSupFeedback(null);
@@ -359,6 +511,55 @@ export const AdminModal: React.FC<AdminModalProps> = ({
       return;
     }
 
+    // Se estiver em modo de ATUALIZAÇÃO:
+    if (editingSupervisorId) {
+      const target = supervisors.find((s) => s.id === editingSupervisorId);
+      if (target?.dbId) {
+        try {
+          await fetch(`/api/supervisors/${target.dbId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              nome: supName.trim(),
+              senha: supPassword.trim() || null,
+            }),
+          });
+        } catch (err) {
+          console.warn('Erro ao atualizar supervisor no SQLite:', err);
+        }
+      }
+
+      setSupervisors((prev) =>
+        prev.map((s) =>
+          s.id === editingSupervisorId
+            ? {
+                ...s,
+                name: supName.trim(),
+                senha: supPassword.trim() || undefined,
+                email: supEmail.trim(),
+                phone: supPhone.trim() || undefined,
+                city: supCity.trim() || undefined,
+                state: supState,
+                role: supRole,
+              }
+            : s
+        )
+      );
+
+      setSupFeedback({
+        type: 'success',
+        msg: `Supervisor(a) "${supName}" atualizado(a) com sucesso!`,
+      });
+      setEditingSupervisorId(null);
+      setSupName('');
+      setSupPassword('');
+      setSupEmail('');
+      setSupPhone('');
+      setSupCity('');
+      return;
+    }
+
+    // Modo de CADASTRO NOVO:
     if (supervisors.some((s) => s.email.toLowerCase() === supEmail.trim().toLowerCase())) {
       setSupFeedback({ type: 'error', msg: 'Já existe um supervisor cadastrado com este e-mail.' });
       return;
@@ -399,13 +600,35 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     setSupervisors((prev) => [newSupervisor, ...prev]);
     setSupFeedback({
       type: 'success',
-      msg: `Supervisor(a) "${supName}" cadastrado(a) com sucesso no banco de dados! ${sqliteId ? `(ID ${sqliteId})` : ''}`,
+      msg: `Supervisor(a) "${supName}" cadastrado(a) com sucesso! Senha configurada para login. ${sqliteId ? `(ID no banco: ${sqliteId})` : ''}`,
     });
     setSupName('');
     setSupPassword('');
     setSupEmail('');
     setSupPhone('');
     setSupCity('');
+  };
+
+  const handleStartEditSupervisor = (sup: Supervisor) => {
+    setEditingSupervisorId(sup.id);
+    setSupName(sup.name);
+    setSupPassword(sup.senha || '');
+    setSupEmail(sup.email);
+    setSupPhone(sup.phone || '');
+    setSupCity(sup.city || '');
+    setSupState(sup.state || 'SP');
+    setSupRole(sup.role);
+    setSupFeedback(null);
+  };
+
+  const handleCancelEditSupervisor = () => {
+    setEditingSupervisorId(null);
+    setSupName('');
+    setSupPassword('');
+    setSupEmail('');
+    setSupPhone('');
+    setSupCity('');
+    setSupFeedback(null);
   };
 
   const handleDeleteSupervisor = async (id: string) => {
@@ -478,15 +701,18 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
   // Categorias disponíveis para o Grid de Liberar Eventos já calculadas no topo
 
-  // Counts for Event Liberation
-  const totalApproved = events.filter((e) => e.liberado === 'S' || !e.liberado).length;
-  const totalPending = events.filter((e) => e.liberado === 'N').length;
+  // Counts for Event Liberation - pendentes são os eventos com campo liberar igual a "" ou "N"
+  const totalPending = events.filter((e) => !e.liberado || e.liberado === '' || e.liberado === 'N').length;
+  const totalApproved = events.filter((e) => e.liberado === 'S').length;
 
   // Filtered events for "Liberar Eventos"
+  // Por padrão (eventFilterStatus === 'pending') traz apenas os eventos com o campo liberar igual "" ou "N"
   const filteredEventsForLiberation = events.filter((evt) => {
-    const isLiberado = evt.liberado === 'S' || !evt.liberado;
-    if (eventFilterStatus === 'pending' && isLiberado) return false;
-    if (eventFilterStatus === 'approved' && !isLiberado) return false;
+    const isPending = !evt.liberado || evt.liberado === '' || evt.liberado === 'N';
+    const isApproved = evt.liberado === 'S';
+
+    if (eventFilterStatus === 'pending' && !isPending) return false;
+    if (eventFilterStatus === 'approved' && !isApproved) return false;
 
     if (selectedCategoryForLiberation !== 'Todas') {
       const selNorm = selectedCategoryForLiberation.toLowerCase().trim();
@@ -497,9 +723,41 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     return true;
   });
 
+  const handleSaveLiberation = async (id: string, nextLiberado: 'S' | 'N') => {
+    if (onSetLiberado) {
+      await onSetLiberado(id, nextLiberado);
+    } else if (onToggleLiberado) {
+      const currentEvt = events.find((e) => e.id === id);
+      const current = currentEvt?.liberado || '';
+      if (current !== nextLiberado) {
+        onToggleLiberado(id, current);
+      }
+    }
+    // Atualiza o item atualmente selecionado em análise se ainda for o mesmo
+    setSelectedEventForAnalysis((prev) => (prev && prev.id === id ? { ...prev, liberado: nextLiberado } : prev));
+  };
+
+  const currentIndexInAnalysis = selectedEventForAnalysis 
+    ? filteredEventsForLiberation.findIndex((e) => e.id === selectedEventForAnalysis.id)
+    : -1;
+  const hasPrevAnalysis = currentIndexInAnalysis > 0;
+  const hasNextAnalysis = currentIndexInAnalysis >= 0 && currentIndexInAnalysis < filteredEventsForLiberation.length - 1;
+
+  const handleNextAnalysis = () => {
+    if (hasNextAnalysis) {
+      setSelectedEventForAnalysis(filteredEventsForLiberation[currentIndexInAnalysis + 1]);
+    }
+  };
+
+  const handlePrevAnalysis = () => {
+    if (hasPrevAnalysis) {
+      setSelectedEventForAnalysis(filteredEventsForLiberation[currentIndexInAnalysis - 1]);
+    }
+  };
+
   const handleLiberateAllPending = () => {
-    if (!onToggleLiberado) return;
-    const pendingEvents = filteredEventsForLiberation.filter((e) => e.liberado === 'N');
+    if (!onSetLiberado && !onToggleLiberado) return;
+    const pendingEvents = filteredEventsForLiberation.filter((e) => !e.liberado || e.liberado === '' || e.liberado === 'N');
     if (pendingEvents.length === 0) return;
 
     const label = selectedCategoryForLiberation !== 'Todas'
@@ -508,7 +766,11 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
     if (window.confirm(`Deseja liberar ${label} agora?`)) {
       pendingEvents.forEach((evt) => {
-        onToggleLiberado(evt.id, 'N');
+        if (onSetLiberado) {
+          onSetLiberado(evt.id, 'S');
+        } else if (onToggleLiberado) {
+          onToggleLiberado(evt.id, evt.liberado || 'N');
+        }
       });
     }
   };
@@ -561,47 +823,46 @@ export const AdminModal: React.FC<AdminModalProps> = ({
             </div>
             <h2 className="text-xl font-bold text-white mb-1">Acesso Administrativo</h2>
             <p className="text-xs text-slate-400">
-              Digite a senha de acesso (até 6 dígitos)
+              Senha do Supervisor
             </p>
           </div>
 
           <form onSubmit={handlePasswordSubmit} className="space-y-4">
             <div>
               <label htmlFor="admin-password-input" className="block text-xs font-semibold text-slate-300 mb-2">
-                Senha de Acesso
+                Senha do Supervisor
               </label>
               <div className="relative">
                 <input
                   id="admin-password-input"
                   type={showPassword ? 'text' : 'password'}
-                  maxLength={6}
-                  inputMode="numeric"
+                  maxLength={12}
                   autoFocus
+                  disabled={isVerifying}
                   value={passwordInput}
                   onChange={(e) => {
-                    const val = e.target.value.slice(0, 6);
-                    setPasswordInput(val);
+                    setPasswordInput(e.target.value);
                     if (errorMessage) setErrorMessage('');
                   }}
-                  placeholder="••••"
-                  className="w-full text-center text-2xl tracking-[0.4em] font-mono py-3.5 px-12 bg-slate-950 border border-slate-700 rounded-xl text-white placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500 transition-all"
+                  placeholder="••••••"
+                  className="w-full text-center text-xl tracking-[0.25em] font-mono py-3.5 px-12 bg-slate-950 border border-slate-700 rounded-xl text-white placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500 transition-all disabled:opacity-50"
                 />
                 <button
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white p-1 transition-colors"
+                  className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white p-1 transition-colors cursor-pointer"
                   title={showPassword ? 'Ocultar senha' : 'Exibir senha'}
                 >
                   {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
               </div>
 
-              {/* Indicadores de até 6 dígitos */}
-              <div className="flex items-center justify-center gap-2 mt-3">
+              {/* Indicadores de digitação */}
+              <div className="flex items-center justify-center gap-1.5 mt-3">
                 {[0, 1, 2, 3, 4, 5].map((index) => (
                   <span
                     key={index}
-                    className={`w-2.5 h-2.5 rounded-full transition-all duration-150 ${
+                    className={`w-2 h-2 rounded-full transition-all duration-150 ${
                       index < passwordInput.length
                         ? 'bg-amber-400 scale-110 shadow-sm shadow-amber-400/50'
                         : 'bg-slate-800'
@@ -611,7 +872,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
               </div>
 
               {errorMessage && (
-                <div className="flex items-center gap-2 text-xs text-rose-400 mt-3 bg-rose-500/10 border border-rose-500/20 px-3 py-2.5 rounded-xl">
+                <div className="flex items-center gap-2 text-xs text-rose-400 mt-3 bg-rose-500/10 border border-rose-500/20 px-3 py-2.5 rounded-xl animate-in fade-in duration-150">
                   <AlertCircle className="w-4 h-4 flex-shrink-0" />
                   <span>{errorMessage}</span>
                 </div>
@@ -629,18 +890,12 @@ export const AdminModal: React.FC<AdminModalProps> = ({
               <button
                 id="btn-admin-submit-login"
                 type="submit"
-                className="flex-1 py-3 px-4 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 text-xs font-bold shadow-md shadow-amber-500/20 transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                disabled={isVerifying}
+                className="flex-1 py-3 px-4 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 text-xs font-bold shadow-md shadow-amber-500/20 transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-60"
               >
                 <KeyRound className="w-4 h-4" />
-                <span>Entrar</span>
+                <span>{isVerifying ? 'Verificando...' : 'Acessar'}</span>
               </button>
-            </div>
-
-            <div className="text-center pt-2">
-              <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-[11px] text-amber-300">
-                <span>Senha inicial de acesso:</span>
-                <strong className="font-mono text-amber-200">0612</strong>
-              </div>
             </div>
           </form>
         </div>
@@ -649,7 +904,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   }
 
   // =========================================================================
-  // TELA AUTENTICADA: MENU COM OS 4 BOTÕES SOLICITADOS:
+  // TELA AUTENTICADA: CADASTRO E ATUALIZAÇÃO
   // 1. Cadastrar Categoria
   // 2. Cadastrar Supervisor
   // 3. Cadastrar Cidades
@@ -660,38 +915,48 @@ export const AdminModal: React.FC<AdminModalProps> = ({
       <div className="relative w-full max-w-5xl max-h-[94vh] bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-in fade-in duration-200">
         
         {/* Top Header */}
-        <div className="flex items-center justify-between px-4 sm:px-6 py-3.5 border-b border-slate-800 bg-slate-950/70">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 shadow-inner">
+        <div className="flex items-center justify-between gap-2 px-4 sm:px-6 py-3.5 border-b border-slate-800 bg-slate-950/70 shrink-0">
+          <div className="flex items-center gap-3 min-w-0 flex-1">
+            <div className="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 shadow-inner shrink-0">
               <ShieldCheck className="w-5 h-5" />
             </div>
-            <div>
+            <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
-                <h2 className="text-base sm:text-lg font-bold text-white">Painel Administrativo</h2>
-                <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-md bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                  Autenticado
+                <h2 className="text-sm sm:text-lg font-bold text-white truncate">
+                  Administração - Cadastro & Atualização
+                </h2>
+                <span className={`text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-md border shrink-0 ${
+                  isMasterAdmin
+                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                    : 'bg-sky-500/20 text-sky-300 border-sky-500/30'
+                }`}>
+                  {authenticatedUser || (isMasterAdmin ? 'Administrador Master' : 'Supervisor')}
                 </span>
               </div>
-              <p className="text-[11px] sm:text-xs text-slate-400">
-                Gerenciamento de categorias, supervisores, cidades e eventos
+              <p className="text-[11px] sm:text-xs text-slate-400 truncate hidden xs:block sm:block">
+                Cadastro e atualização de categorias, supervisores, cidades e eventos
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            {currentView !== 'menu' && (
-              <button
-                onClick={() => setCurrentView('menu')}
-                className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-xs font-semibold border border-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer"
-              >
-                <ArrowLeft className="w-3.5 h-3.5" />
-                <span>Voltar ao Menu</span>
-              </button>
-            )}
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => {
+                setIsAuthenticated(false);
+                setIsMasterAdmin(false);
+                setAuthenticatedUser('');
+                setMasterPromptTarget(null);
+              }}
+              className="px-2.5 py-1.5 rounded-xl bg-slate-800/80 hover:bg-rose-500/20 text-slate-300 hover:text-rose-300 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
+              title="Bloquear / Trocar de usuário"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Sair</span>
+            </button>
 
             <button
               onClick={onClose}
-              className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+              className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer shrink-0"
               title="Fechar painel"
             >
               <X className="w-5 h-5" />
@@ -705,9 +970,9 @@ export const AdminModal: React.FC<AdminModalProps> = ({
           {/* =========================================================================
               VIEW: MENU PRINCIPAL COM OS 4 BOTÕES SOLICITADOS:
               1. "Liberar Eventos"
-              2. "Cadastrar Categoria"
-              3. "Cadastrar Supervisor"
-              4. "Cadastrar Cidades"
+              2. "Cadastrar Categoria" (Exclusivo Senha 0612)
+              3. "Cadastrar Supervisor" (Exclusivo Senha 0612)
+              4. "Cadastrar Cidades" (Exclusivo Senha 0612)
               ========================================================================= */}
           {currentView === 'menu' && (
             <div className="max-w-4xl mx-auto py-2 sm:py-4 space-y-6">
@@ -739,7 +1004,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                     Liberar Eventos
                   </h4>
                   <p className="text-xs text-slate-400 leading-relaxed flex-1">
-                    Aprove ou pause eventos ({totalApproved} liberados, {totalPending} pendentes).
+                    Aprove ou pause eventos ({totalPending} pendentes para análise, {totalApproved} liberados).
                   </p>
                   <div className="mt-4 inline-flex items-center gap-1 text-xs font-bold text-emerald-400">
                     <span>Acessar</span>
@@ -750,7 +1015,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                 {/* BOTÃO 2: CADASTRAR CATEGORIA */}
                 <button
                   id="btn-admin-cadastrar-categoria"
-                  onClick={() => setCurrentView('categories')}
+                  onClick={() => handleOpenOption('categories')}
                   className="group relative flex flex-col items-center text-center p-5 rounded-2xl bg-gradient-to-b from-slate-800/80 to-slate-950 border border-slate-700/80 hover:border-indigo-500/60 hover:shadow-xl hover:shadow-indigo-500/10 transition-all duration-200 cursor-pointer"
                 >
                   <div className="w-14 h-14 rounded-2xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-400 group-hover:scale-105 group-hover:bg-indigo-500/25 transition-all mb-3 shadow-inner">
@@ -771,7 +1036,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                 {/* BOTÃO 3: CADASTRAR SUPERVISOR */}
                 <button
                   id="btn-admin-cadastrar-supervisor"
-                  onClick={() => setCurrentView('supervisors')}
+                  onClick={() => handleOpenOption('supervisors')}
                   className="group relative flex flex-col items-center text-center p-5 rounded-2xl bg-gradient-to-b from-slate-800/80 to-slate-950 border border-slate-700/80 hover:border-sky-500/60 hover:shadow-xl hover:shadow-sky-500/10 transition-all duration-200 cursor-pointer"
                 >
                   <div className="w-14 h-14 rounded-2xl bg-sky-500/15 border border-sky-500/30 flex items-center justify-center text-sky-400 group-hover:scale-105 group-hover:bg-sky-500/25 transition-all mb-3 shadow-inner">
@@ -792,7 +1057,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                 {/* BOTÃO 4: CADASTRAR CIDADES */}
                 <button
                   id="btn-admin-cadastrar-cidades"
-                  onClick={() => setCurrentView('cities')}
+                  onClick={() => handleOpenOption('cities')}
                   className="group relative flex flex-col items-center text-center p-5 rounded-2xl bg-gradient-to-b from-slate-800/80 to-slate-950 border border-slate-700/80 hover:border-amber-500/60 hover:shadow-xl hover:shadow-amber-500/10 transition-all duration-200 cursor-pointer"
                 >
                   <div className="w-14 h-14 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 group-hover:scale-105 group-hover:bg-amber-500/25 transition-all mb-3 shadow-inner">
@@ -816,7 +1081,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
               <div className="pt-4 border-t border-slate-800/80 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-400">
                 <div className="flex items-center gap-3">
                   <button
-                    onClick={() => setCurrentView('passwords')}
+                    onClick={() => handleOpenOption('passwords')}
                     className="flex items-center gap-1.5 text-amber-400 hover:text-amber-300 hover:underline cursor-pointer"
                   >
                     <KeyRound className="w-3.5 h-3.5" />
@@ -837,6 +1102,100 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   <span>Abrir Console SQL</span>
                 </button>
               </div>
+
+              {/* Modal de Desbloqueio com Senha "0612" */}
+              {masterPromptTarget && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs animate-in fade-in duration-150">
+                  <div className="w-full max-w-sm bg-slate-900 border border-amber-500/40 rounded-2xl shadow-2xl p-5 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2.5 text-amber-400">
+                        <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center">
+                          <Lock className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h4 className="text-sm font-bold text-white">Acesso Restrito</h4>
+                          <p className="text-[11px] text-slate-400">Exclusivo Administrador Master</p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMasterPromptTarget(null);
+                          setMasterPromptPin('');
+                          setMasterPromptError('');
+                        }}
+                        className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
+                        title="Fechar"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-slate-300 leading-relaxed">
+                      A opção <strong className="text-amber-300 font-semibold">{
+                        masterPromptTarget === 'categories' ? 'Cadastrar Categoria' :
+                        masterPromptTarget === 'supervisors' ? 'Cadastrar Supervisor' :
+                        masterPromptTarget === 'cities' ? 'Cadastrar Cidades' : 'Alterar Senha'
+                      }</strong> requer autorização do Administrador Geral. Digite a senha para continuar:
+                    </div>
+
+                    <form onSubmit={handleVerifyMasterPrompt} className="space-y-3">
+                      <div>
+                        <label className="block text-[11px] font-semibold text-slate-300 mb-1.5">
+                          Informe a senha de acesso:
+                        </label>
+                        <div className="relative">
+                          <input
+                            type={showMasterPromptPin ? 'text' : 'password'}
+                            autoFocus
+                            value={masterPromptPin}
+                            onChange={(e) => {
+                              setMasterPromptPin(e.target.value);
+                              setMasterPromptError('');
+                            }}
+                            placeholder="Digite a senha"
+                            className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white text-sm focus:border-amber-500 focus:outline-hidden font-mono tracking-widest text-center"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowMasterPromptPin(!showMasterPromptPin)}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition-colors cursor-pointer"
+                          >
+                            {showMasterPromptPin ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                          </button>
+                        </div>
+                      </div>
+
+                      {masterPromptError && (
+                        <div className="p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+                          <AlertCircle className="w-4 h-4 shrink-0" />
+                          <span>{masterPromptError}</span>
+                        </div>
+                      )}
+
+                      <div className="flex items-center gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMasterPromptTarget(null);
+                            setMasterPromptPin('');
+                            setMasterPromptError('');
+                          }}
+                          className="flex-1 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold border border-slate-700 transition-colors cursor-pointer"
+                        >
+                          Cancelar
+                        </button>
+                        <button
+                          type="submit"
+                          className="flex-1 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold transition-all shadow-md shadow-amber-500/20 cursor-pointer"
+                        >
+                          Confirmar
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -845,16 +1204,18 @@ export const AdminModal: React.FC<AdminModalProps> = ({
               ========================================================================= */}
           {currentView === 'categories' && (
             <div className="max-w-3xl mx-auto space-y-6">
-              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-                <div className="flex items-center gap-2">
-                  <Layers className="w-5 h-5 text-indigo-400" />
-                  <h3 className="text-base font-bold text-white">Cadastrar Categoria</h3>
+              <div className="flex items-center justify-between gap-3 pb-3 border-b border-slate-800">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Layers className="w-5 h-5 text-indigo-400 shrink-0" />
+                  <h3 className="text-sm sm:text-base font-bold text-white truncate">Cadastrar Categoria</h3>
                 </div>
                 <button
+                  id="btn-category-back"
                   onClick={() => setCurrentView('menu')}
-                  className="text-xs text-slate-400 hover:text-white flex items-center gap-1 transition-colors cursor-pointer"
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-xs font-semibold border border-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-sm"
+                  title="Voltar ao Menu"
                 >
-                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <ArrowLeft className="w-3.5 h-3.5 text-indigo-400" />
                   <span>Voltar</span>
                 </button>
               </div>
@@ -962,27 +1323,49 @@ export const AdminModal: React.FC<AdminModalProps> = ({
               ========================================================================= */}
           {currentView === 'supervisors' && (
             <div className="max-w-3xl mx-auto space-y-6">
-              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-                <div className="flex items-center gap-2">
-                  <UserCheck className="w-5 h-5 text-sky-400" />
-                  <h3 className="text-base font-bold text-white">Cadastrar Supervisor</h3>
+              <div className="flex items-center justify-between gap-3 pb-3 border-b border-slate-800">
+                <div className="flex items-center gap-2 min-w-0">
+                  <UserCheck className="w-5 h-5 text-sky-400 shrink-0" />
+                  <h3 className="text-sm sm:text-base font-bold text-white truncate">Cadastrar & Atualizar Supervisor</h3>
                 </div>
                 <button
+                  id="btn-supervisors-back"
                   onClick={() => setCurrentView('menu')}
-                  className="text-xs text-slate-400 hover:text-white flex items-center gap-1 transition-colors cursor-pointer"
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-xs font-semibold border border-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-sm"
+                  title="Voltar ao Menu"
                 >
-                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <ArrowLeft className="w-3.5 h-3.5 text-sky-400" />
                   <span>Voltar</span>
                 </button>
               </div>
 
-              {/* Formulário de Cadastro de Supervisor */}
+              {/* Formulário de Cadastro e Atualização de Supervisor */}
               <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-5 space-y-4">
-                <div>
-                  <h4 className="text-sm font-bold text-white mb-1">Novo Supervisor</h4>
-                  <p className="text-xs text-slate-400">
-                    Cadastre os dados do supervisor regional ou geral responsável pela gestão e conferência dos eventos.
-                  </p>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h4 className="text-sm font-bold text-white mb-1 flex items-center gap-2">
+                      <span>{editingSupervisorId ? 'Atualizar Supervisor' : 'Novo Supervisor'}</span>
+                      {editingSupervisorId && (
+                        <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                          Modo Edição
+                        </span>
+                      )}
+                    </h4>
+                    <p className="text-xs text-slate-400">
+                      {editingSupervisorId 
+                        ? 'Atualize o nome, email, telefone ou redefina a senha de acesso deste supervisor.' 
+                        : 'Cadastre os dados e a senha de acesso do supervisor para conferência e validação.'}
+                    </p>
+                  </div>
+                  {editingSupervisorId && (
+                    <button
+                      type="button"
+                      onClick={handleCancelEditSupervisor}
+                      className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium cursor-pointer"
+                    >
+                      Cancelar Edição
+                    </button>
+                  )}
                 </div>
 
                 <form onSubmit={handleCreateSupervisor} className="space-y-3">
@@ -999,13 +1382,15 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                     </div>
 
                     <div>
-                      <label className="block text-xs font-semibold text-slate-300 mb-1">Senha de Acesso (opcional)</label>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">
+                        {editingSupervisorId ? 'Nova Senha de Acesso (ou mantenha atual)' : 'Senha de Acesso (para entrar na administração)'}
+                      </label>
                       <div className="relative">
                         <input
                           type={showSupPassword ? 'text' : 'password'}
                           value={supPassword}
                           onChange={(e) => setSupPassword(e.target.value)}
-                          placeholder="Ex: 123456"
+                          placeholder={editingSupervisorId ? 'Digite para alterar a senha' : 'Ex: 123456'}
                           className="w-full pl-3 pr-9 py-2 bg-slate-900 border border-slate-700 rounded-xl text-white text-xs focus:outline-none focus:ring-2 focus:ring-sky-500"
                         />
                         <button
@@ -1086,13 +1471,26 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                     </div>
                   )}
 
-                  <div className="flex justify-end pt-1">
+                  <div className="flex justify-end gap-2 pt-1">
+                    {editingSupervisorId && (
+                      <button
+                        type="button"
+                        onClick={handleCancelEditSupervisor}
+                        className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold transition-colors cursor-pointer"
+                      >
+                        Cancelar
+                      </button>
+                    )}
                     <button
                       type="submit"
-                      className="px-5 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold shadow-md shadow-sky-600/20 flex items-center gap-1.5 transition-all cursor-pointer"
+                      className={`px-5 py-2.5 rounded-xl text-white text-xs font-bold shadow-md flex items-center gap-1.5 transition-all cursor-pointer ${
+                        editingSupervisorId
+                          ? 'bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 shadow-amber-500/20'
+                          : 'bg-sky-600 hover:bg-sky-500 shadow-sky-600/20'
+                      }`}
                     >
-                      <Plus className="w-4 h-4" />
-                      <span>Cadastrar Supervisor</span>
+                      {editingSupervisorId ? <Check className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
+                      <span>{editingSupervisorId ? 'Salvar Atualização' : 'Cadastrar Supervisor'}</span>
                     </button>
                   </div>
                 </form>
@@ -1160,6 +1558,14 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
                         <div className="flex items-center gap-2 self-end sm:self-center">
                           <button
+                            onClick={() => handleStartEditSupervisor(sup)}
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-sky-400 hover:bg-sky-500/10 transition-colors cursor-pointer"
+                            title="Editar dados e senha do supervisor"
+                          >
+                            <Edit2 className="w-3.5 h-3.5" />
+                          </button>
+
+                          <button
                             onClick={() => handleToggleSupervisorStatus(sup.id)}
                             className={`px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer transition-colors ${
                               sup.status === 'ativo'
@@ -1191,16 +1597,18 @@ export const AdminModal: React.FC<AdminModalProps> = ({
               ========================================================================= */}
           {currentView === 'cities' && (
             <div className="max-w-3xl mx-auto space-y-6">
-              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-                <div className="flex items-center gap-2">
-                  <Building2 className="w-5 h-5 text-amber-400" />
-                  <h3 className="text-base font-bold text-white">Cadastrar Cidades</h3>
+              <div className="flex items-center justify-between gap-3 pb-3 border-b border-slate-800">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Building2 className="w-5 h-5 text-amber-400 shrink-0" />
+                  <h3 className="text-sm sm:text-base font-bold text-white truncate">Cadastrar Cidades</h3>
                 </div>
                 <button
+                  id="btn-cities-back"
                   onClick={() => setCurrentView('menu')}
-                  className="text-xs text-slate-400 hover:text-white flex items-center gap-1 transition-colors cursor-pointer"
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-xs font-semibold border border-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-sm"
+                  title="Voltar ao Menu"
                 >
-                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <ArrowLeft className="w-3.5 h-3.5 text-amber-400" />
                   <span>Voltar</span>
                 </button>
               </div>
@@ -1357,73 +1765,77 @@ export const AdminModal: React.FC<AdminModalProps> = ({
           {currentView === 'liberar_eventos' && (
             <div className="space-y-4">
               <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                  <div>
-                    <h3 className="text-base font-bold text-white">Liberar Eventos</h3>
-                    <p className="text-xs text-slate-400">
-                      Alterne o status de liberação de cada evento para definir sua exibição no aplicativo
+                <div className="flex items-center gap-2 min-w-0">
+                  <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+                  <div className="min-w-0">
+                    <h3 className="text-sm sm:text-base font-bold text-white truncate">Liberar Eventos</h3>
+                    <p className="text-xs text-slate-400 hidden sm:block">
+                      Fila de análise e moderação • Clique em qualquer item do grid para visualizar a imagem e definir se a publicação será liberada
                     </p>
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2">
-                  {totalPending > 0 && onToggleLiberado && (
+                <div className="flex items-center gap-2 flex-wrap shrink-0">
+                  {totalPending > 0 && (onSetLiberado || onToggleLiberado) && (
                     <button
                       onClick={handleLiberateAllPending}
-                      className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md shadow-emerald-600/20 transition-all cursor-pointer"
+                      className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md shadow-emerald-600/20 transition-all cursor-pointer shrink-0"
                     >
                       <Check className="w-3.5 h-3.5" />
-                      <span>Liberar Todos os Pendentes ({totalPending})</span>
+                      <span>Liberar Pendentes ({totalPending})</span>
                     </button>
                   )}
 
                   <button
+                    id="btn-liberar-back"
                     onClick={() => setCurrentView('menu')}
-                    className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition-colors cursor-pointer"
+                    className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-xs font-semibold border border-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-sm"
+                    title="Voltar ao Menu"
                   >
-                    Voltar ao Menu
+                    <ArrowLeft className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Voltar</span>
                   </button>
                 </div>
               </div>
 
               {/* Status Counters & Filters */}
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 bg-slate-950/50 p-3 rounded-xl border border-slate-800">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-semibold text-slate-400 mr-1">Status:</span>
-                  <button
-                    onClick={() => setEventFilterStatus('all')}
-                    className={`px-3 py-1 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
-                      eventFilterStatus === 'all'
-                        ? 'bg-amber-500 text-slate-950'
-                        : 'text-slate-400 hover:text-white hover:bg-slate-800'
-                    }`}
-                  >
-                    Todos ({events.length})
-                  </button>
-
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs font-semibold text-slate-400 mr-1">Filtro:</span>
+                  
                   <button
                     onClick={() => setEventFilterStatus('pending')}
-                    className={`px-3 py-1 rounded-lg text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5 ${
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
                       eventFilterStatus === 'pending'
-                        ? 'bg-rose-500 text-white'
+                        ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20 ring-2 ring-amber-500/40'
                         : 'text-slate-400 hover:text-white hover:bg-slate-800'
                     }`}
                   >
-                    <AlertCircle className="w-3.5 h-3.5 text-rose-400" />
-                    <span>Pendentes ({totalPending})</span>
+                    <AlertCircle className="w-3.5 h-3.5" />
+                    <span>Pendentes (liberar = "" ou "N") ({totalPending})</span>
                   </button>
 
                   <button
                     onClick={() => setEventFilterStatus('approved')}
-                    className={`px-3 py-1 rounded-lg text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5 ${
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5 ${
                       eventFilterStatus === 'approved'
-                        ? 'bg-emerald-500 text-slate-950'
+                        ? 'bg-emerald-500 text-slate-950 ring-2 ring-emerald-500/40'
                         : 'text-slate-400 hover:text-white hover:bg-slate-800'
                     }`}
                   >
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Liberados ({totalApproved})</span>
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>Já Liberados (S) ({totalApproved})</span>
+                  </button>
+
+                  <button
+                    onClick={() => setEventFilterStatus('all')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                      eventFilterStatus === 'all'
+                        ? 'bg-slate-700 text-white ring-2 ring-slate-600'
+                        : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                    }`}
+                  >
+                    Todos ({events.length})
                   </button>
                 </div>
 
@@ -1445,7 +1857,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                     <LayoutGrid className="w-4 h-4 text-amber-400" />
                     <span>Grid de Categorias</span>
                     <span className="text-slate-400 font-normal hidden sm:inline">
-                      (Clique em uma categoria para filtrar a lista de eventos abaixo)
+                      (Clique para filtrar os eventos pendentes por categoria)
                     </span>
                   </div>
                   {selectedCategoryForLiberation !== 'Todas' && (
@@ -1468,19 +1880,19 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   >
                     <div className="flex items-center justify-between gap-1 mb-1">
                       <span className="text-[10px] font-bold font-mono text-amber-400/90 uppercase">TODAS</span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 font-semibold">
-                        {events.length}
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-amber-300 font-semibold">
+                        {totalPending} pend.
                       </span>
                     </div>
                     <div className="text-xs font-bold text-white truncate">Todas as Categorias</div>
-                    <div className="text-[10px] text-slate-400 mt-1">Todos os eventos</div>
+                    <div className="text-[10px] text-slate-400 mt-1">{totalPending} pendentes</div>
                   </button>
 
                   {/* Cards de cada Categoria */}
                   {allCategoriesForLiberation.map((cat) => {
                     const isSelected = selectedCategoryForLiberation.toLowerCase().trim() === cat.name.toLowerCase().trim();
-                    const count = events.filter((e) => (e.category || '').toLowerCase().trim() === cat.name.toLowerCase().trim()).length;
-                    const pendingCount = events.filter((e) => (e.category || '').toLowerCase().trim() === cat.name.toLowerCase().trim() && e.liberado === 'N').length;
+                    const catEvents = events.filter((e) => (e.category || '').toLowerCase().trim() === cat.name.toLowerCase().trim());
+                    const pendingCount = catEvents.filter((e) => !e.liberado || e.liberado === '' || e.liberado === 'N').length;
 
                     return (
                       <button
@@ -1508,7 +1920,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                             </span>
                           ) : (
                             <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">
-                              {count}
+                              0 pend.
                             </span>
                           )}
                         </div>
@@ -1518,7 +1930,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                         </div>
 
                         <div className="text-[10px] text-slate-400 mt-1 truncate">
-                          {count} {count === 1 ? 'evento' : 'eventos'}
+                          {pendingCount} para liberar
                         </div>
                       </button>
                     );
@@ -1537,6 +1949,11 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                       ? `Nenhum evento encontrado na categoria "${selectedCategoryForLiberation}" com o status selecionado.`
                       : 'Nenhum evento encontrado para o status selecionado.'}
                   </div>
+                  {eventFilterStatus === 'pending' && (
+                    <p className="text-[11px] text-slate-500">
+                      Não há eventos com campo liberar igual a "" ou "N". Todos os eventos estão liberados!
+                    </p>
+                  )}
                   {selectedCategoryForLiberation !== 'Todas' && (
                     <button
                       onClick={() => setSelectedCategoryForLiberation('Todas')}
@@ -1548,32 +1965,55 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                 </div>
               ) : (
                 <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40">
+                  <div className="px-3 py-2 bg-slate-900/70 border-b border-slate-800 flex items-center justify-between text-[11px] text-slate-400">
+                    <span className="flex items-center gap-1.5 font-medium text-slate-300">
+                      <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Dica: <strong>Clique em qualquer linha</strong> ou no botão <strong>Analisar & Liberar</strong> para inspecionar a imagem do evento e definir a liberação.</span>
+                    </span>
+                    <span className="text-xs font-mono font-bold text-amber-400">
+                      {filteredEventsForLiberation.length} {filteredEventsForLiberation.length === 1 ? 'evento' : 'eventos'}
+                    </span>
+                  </div>
+
                   <table className="w-full text-left text-xs text-slate-300">
                     <thead className="bg-slate-950 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
                       <tr>
-                        <th className="py-3 px-3">Evento</th>
+                        <th className="py-3 px-3">Imagem & Evento</th>
                         <th className="py-3 px-3">Categoria</th>
                         <th className="py-3 px-3">Cidade/Local</th>
                         <th className="py-3 px-3">Data/Hora</th>
-                        <th className="py-3 px-3 text-center">Status / Ação de Liberação</th>
-                        <th className="py-3 px-3 text-right">Ações</th>
+                        <th className="py-3 px-3 text-center">Status Liberar</th>
+                        <th className="py-3 px-3 text-right">Análise & Ações</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800/60 font-sans">
                       {filteredEventsForLiberation.map((evt) => {
-                        const isLiberado = evt.liberado === 'S' || !evt.liberado;
+                        const isApproved = evt.liberado === 'S';
+                        const isRejected = evt.liberado === 'N';
+                        const isBlank = !evt.liberado || evt.liberado === '';
+
                         return (
-                          <tr key={evt.id} className="hover:bg-slate-800/40 transition-colors">
+                          <tr 
+                            key={evt.id} 
+                            onClick={() => setSelectedEventForAnalysis(evt)}
+                            className="hover:bg-slate-800/60 transition-colors cursor-pointer group"
+                            title="Clique para analisar imagem e definir liberação"
+                          >
                             <td className="py-3 px-3">
                               <div className="flex items-center gap-2.5">
-                                <img
-                                  src={evt.imageUrl}
-                                  alt={evt.title}
-                                  className="w-10 h-10 rounded-lg object-cover bg-slate-800 flex-shrink-0"
-                                  referrerPolicy="no-referrer"
-                                />
+                                <div className="relative w-12 h-12 rounded-lg overflow-hidden bg-slate-800 flex-shrink-0 border border-slate-700 group-hover:border-amber-400/50 transition-colors">
+                                  <img
+                                    src={evt.imageUrl}
+                                    alt={evt.title}
+                                    className="w-full h-full object-cover"
+                                    referrerPolicy="no-referrer"
+                                  />
+                                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
+                                    <Eye className="w-4 h-4" />
+                                  </div>
+                                </div>
                                 <div>
-                                  <div className="font-bold text-white max-w-[200px] truncate">
+                                  <div className="font-bold text-white max-w-[200px] truncate group-hover:text-amber-300 transition-colors">
                                     {evt.title}
                                   </div>
                                   <div className="text-[11px] text-slate-400 truncate max-w-[200px]">
@@ -1600,54 +2040,82 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                             </td>
 
                             <td className="py-3 px-3 text-center">
-                              {onToggleLiberado ? (
+                              {isApproved ? (
                                 <button
-                                  onClick={() => onToggleLiberado(evt.id, evt.liberado || 'S')}
-                                  title="Clique para alternar o status de liberação"
-                                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-all shadow-sm ${
-                                    isLiberado
-                                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30'
-                                      : 'bg-rose-500/20 text-rose-300 border border-rose-500/40 hover:bg-rose-500/30'
-                                  }`}
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleSaveLiberation(evt.id, 'N');
+                                  }}
+                                  title="Clique para desativar liberação deste evento"
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30 transition-colors cursor-pointer"
                                 >
-                                  {isLiberado ? (
-                                    <>
-                                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                                      <span>Liberado</span>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <AlertCircle className="w-3.5 h-3.5 text-rose-400" />
-                                      <span>Liberar Evento</span>
-                                    </>
-                                  )}
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                                  <span>Liberado ("S")</span>
+                                </button>
+                              ) : isRejected ? (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleSaveLiberation(evt.id, 'S');
+                                  }}
+                                  title="Clique para confirmar liberação (atualiza o campo liberado com 'S')"
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40 hover:bg-emerald-500/20 hover:text-emerald-300 hover:border-emerald-500/40 transition-colors cursor-pointer"
+                                >
+                                  <AlertCircle className="w-3.5 h-3.5 text-rose-400" />
+                                  <span>Não Liberado ("N")</span>
                                 </button>
                               ) : (
-                                <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold ${
-                                  isLiberado
-                                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                                    : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
-                                }`}>
-                                  {isLiberado ? 'Liberado' : 'Pendente'}
-                                </span>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleSaveLiberation(evt.id, 'S');
+                                  }}
+                                  title="Clique para confirmar liberação (atualiza o campo liberado com 'S')"
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-emerald-500/20 hover:text-emerald-300 hover:border-emerald-500/40 transition-colors cursor-pointer"
+                                >
+                                  <Clock className="w-3.5 h-3.5 text-amber-400" />
+                                  <span>Pendente ("")</span>
+                                </button>
                               )}
                             </td>
 
                             <td className="py-3 px-3 text-right">
-                              <div className="flex items-center justify-end gap-1">
+                              <div className="flex items-center justify-end gap-1.5">
+                                {!isApproved && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleSaveLiberation(evt.id, 'S');
+                                    }}
+                                    className="px-2 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 text-xs font-semibold flex items-center gap-1 transition-all shadow-sm cursor-pointer"
+                                    title="Confirmar Liberação rápida: atualiza campo liberado com 'S'"
+                                  >
+                                    <Check className="w-3.5 h-3.5 text-emerald-400" />
+                                    <span className="hidden sm:inline">Liberar ("S")</span>
+                                  </button>
+                                )}
+
                                 <button
-                                  onClick={() => {
-                                    onSelectEvent(evt);
-                                    onClose();
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedEventForAnalysis(evt);
                                   }}
-                                  className="p-1.5 rounded-lg text-slate-400 hover:text-amber-300 hover:bg-slate-800 transition-colors cursor-pointer"
-                                  title="Visualizar Detalhes"
+                                  className="px-2.5 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/40 text-xs font-semibold flex items-center gap-1.5 transition-all shadow-sm cursor-pointer"
+                                  title="Analisar Imagem e Definir Liberação"
                                 >
-                                  <Eye className="w-3.5 h-3.5" />
+                                  <ImageIcon className="w-3.5 h-3.5 text-amber-400" />
+                                  <span>Analisar</span>
                                 </button>
 
                                 <button
-                                  onClick={() => {
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
                                     if (window.confirm(`Deseja excluir o evento "${evt.title}"?`)) {
                                       onDeleteEvent(evt.id);
                                     }
@@ -1674,16 +2142,18 @@ export const AdminModal: React.FC<AdminModalProps> = ({
               ========================================================================= */}
           {currentView === 'passwords' && (
             <div className="max-w-2xl mx-auto space-y-6">
-              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-                <div className="flex items-center gap-2">
-                  <KeyRound className="w-5 h-5 text-amber-400" />
-                  <h3 className="text-base font-bold text-white">Alterar Senha do Administrador</h3>
+              <div className="flex items-center justify-between gap-3 pb-3 border-b border-slate-800">
+                <div className="flex items-center gap-2 min-w-0">
+                  <KeyRound className="w-5 h-5 text-amber-400 shrink-0" />
+                  <h3 className="text-sm sm:text-base font-bold text-white truncate">Alterar Senha do Administrador</h3>
                 </div>
                 <button
+                  id="btn-passwords-back"
                   onClick={() => setCurrentView('menu')}
-                  className="text-xs text-slate-400 hover:text-white flex items-center gap-1 transition-colors cursor-pointer"
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-xs font-semibold border border-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-sm"
+                  title="Voltar ao Menu"
                 >
-                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <ArrowLeft className="w-3.5 h-3.5 text-amber-400" />
                   <span>Voltar</span>
                 </button>
               </div>
@@ -1709,7 +2179,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                           inputMode="numeric"
                           value={newPin}
                           onChange={(e) => setNewPin(e.target.value.slice(0, 6))}
-                          placeholder="Ex: 0612"
+                          placeholder="Nova senha (até 6 dígitos)"
                           className="w-full px-3.5 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-white font-mono tracking-widest text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
                         />
                         <button
@@ -1735,7 +2205,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                         inputMode="numeric"
                         value={confirmPin}
                         onChange={(e) => setConfirmPin(e.target.value.slice(0, 6))}
-                        placeholder="Repita a senha"
+                        placeholder="Repita a nova senha"
                         className="w-full px-3.5 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-white font-mono tracking-widest text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
                       />
                     </div>
@@ -1765,7 +2235,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                       className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-amber-300 text-xs font-semibold border border-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer"
                     >
                       <RotateCcw className="w-3.5 h-3.5" />
-                      <span>Restaurar para 0612</span>
+                      <span>Restaurar Senha Padrão</span>
                     </button>
 
                     <button
@@ -1785,9 +2255,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
         {/* Modal Footer */}
         <div className="px-4 sm:px-6 py-3 border-t border-slate-800 bg-slate-950/80 flex items-center justify-between text-xs text-slate-400">
-          <div>
-            Painel Administrativo • Senha Inicial: <strong className="text-amber-300 font-mono">0612</strong>
-          </div>
+          <div />
           <div className="flex items-center gap-2">
             {currentView !== 'menu' && (
               <button
@@ -1807,6 +2275,20 @@ export const AdminModal: React.FC<AdminModalProps> = ({
         </div>
 
       </div>
+
+      {/* Modal de Análise e Liberação de Imagem do Evento */}
+      <EventLiberationModal
+        isOpen={!!selectedEventForAnalysis}
+        event={selectedEventForAnalysis}
+        onClose={() => setSelectedEventForAnalysis(null)}
+        onSaveLiberation={handleSaveLiberation}
+        onNextEvent={handleNextAnalysis}
+        onPrevEvent={handlePrevAnalysis}
+        hasPrev={hasPrevAnalysis}
+        hasNext={hasNextAnalysis}
+        currentIndex={currentIndexInAnalysis}
+        totalPending={filteredEventsForLiberation.length}
+      />
     </div>
   );
 };

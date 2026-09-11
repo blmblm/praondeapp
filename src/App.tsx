@@ -250,6 +250,22 @@ export default function App() {
     }
   };
 
+  const handleSetLiberado = async (id: string, nextLiberado: 'S' | 'N') => {
+    setEvents((prev) =>
+      prev.map((evt) => (evt.id === id ? { ...evt, liberado: nextLiberado } : evt))
+    );
+
+    try {
+      await fetch(`/api/events/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ liberado: nextLiberado }),
+      });
+    } catch (e) {
+      console.warn('Erro ao atualizar status liberado no SQLite:', e);
+    }
+  };
+
   const handleSearchRedirect = (term: string) => {
     setCatalogInitialQuery(term);
     setCurrentScreen('events');
@@ -369,6 +385,7 @@ export default function App() {
         onDeleteCategory={handleDeleteCategory}
         onDeleteEvent={handleDeleteEvent}
         onToggleLiberado={handleToggleLiberado}
+        onSetLiberado={handleSetLiberado}
         onSelectEvent={setSelectedEvent}
         onOpenSqlConsole={() => setIsSqlConsoleOpen(true)}
       />
