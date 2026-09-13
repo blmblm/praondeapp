@@ -13,9 +13,11 @@ import {
   Tag,
   Copy,
   CalendarPlus,
-  Trash2
+  Trash2,
+  Navigation
 } from 'lucide-react';
 import { EventItem } from '../types';
+import { useUserLocation } from '../context/LocationContext';
 
 interface EventDetailModalProps {
   event: EventItem | null;
@@ -30,8 +32,11 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
 }) => {
   const [copied, setCopied] = useState(false);
   const [copiedAddress, setCopiedAddress] = useState(false);
+  const { coords, getDistanceKmTo } = useUserLocation();
 
   if (!event) return null;
+
+  const distKm = getDistanceKmTo(event.latitude, event.longitude);
 
   const formattedDate = new Date(event.date + 'T12:00:00').toLocaleDateString('pt-BR', {
     weekday: 'long',
@@ -42,7 +47,9 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
 
   const fullAddress = `${event.locationName}, ${event.address} - ${event.city}/${event.state}`;
   const googleMapsUrl = event.latitude && event.longitude
-    ? `https://www.google.com/maps/search/?api=1&query=${event.latitude},${event.longitude}`
+    ? (coords
+        ? `https://www.google.com/maps/dir/?api=1&origin=${coords.latitude},${coords.longitude}&destination=${event.latitude},${event.longitude}`
+        : `https://www.google.com/maps/search/?api=1&query=${event.latitude},${event.longitude}`)
     : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(fullAddress)}`;
 
   const handleShare = async () => {
@@ -123,7 +130,9 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
                     ? 'bg-emerald-500/90 text-slate-950'
                     : 'bg-slate-950/90 text-amber-300 border border-amber-500/30'
                 }`}>
-                  {event.isFree ? 'Entrada Franca' : `R$ ${event.price?.toFixed(2).replace('.', ',')}`}
+                  {event.isFree
+                    ? 'Entrada Franca'
+                    : (event.price ? `R$ ${event.price.toFixed(2).replace('.', ',')}` : (event.priceDetails || 'Consulte valores'))}
                 </span>
               </div>
             </div>
@@ -155,8 +164,16 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
                   <div className="text-xs text-slate-400 truncate">{event.address}</div>
                   <div className="text-xs font-medium text-slate-300">{event.city} - {event.state}</div>
                   {event.latitude && event.longitude && (
-                    <div className="text-[11px] font-mono text-emerald-400 mt-0.5 truncate">
-                      📍 {event.latitude}, {event.longitude}
+                    <div className="flex flex-wrap items-center gap-2 mt-1">
+                      <span className="text-[11px] font-mono text-emerald-400">
+                        📍 {event.latitude}, {event.longitude}
+                      </span>
+                      {distKm !== null && (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-300 bg-emerald-500/10 px-2 py-0.5 rounded-md border border-emerald-500/20">
+                          <Navigation className="w-3 h-3 text-emerald-400" />
+                          {distKm < 1 ? 'Menos de 1 km de você' : `Aprox. ${distKm} km da sua localização`}
+                        </span>
+                      )}
                     </div>
                   )}
                 </div>
@@ -169,9 +186,11 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
                 <div>
                   <div className="text-xs text-slate-400">Ingressos & Valores</div>
                   <div className="text-sm font-semibold text-white">
-                    {event.isFree ? 'Gratuito' : `R$ ${event.price?.toFixed(2).replace('.', ',')}`}
+                    {event.isFree
+                      ? 'Gratuito'
+                      : (event.price ? `R$ ${event.price.toFixed(2).replace('.', ',')}` : (event.priceDetails || 'Consulte valores'))}
                   </div>
-                  {event.priceDetails && (
+                  {event.priceDetails && event.price && (
                     <div className="text-xs text-slate-400 mt-0.5">{event.priceDetails}</div>
                   )}
                 </div>
@@ -213,7 +232,7 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
                 Sobre este evento
               </h3>
               <p className="text-slate-200 text-sm sm:text-base leading-relaxed whitespace-pre-line bg-slate-950/30 p-4 rounded-xl border border-slate-800/60">
-                {event.description}
+                {event.description?.trim() || 'Sem descrição adicional informada pelo anunciante.'}
               </p>
             </div>
 

@@ -137,13 +137,13 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h3 className="text-lg font-bold text-white tracking-tight">Banco de Dados SQLite</h3>
+                <h3 className="text-lg font-bold text-white tracking-tight">Central de Gerenciamento - Console SQL</h3>
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-semibold">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                   praondeeu.db
                 </span>
-                <span className="hidden sm:inline-block text-xs text-slate-400 font-mono">
-                  (SQLite 3 Nativo)
+                <span className="hidden sm:inline-block text-xs text-amber-400/90 font-medium">
+                  (Acesso Master)
                 </span>
               </div>
               <p className="text-xs text-slate-400">

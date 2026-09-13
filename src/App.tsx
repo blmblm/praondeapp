@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { EventItem, EventCategory, ActiveScreen, Advertiser, CategoryItem } from './types';
 import { INITIAL_EVENTS } from './data/initialEvents';
 import { INITIAL_ADVERTISERS } from './data/initialAdvertisers';
+import { INITIAL_SPONSORS, SponsorItem } from './data/sponsors';
 import { Navbar } from './components/Navbar';
 import { PresentationScreen } from './components/PresentationScreen';
 import { EventCatalog } from './components/EventCatalog';
@@ -10,6 +11,7 @@ import { EventDetailModal } from './components/EventDetailModal';
 import { AdvertiserAuth } from './components/AdvertiserAuth';
 import { SqlConsoleModal } from './components/SqlConsoleModal';
 import { AdminModal } from './components/AdminModal';
+import { SponsorRegistrationScreen } from './components/SponsorRegistrationScreen';
 
 const STORAGE_KEY = 'praonde_events_data_v2';
 const ADVERTISERS_STORAGE_KEY = 'praonde_advertisers_v1';
@@ -94,6 +96,28 @@ export default function App() {
   const [catalogInitialQuery, setCatalogInitialQuery] = useState<string>('');
   const [isSqlConsoleOpen, setIsSqlConsoleOpen] = useState<boolean>(false);
   const [isAdminOpen, setIsAdminOpen] = useState<boolean>(false);
+  const [sponsors, setSponsors] = useState<SponsorItem[]>(() => {
+    try {
+      const saved = localStorage.getItem('praonde_sponsors_v1');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return INITIAL_SPONSORS;
+  });
+
+  const [isMasterAdmin, setIsMasterAdmin] = useState<boolean>(() => {
+    try {
+      return sessionStorage.getItem('praonde_master_0612') === 'true';
+    } catch {
+      return false;
+    }
+  });
 
   // Sync with backend SQLite database
   const loadEventsFromApi = async () => {
@@ -126,9 +150,29 @@ export default function App() {
     }
   };
 
+  const loadSponsorsFromApi = async () => {
+    try {
+      const res = await fetch('/api/admin/sponsors');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data) && data.length > 0) {
+          setSponsors((prev) => {
+            const map = new Map<string, SponsorItem>();
+            prev.forEach((s) => map.set(s.id, s));
+            data.forEach((s: SponsorItem) => map.set(s.id, s));
+            return Array.from(map.values());
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('Usando patrocinadores locais:', e);
+    }
+  };
+
   useEffect(() => {
     loadEventsFromApi();
     loadCategoriesFromApi();
+    loadSponsorsFromApi();
   }, []);
 
   // Persist events whenever modified
@@ -306,6 +350,7 @@ export default function App() {
         eventCount={events.length}
         currentAdvertiser={currentAdvertiser}
         onOpenAdvertiserAuth={handleChangeAdvertiser}
+        isMasterAdmin={isMasterAdmin}
         onOpenSqlConsole={() => setIsSqlConsoleOpen(true)}
         onOpenAdmin={() => setIsAdminOpen(true)}
       />
@@ -319,6 +364,7 @@ export default function App() {
             onSelectEvent={setSelectedEvent}
             onSearchRedirect={handleSearchRedirect}
             onOpenAdmin={() => setIsAdminOpen(true)}
+            sponsors={sponsors}
           />
         )}
 
@@ -353,6 +399,20 @@ export default function App() {
             }}
             currentAdvertiser={currentAdvertiser}
             onChangeAdvertiser={handleChangeAdvertiser}
+            categoryItems={categoryItems}
+          />
+        )}
+
+        {currentScreen === 'sponsor_register' && (
+          <SponsorRegistrationScreen
+            onBack={() => handleNavigate('home')}
+            onSponsorCreated={(newSponsor) => {
+              const updated = [newSponsor, ...sponsors];
+              setSponsors(updated);
+              try {
+                localStorage.setItem('praonde_sponsors_v1', JSON.stringify(updated));
+              } catch {}
+            }}
           />
         )}
       </main>
@@ -387,7 +447,16 @@ export default function App() {
         onToggleLiberado={handleToggleLiberado}
         onSetLiberado={handleSetLiberado}
         onSelectEvent={setSelectedEvent}
+        isMasterAdminState={isMasterAdmin}
+        onMasterAuthChange={(isMaster) => setIsMasterAdmin(isMaster)}
         onOpenSqlConsole={() => setIsSqlConsoleOpen(true)}
+        sponsors={sponsors}
+        onUpdateSponsors={(newSponsors) => {
+          setSponsors(newSponsors);
+          try {
+            localStorage.setItem('praonde_sponsors_v1', JSON.stringify(newSponsors));
+          } catch {}
+        }}
       />
     </div>
   );

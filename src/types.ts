@@ -75,4 +75,4 @@ export interface CityItem {
   active: boolean;
 }
 
-export type ActiveScreen = 'home' | 'events' | 'register' | 'advertiser_auth';
+export type ActiveScreen = 'home' | 'events' | 'register' | 'advertiser_auth' | 'sponsor_register';

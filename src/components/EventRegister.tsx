@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
   PlusCircle, 
   ArrowLeft, 
@@ -22,7 +22,8 @@ import {
   Globe,
   ExternalLink
 } from 'lucide-react';
-import { EventItem, EventCategory, ActiveScreen, Advertiser } from '../types';
+import { EventItem, EventCategory, ActiveScreen, Advertiser, CategoryItem } from '../types';
+import { useUserLocation } from '../context/LocationContext';
 
 interface EventRegisterProps {
   onAddEvent: (event: EventItem) => Promise<EventItem> | void;
@@ -31,15 +32,16 @@ interface EventRegisterProps {
   currentAdvertiser: Advertiser | null;
   onChangeAdvertiser: () => void;
   categories?: string[];
+  categoryItems?: CategoryItem[];
 }
 
-const CATEGORY_OPTIONS: EventCategory[] = [
-  'Shows',
-  'Samba e Pagode',
-  'Baile e Nostalgia',
-  'Baile Terceira Idade',
-  'Forró',
-  'Forró Pé de Serra',
+const DEFAULT_CATEGORIES: { id: number; nome: string }[] = [
+  { id: 1, nome: 'Shows' },
+  { id: 2, nome: 'Samba e Pagode' },
+  { id: 3, nome: 'Baile Nostalgia' },
+  { id: 4, nome: 'Baile Terceira Idade' },
+  { id: 5, nome: 'Forró' },
+  { id: 6, nome: 'Forró Pé de Serra' },
 ];
 
 const DEFAULT_FALLBACK_IMAGE =
@@ -58,10 +60,20 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
   currentAdvertiser,
   onChangeAdvertiser,
   categories,
+  categoryItems,
 }) => {
+  const { coords } = useUserLocation();
+  const availableCategories = useMemo(() => {
+    if (categoryItems && categoryItems.length > 0) {
+      return categoryItems.map(c => ({ id: c.id, nome: c.nome }));
+    }
+    return DEFAULT_CATEGORIES;
+  }, [categoryItems]);
+
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [category, setCategory] = useState<EventCategory>('Shows');
+  const [selectedCategoryId, setSelectedCategoryId] = useState<number>(() => availableCategories[0]?.id || 1);
+  const [category, setCategory] = useState<EventCategory>(() => (availableCategories[0]?.nome as EventCategory) || 'Shows');
   const [date, setDate] = useState('');
   const [time, setTime] = useState('19:00');
   const [endDate, setEndDate] = useState('');
@@ -178,10 +190,6 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
       setErrorMessage('Por favor, informe o local e a cidade do evento.');
       return;
     }
-    if (!description.trim()) {
-      setErrorMessage('Por favor, descreva brevemente o evento.');
-      return;
-    }
     if (!organizer.trim()) {
       setErrorMessage('Por favor, informe o nome do organizador ou produtora.');
       return;
@@ -201,11 +209,16 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
       }
     }
 
+    const currentCat = availableCategories.find((c) => c.id === selectedCategoryId);
+    const resolvedCatName = (currentCat ? currentCat.nome : category) as EventCategory;
+    const resolvedCatId = currentCat ? currentCat.id : selectedCategoryId;
+
     const newEvent: EventItem = {
       id: `user-${Date.now()}`,
       title: title.trim(),
       description: description.trim(),
-      category,
+      category: resolvedCatName,
+      categoryId: resolvedCatId,
       date,
       time: time || '19:00',
       endDate: endDate || undefined,
@@ -218,12 +231,12 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
       longitude: finalLon || undefined,
       liberado: 'S',
       isFree,
-      price: !isFree && price ? parseFloat(price) : undefined,
-      priceDetails: priceDetails.trim() || (!isFree ? `R$ ${price}` : 'Entrada Franca'),
+      price: !isFree && price && !isNaN(parseFloat(price)) ? parseFloat(price) : undefined,
+      priceDetails: priceDetails.trim() || (!isFree ? (price ? `R$ ${price}` : 'Consulte valores') : 'Entrada Franca'),
       imageUrl: imageUrl.trim() || DEFAULT_FALLBACK_IMAGE,
       organizer: organizer.trim(),
       contact: contact.trim() || undefined,
-      tags: [category],
+      tags: [resolvedCatName],
       featured: false,
       createdAt: new Date().toISOString(),
     };
@@ -467,13 +480,21 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                 Categoria do Evento *
               </label>
               <select
-                value={category}
-                onChange={(e) => setCategory(e.target.value as EventCategory)}
-                className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white focus:outline-none focus:ring-2 focus:ring-amber-500/50"
+                id="select-register-category"
+                value={selectedCategoryId}
+                onChange={(e) => {
+                  const id = Number(e.target.value);
+                  setSelectedCategoryId(id);
+                  const found = availableCategories.find((c) => c.id === id);
+                  if (found) {
+                    setCategory(found.nome as EventCategory);
+                  }
+                }}
+                className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white focus:outline-none focus:ring-2 focus:ring-amber-500/50 cursor-pointer"
               >
-                {CATEGORY_OPTIONS.map((cat) => (
-                  <option key={cat} value={cat}>
-                    {cat}
+                {availableCategories.map((cat) => (
+                  <option key={cat.id} value={cat.id}>
+                    {cat.nome}
                   </option>
                 ))}
               </select>
@@ -481,14 +502,13 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
 
             <div>
               <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                Descrição do Evento *
+                Descrição do Evento <span className="text-slate-500 font-normal">(Opcional)</span>
               </label>
               <textarea
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 rows={3}
-                placeholder="Explique o que vai rolar, atrações especiais, público alvo e detalhes importantes..."
-                required
+                placeholder="Explique o que vai rolar, atrações especiais, público alvo e detalhes importantes (opcional)..."
                 className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
               />
             </div>
@@ -631,24 +651,42 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                   </span>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => fetchCoordinates(address, city, state)}
-                  disabled={isGeocoding || (!address.trim() && !city.trim())}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 transition-colors disabled:opacity-50 cursor-pointer w-fit"
-                >
-                  {isGeocoding ? (
-                    <>
-                      <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
-                      <span>Buscando coordenadas...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Globe className="w-3.5 h-3.5 text-amber-400" />
-                      <span>{latitude && longitude ? 'Recalcular Coordenadas' : 'Testar Coordenadas do Endereço'}</span>
-                    </>
+                <div className="flex flex-wrap items-center gap-2">
+                  {coords && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setLatitude(String(coords.latitude.toFixed(6)));
+                        setLongitude(String(coords.longitude.toFixed(6)));
+                        setGeocodeInfo(`Coordenadas físicas exatas obtidas pelo GPS: Lat ${coords.latitude.toFixed(6)}, Lon ${coords.longitude.toFixed(6)}`);
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 transition-colors cursor-pointer w-fit"
+                      title="Preencher com a localização física exata do seu aparelho agora"
+                    >
+                      <Navigation className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>Usar Meu GPS Atual</span>
+                    </button>
                   )}
-                </button>
+
+                  <button
+                    type="button"
+                    onClick={() => fetchCoordinates(address, city, state)}
+                    disabled={isGeocoding || (!address.trim() && !city.trim())}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 transition-colors disabled:opacity-50 cursor-pointer w-fit"
+                  >
+                    {isGeocoding ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                        <span>Buscando coordenadas...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Globe className="w-3.5 h-3.5 text-amber-400" />
+                        <span>{latitude && longitude ? 'Recalcular Coordenadas' : 'Testar Coordenadas do Endereço'}</span>
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
 
               {/* Status Banner */}
@@ -717,7 +755,7 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
                 <div>
                   <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                    Valor a partir de (R$) *
+                    Valor a partir de (R$) <span className="text-slate-500 font-normal">(Opcional)</span>
                   </label>
                   <input
                     type="number"
@@ -725,8 +763,7 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                     min="0"
                     value={price}
                     onChange={(e) => setPrice(e.target.value)}
-                    placeholder="Ex: 50.00"
-                    required={!isFree}
+                    placeholder="Ex: 50.00 (ou em branco)"
                     className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
                   />
                 </div>
@@ -958,7 +995,7 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                     ? 'bg-emerald-500 text-slate-950 font-extrabold'
                     : 'bg-slate-950/90 text-amber-300 border border-amber-500/30'
                 }`}>
-                  {isFree ? 'Gratuito' : (price ? `R$ ${parseFloat(price).toFixed(2).replace('.', ',')}` : 'R$ --')}
+                  {isFree ? 'Gratuito' : (price ? `R$ ${parseFloat(price).toFixed(2).replace('.', ',')}` : (priceDetails || 'Consulte'))}
                 </span>
               </div>
             </div>

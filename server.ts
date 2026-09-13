@@ -1,8 +1,10 @@
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { getDatabase, executeSqlQuery, getDatabaseSchema } from './server/database.js';
+import { createMercadoPagoPixPayment, checkMercadoPagoPaymentStatus } from './server/mercadopago.js';
 
 const app = express();
 const PORT = 3000;
@@ -30,13 +32,13 @@ app.get('/api/events', (req, res) => {
     let sql = 'SELECT * FROM eventos WHERE 1=1';
     const params: any[] = [];
 
-    if (category && category !== 'Todos') {
-      sql += ' AND category = ?';
-      params.push(category);
+    if (category && category !== 'Todos' && category !== 'Todas' && category !== 'Categorias') {
+      sql += ' AND (categoria = ? OR CAST(categoria_id AS TEXT) = ?)';
+      params.push(String(category), String(category));
     }
-    if (city && city !== 'Todas') {
-      sql += ' AND city = ?';
-      params.push(city);
+    if (city && city !== 'Todas' && city !== 'Cidades') {
+      sql += ' AND cidade = ?';
+      params.push(String(city));
     }
     if (search) {
       sql += ' AND (titulo LIKE ? OR descricao LIKE ? OR local_nome LIKE ?)';
@@ -48,8 +50,12 @@ app.get('/api/events', (req, res) => {
       params.push(status);
     }
     if (req.query.liberado) {
-      sql += ' AND liberado = ?';
-      params.push(req.query.liberado);
+      sql += ' AND UPPER(liberado) = ?';
+      params.push(String(req.query.liberado).toUpperCase());
+    }
+    if (req.query.data_min || req.query.date) {
+      sql += ' AND data_evento >= ?';
+      params.push(req.query.data_min || req.query.date);
     }
 
     sql += ' ORDER BY data_evento ASC, horario ASC';
@@ -176,16 +182,48 @@ app.post('/api/events', async (req, res) => {
 
     // Resolver categoria_id se informado ou buscar pelo nome da categoria
     let categoriaId: number | null = body.categoryId ? Number(body.categoryId) : null;
+    if (categoriaId) {
+      try {
+        const catCheck = db.prepare('SELECT id, nome FROM categorias WHERE id = ? LIMIT 1;').get(categoriaId) as any;
+        if (catCheck) {
+          categoriaId = catCheck.id;
+          if (!body.category) {
+            body.category = catCheck.nome;
+          }
+        } else {
+          categoriaId = null;
+        }
+      } catch (err) {
+        console.warn('Erro ao checar categoria_id:', err);
+      }
+    }
+
     if (!categoriaId && body.category) {
       try {
-        const catRow = db.prepare('SELECT id FROM categorias WHERE nome = ? COLLATE NOCASE LIMIT 1;').get(body.category) as any;
+        // 1. Busca exata (case-insensitive)
+        let catRow = db.prepare('SELECT id, nome FROM categorias WHERE nome = ? COLLATE NOCASE LIMIT 1;').get(body.category) as any;
+        
+        // 2. Busca normalizada (ex: "Baile e Nostalgia" vs "Baile Nostalgia")
+        if (!catRow) {
+          const allCats = db.prepare('SELECT id, nome FROM categorias;').all() as any[];
+          const normalize = (txt: string) => (txt || '').toLowerCase().replace(/\s+e\s+/g, ' ').replace(/[^a-z0-9]/g, '').trim();
+          const target = normalize(body.category);
+          catRow = allCats.find((c) => normalize(c.nome) === target);
+        }
+
         if (catRow) {
           categoriaId = catRow.id;
+          body.category = catRow.nome;
         } else {
           // Se não existir, insere automaticamente na tabela de categorias
           const insertCat = db.prepare('INSERT OR IGNORE INTO categorias (nome, ativa) VALUES (?, 1);');
           const resCat = insertCat.run(body.category);
-          categoriaId = Number(resCat.lastInsertRowid);
+          if (resCat.lastInsertRowid) {
+            categoriaId = Number(resCat.lastInsertRowid);
+          } else {
+            const recheck = db.prepare('SELECT id FROM categorias WHERE nome = ? COLLATE NOCASE LIMIT 1;').get(body.category) as any;
+            if (recheck) categoriaId = recheck.id;
+          }
         }
       } catch (err) {
         console.warn('Erro ao associar categoria_id:', err);
@@ -300,11 +338,36 @@ app.put('/api/events/:id', async (req, res) => {
       }
     }
 
+    let categoriaId: number | null = body.categoryId ? Number(body.categoryId) : null;
+    if (categoriaId) {
+      const check = db.prepare('SELECT id, nome FROM categorias WHERE id = ? LIMIT 1;').get(categoriaId) as any;
+      if (check && !body.category) body.category = check.nome;
+      if (!check) categoriaId = null;
+    }
+
+    if (!categoriaId && body.category) {
+      try {
+        let catRow = db.prepare('SELECT id, nome FROM categorias WHERE nome = ? COLLATE NOCASE LIMIT 1;').get(body.category) as any;
+        if (!catRow) {
+          const allCats = db.prepare('SELECT id, nome FROM categorias;').all() as any[];
+          const normalize = (txt: string) => (txt || '').toLowerCase().replace(/\s+e\s+/g, ' ').replace(/[^a-z0-9]/g, '').trim();
+          catRow = allCats.find((c) => normalize(c.nome) === normalize(body.category));
+        }
+        if (catRow) {
+          categoriaId = catRow.id;
+          body.category = catRow.nome;
+        }
+      } catch (err) {
+        console.warn('Erro ao associar categoria_id no PUT:', err);
+      }
+    }
+
     const stmt = db.prepare(`
       UPDATE eventos SET
+        categoria_id = ?,
+        categoria = ?,
         titulo = ?,
         descricao = ?,
-        categoria = ?,
         data_evento = ?,
         horario = ?,
         horario_fim = ?,
@@ -325,9 +388,10 @@ app.put('/api/events/:id', async (req, res) => {
     `);
 
     stmt.run(
+      categoriaId,
+      body.category,
       body.title,
       body.description || '',
-      body.category,
       body.date,
       body.time,
       body.endTime || null,
@@ -570,6 +634,297 @@ app.delete('/api/supervisors/:id', (req, res) => {
   }
 });
 
+// ==================== MERCADO PAGO PIX ENDPOINTS ====================
+
+// Criar cobrança Pix R$ 100 para o Patrocinador
+app.post('/api/sponsors/pix/create', async (req, res) => {
+  try {
+    const { sponsorId, name, phone, address, city, state, category, description, badge, imageUrl } = req.body;
+
+    if (!name || !phone) {
+      return res.status(400).json({ error: 'Nome e Telefone são obrigatórios para gerar o Pix.' });
+    }
+
+    const cleanPhone = String(phone).replace(/\D/g, '');
+    const cleanId = sponsorId || `sp-${Date.now()}`;
+    const valor = 100.0;
+    const protocolo = `PROT-${Date.now().toString().slice(-6)}`;
+
+    // 1. Salva ou atualiza o patrocinador no banco SQLite (com ativo = 0 e liberado = 'pendente')
+    try {
+      const upsertSp = db.prepare(`
+        INSERT INTO patrocinadores (
+          id, nome, categoria, descricao, telefone, endereco, cidade, estado, badge, imagem_url, valor_mensal, ativo, liberado, status_pagamento, protocolo
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pendente', 'pendente', ?)
+        ON CONFLICT(id) DO UPDATE SET
+          nome = excluded.nome,
+          categoria = excluded.categoria,
+          descricao = excluded.descricao,
+          telefone = excluded.telefone,
+          endereco = excluded.endereco,
+          cidade = excluded.cidade,
+          estado = excluded.estado,
+          badge = excluded.badge,
+          imagem_url = excluded.imagem_url,
+          protocolo = excluded.protocolo;
+      `);
+      upsertSp.run(
+        cleanId,
+        name.trim(),
+        category || 'Comércio Local',
+        description || '',
+        cleanPhone,
+        address || '',
+        city || '',
+        state || 'SP',
+        badge || '',
+        imageUrl || '',
+        protocolo
+      );
+    } catch (dbErr) {
+      console.warn('Aviso ao salvar patrocinador no SQLite:', dbErr);
+    }
+
+    // 2. Cria pagamento Pix via Mercado Pago
+    const pixRes = await createMercadoPagoPixPayment({
+      transactionAmount: valor,
+      description: `Patrocínio Vitrine (R$ 100/mês) - ${name.trim()}`,
+      payerEmail: `anunciante.${cleanPhone}@praondeeuvou.com.br`,
+      payerName: name.trim(),
+      payerPhone: cleanPhone,
+      externalReference: cleanId,
+    });
+
+    if (!pixRes.success) {
+      return res.status(500).json({ error: pixRes.errorMessage || 'Falha ao gerar o código Pix no Mercado Pago.' });
+    }
+
+    // 3. Registra na tabela pagamentos_pix
+    try {
+      const insertPix = db.prepare(`
+        INSERT INTO pagamentos_pix (
+          id, patrocinador_id, mercado_pago_id, status, valor, qr_code, qr_code_base64, ticket_url, telefone_notificado
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+      `);
+      insertPix.run(
+        `pix-${Date.now()}`,
+        cleanId,
+        pixRes.paymentId,
+        pixRes.status,
+        valor,
+        pixRes.qrCode,
+        pixRes.qrCodeBase64,
+        pixRes.ticketUrl,
+        cleanPhone
+      );
+    } catch (e) {
+      console.warn('Aviso ao registrar pagamento no SQLite:', e);
+    }
+
+    res.json({
+      success: true,
+      sponsorId: cleanId,
+      paymentId: pixRes.paymentId,
+      status: pixRes.status,
+      valor,
+      qrCode: pixRes.qrCode,
+      qrCodeBase64: pixRes.qrCodeBase64,
+      ticketUrl: pixRes.ticketUrl,
+      isSimulated: pixRes.isSimulated,
+      advertiserPhone: cleanPhone,
+      advertiserName: name.trim(),
+    });
+  } catch (error: any) {
+    console.error('Erro na rota /api/sponsors/pix/create:', error);
+    res.status(500).json({ error: error.message || 'Erro interno ao processar Pix' });
+  }
+});
+
+// Verificar status do pagamento Pix e atualizar status de pagamento
+app.get('/api/sponsors/pix/status/:paymentId', async (req, res) => {
+  try {
+    const { paymentId } = req.params;
+    const check = await checkMercadoPagoPaymentStatus(paymentId);
+
+    if (check.isPaid) {
+      // Atualiza o pagamento para 'pago', MAS MANTÉM liberado = 'pendente' e ativo = 0 para revisão humana de segurança
+      try {
+        db.prepare(`
+          UPDATE patrocinadores 
+          SET status_pagamento = 'pago', data_pagamento = CURRENT_TIMESTAMP 
+          WHERE id IN (SELECT patrocinador_id FROM pagamentos_pix WHERE mercado_pago_id = ?);
+        `).run(paymentId);
+
+        db.prepare(`
+          UPDATE pagamentos_pix 
+          SET status = 'approved', pago_em = CURRENT_TIMESTAMP 
+          WHERE mercado_pago_id = ?;
+        `).run(paymentId);
+      } catch (e) {
+        console.warn('Erro ao atualizar status pago:', e);
+      }
+    }
+
+    // Obter dados do patrocinador relacionado
+    let sponsorInfo: any = null;
+    try {
+      sponsorInfo = db.prepare(`
+        SELECT p.* FROM patrocinadores p
+        JOIN pagamentos_pix px ON px.patrocinador_id = p.id
+        WHERE px.mercado_pago_id = ?
+        LIMIT 1;
+      `).get(paymentId);
+    } catch {}
+
+    res.json({
+      paymentId,
+      status: check.status,
+      statusDetail: check.statusDetail,
+      isPaid: check.isPaid,
+      sponsor: sponsorInfo,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Erro ao checar status Pix' });
+  }
+});
+
+// Enviar mensagem de aguardo de liberação em até 48h para o celular do anunciante
+app.post('/api/sponsors/notify-confirmation', (req, res) => {
+  try {
+    const { phone, sponsorName, protocol } = req.body;
+    const cleanPhone = String(phone || '').replace(/\D/g, '');
+    const protText = protocol ? `\n📋 *Protocolo:* ${protocol}` : '';
+
+    const message = `✅ *Olá, ${sponsorName}! Recebemos seu Pix de R$ 100,00 com sucesso!*\n\n🔒 *Por motivos de segurança*, o seu anúncio passará pela nossa análise cadastral e será liberado na vitrine do app *Pra onde eu vou* em até *48 horas*.\n${protText}\n\nAssim que nossa equipe concluir a verificação, você receberá o aviso de ativação. Obrigado pela confiança! 🚀`;
+
+    // Marca no banco que a notificação foi emitida
+    try {
+      db.prepare(`
+        UPDATE pagamentos_pix 
+        SET mensagem_enviada = 1 
+        WHERE telefone_notificado = ?;
+      `).run(cleanPhone);
+    } catch {}
+
+    const whatsappUrl = `https://wa.me/55${cleanPhone}?text=${encodeURIComponent(message)}`;
+
+    res.json({
+      success: true,
+      phone: cleanPhone,
+      message,
+      whatsappUrl,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== LIBERAÇÃO DE PATROCINADORES (CENTRAL DE GERENCIAMENTO) ====================
+
+// Listar todos os patrocinadores para a Central de Gerenciamento (com filtro de liberado/pendente)
+app.get('/api/admin/sponsors', (req, res) => {
+  try {
+    const { status, liberado } = req.query;
+    let sql = 'SELECT * FROM patrocinadores WHERE 1=1';
+    const params: any[] = [];
+
+    if (liberado && liberado !== 'all') {
+      sql += ' AND liberado = ?';
+      params.push(String(liberado));
+    }
+
+    if (status && status !== 'all') {
+      sql += ' AND status_pagamento = ?';
+      params.push(String(status));
+    }
+
+    sql += ' ORDER BY criado_em DESC;';
+
+    const rows = db.prepare(sql).all(...params) as any[];
+
+    res.json(rows.map(r => ({
+      id: r.id,
+      name: r.nome,
+      category: r.categoria,
+      description: r.descricao,
+      phone: r.telefone,
+      address: r.endereco,
+      city: r.cidade,
+      state: r.estado,
+      badge: r.badge,
+      latitude: r.latitude,
+      longitude: r.longitude,
+      imageUrl: r.imagem_url,
+      monthlyFee: r.valor_mensal,
+      active: Boolean(r.ativo),
+      liberado: r.liberado || 'pendente',
+      statusPagamento: r.status_pagamento || 'pendente',
+      protocolo: r.protocolo,
+      dataPagamento: r.data_pagamento,
+      dataLiberacao: r.data_liberacao,
+      createdAt: r.criado_em,
+    })));
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Liberar (aprovar) ou Rejeitar Patrocinador na Central de Gerenciamento
+app.post('/api/admin/sponsors/:id/liberacao', (req, res) => {
+  try {
+    const { id } = req.params;
+    const { action, motivo } = req.body; // action: 'aprovar' | 'rejeitar' | 'pausar'
+
+    let novoLiberado = 'pendente';
+    let novoAtivo = 0;
+
+    if (action === 'aprovar') {
+      novoLiberado = 'S';
+      novoAtivo = 1;
+    } else if (action === 'rejeitar') {
+      novoLiberado = 'N';
+      novoAtivo = 0;
+    } else if (action === 'pausar') {
+      novoLiberado = 'pendente';
+      novoAtivo = 0;
+    }
+
+    const stmt = db.prepare(`
+      UPDATE patrocinadores 
+      SET liberado = ?, ativo = ?, data_liberacao = CURRENT_TIMESTAMP
+      WHERE id = ?;
+    `);
+    const result = stmt.run(novoLiberado, novoAtivo, id);
+
+    // Buscar patrocinador atualizado
+    const updated = db.prepare('SELECT * FROM patrocinadores WHERE id = ?;').get(id) as any;
+
+    // Gerar mensagem de WhatsApp para envio manual ou automático
+    let whatsappNotifyUrl = '';
+    if (updated && updated.telefone) {
+      const cleanPhone = String(updated.telefone).replace(/\D/g, '');
+      let msg = '';
+      if (novoLiberado === 'S') {
+        msg = `🌟 *Ótima notícia, ${updated.nome}!* O seu anúncio foi APROVADO e LIBERADO na vitrine do *Pra onde eu vou*! Já está visível para os clientes mais próximos da sua região. Boas vendas e muito sucesso! 🚀`;
+      } else if (novoLiberado === 'N') {
+        msg = `Olá, ${updated.nome}. Informamos que o seu anúncio no *Pra onde eu vou* necessita de ajustes cadastrais (${motivo || 'dados cadastrais'}). Entre em contato com nosso suporte para regularização.`;
+      }
+      whatsappNotifyUrl = `https://wa.me/55${cleanPhone}?text=${encodeURIComponent(msg)}`;
+    }
+
+    res.json({
+      success: true,
+      changes: result.changes,
+      id,
+      liberado: novoLiberado,
+      active: novoAtivo === 1,
+      whatsappNotifyUrl,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // 8. Verificação de Senha Administrativa (Padrão 0612 ou senha na tabela supervisor)
 app.post('/api/admin/verify-password', (req, res) => {
   try {
@@ -650,7 +1005,13 @@ app.post('/api/sql/query', (req, res) => {
 // ==================== VITE MIDDLEWARE & SERVER START ====================
 
 async function startServer() {
-  if (process.env.NODE_ENV !== 'production') {
+  const isProduction =
+    process.env.NODE_ENV === 'production' ||
+    (typeof __filename !== 'undefined' && __filename.includes('dist')) ||
+    (process.argv[1] && process.argv[1].includes('dist')) ||
+    !fs.existsSync(path.join(process.cwd(), 'src', 'main.tsx'));
+
+  if (!isProduction) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',

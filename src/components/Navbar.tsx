@@ -7,6 +7,7 @@ import {
   User, 
   ShieldCheck, 
   Database,
+  SlidersHorizontal,
   Menu,
   X
 } from 'lucide-react';
@@ -21,6 +22,7 @@ interface NavbarProps {
   onOpenAdvertiserAuth?: () => void;
   onOpenSqlConsole?: () => void;
   onOpenAdmin?: () => void;
+  isMasterAdmin?: boolean;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({ 
@@ -31,6 +33,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenAdvertiserAuth,
   onOpenSqlConsole,
   onOpenAdmin,
+  isMasterAdmin = false,
 }) => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
@@ -120,27 +123,15 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
           )}
 
-          {onOpenSqlConsole && (
-            <button
-              id="nav-sql-btn"
-              onClick={onOpenSqlConsole}
-              title="Abrir Console SQL do SQLite"
-              className="flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-xs font-semibold text-amber-300 hover:text-amber-200 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 transition-all cursor-pointer shadow-sm"
-            >
-              <Database className="w-3.5 h-3.5 text-amber-400" />
-              <span>Banco SQL</span>
-            </button>
-          )}
-
           {onOpenAdmin && currentScreen !== 'home' && (
             <button
               id="nav-admin-btn"
               onClick={onOpenAdmin}
-              title="Painel de Administração"
-              className="flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-xs font-semibold text-slate-300 hover:text-amber-300 hover:bg-slate-900 border border-slate-800 transition-all cursor-pointer shadow-sm"
+              title="Central de Gerenciamento"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-slate-300 hover:text-amber-300 hover:bg-slate-900 border border-slate-800 transition-all cursor-pointer shadow-sm"
             >
               <ShieldCheck className="w-4 h-4 text-amber-400" />
-              <span>Administração</span>
+              <span>Central de Gerenciamento</span>
             </button>
           )}
 
@@ -162,7 +153,16 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         {/* Mobile Right Bar (md:hidden) */}
         <div className="flex md:hidden items-center gap-2">
-          {currentScreen !== 'home' && (
+          {currentScreen !== 'home' ? (
+            <button
+              onClick={() => onNavigate('home')}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-800/90 hover:bg-rose-500/20 text-slate-200 hover:text-rose-300 border border-slate-700 hover:border-rose-500/40 font-bold text-xs shadow-sm cursor-pointer transition-colors"
+              title="Sair desta tela e voltar ao início"
+            >
+              <X className="w-4 h-4 text-rose-400" />
+              <span>Sair</span>
+            </button>
+          ) : (
             <button
               onClick={() => onNavigate('register')}
               className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 font-bold text-xs shadow-sm"
@@ -238,6 +238,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           {onOpenAdmin && (
             <button
+              id="nav-mobile-admin-btn"
               onClick={() => {
                 onOpenAdmin();
                 setIsMobileMenuOpen(false);
@@ -246,28 +247,10 @@ export const Navbar: React.FC<NavbarProps> = ({
             >
               <div className="flex items-center gap-3">
                 <ShieldCheck className="w-4 h-4 text-amber-400" />
-                <span>Painel de Administração</span>
+                <span>Central de Gerenciamento</span>
               </div>
               <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400">
                 Admin
-              </span>
-            </button>
-          )}
-
-          {onOpenSqlConsole && (
-            <button
-              onClick={() => {
-                onOpenSqlConsole();
-                setIsMobileMenuOpen(false);
-              }}
-              className="w-full flex items-center justify-between px-3.5 py-3 rounded-xl text-sm font-medium text-slate-300 hover:bg-slate-900 hover:text-white transition-colors"
-            >
-              <div className="flex items-center gap-3">
-                <Database className="w-4 h-4 text-amber-400" />
-                <span>Console Banco SQL</span>
-              </div>
-              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">
-                SQLite
               </span>
             </button>
           )}
@@ -293,6 +276,30 @@ export const Navbar: React.FC<NavbarProps> = ({
               </button>
             </div>
           )}
+
+          {/* Opção Fechar / Sair do Aplicativo */}
+          <div className="pt-2 border-t border-slate-800/80">
+            <button
+              onClick={() => {
+                setIsMobileMenuOpen(false);
+                onNavigate('home');
+                try {
+                  if (window.history.length > 1) {
+                    window.history.back();
+                  } else {
+                    window.close();
+                  }
+                } catch {}
+              }}
+              className="w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-semibold text-rose-300 hover:bg-rose-500/15 border border-rose-500/20 transition-colors"
+            >
+              <div className="flex items-center gap-2.5">
+                <X className="w-4 h-4 text-rose-400" />
+                <span>Fechar / Sair da Tela</span>
+              </div>
+              <span className="text-[10px] uppercase font-bold text-rose-400/80">Sair</span>
+            </button>
+          </div>
         </div>
       )}
     </header>

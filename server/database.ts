@@ -171,6 +171,71 @@ function initDatabase(db: any) {
     );
   `);
 
+  // 4. Tabela de Patrocinadores (Vitrine R$ 100)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS patrocinadores (
+      id TEXT PRIMARY KEY,
+      nome TEXT NOT NULL,
+      categoria TEXT NOT NULL,
+      descricao TEXT,
+      telefone TEXT NOT NULL,
+      endereco TEXT NOT NULL,
+      cidade TEXT NOT NULL,
+      estado TEXT NOT NULL,
+      badge TEXT,
+      latitude REAL,
+      longitude REAL,
+      imagem_url TEXT,
+      valor_mensal REAL DEFAULT 100.0,
+      ativo INTEGER DEFAULT 0,
+      liberado TEXT DEFAULT 'pendente',
+      status_pagamento TEXT DEFAULT 'pendente',
+      protocolo TEXT,
+      data_pagamento TEXT,
+      data_liberacao TEXT,
+      criado_em TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  // Migration: assegurar colunas liberado, protocolo, etc em bancos existentes
+  try {
+    const spCols = db.prepare("PRAGMA table_info(patrocinadores);").all() as { name: string }[];
+    const spColNames = new Set(spCols.map(c => c.name));
+    if (!spColNames.has('liberado')) {
+      db.exec("ALTER TABLE patrocinadores ADD COLUMN liberado TEXT DEFAULT 'pendente';");
+    }
+    if (!spColNames.has('protocolo')) {
+      db.exec("ALTER TABLE patrocinadores ADD COLUMN protocolo TEXT;");
+    }
+    if (!spColNames.has('data_pagamento')) {
+      db.exec("ALTER TABLE patrocinadores ADD COLUMN data_pagamento TEXT;");
+    }
+    if (!spColNames.has('data_liberacao')) {
+      db.exec("ALTER TABLE patrocinadores ADD COLUMN data_liberacao TEXT;");
+    }
+  } catch (e) {
+    console.warn('Erro ao verificar colunas de patrocinadores:', e);
+  }
+
+  // 5. Tabela de Pagamentos Pix (Mercado Pago)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pagamentos_pix (
+      id TEXT PRIMARY KEY,
+      patrocinador_id TEXT,
+      mercado_pago_id TEXT,
+      status TEXT DEFAULT 'pending',
+      valor REAL DEFAULT 100.0,
+      qr_code TEXT,
+      qr_code_base64 TEXT,
+      ticket_url TEXT,
+      telefone_notificado TEXT,
+      mensagem_enviada INTEGER DEFAULT 0,
+      criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+      pago_em TEXT,
+      FOREIGN KEY (patrocinador_id) REFERENCES patrocinadores(id) ON DELETE CASCADE
+    );
+  `);
+
   seedInitialData(db);
 }
 

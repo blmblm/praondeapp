@@ -32,9 +32,16 @@ import {
   LayoutGrid,
   Clock,
   Filter,
-  ImageIcon
+  ImageIcon,
+  Upload,
+  SlidersHorizontal,
+  BadgeAlert,
+  Send,
+  RefreshCw,
+  Ban
 } from 'lucide-react';
 import { EventItem, Advertiser, Supervisor, CityItem, CategoryItem } from '../types';
+import { SponsorItem } from '../data/sponsors';
 import { EventLiberationModal } from './EventLiberationModal';
 
 interface AdminModalProps {
@@ -51,6 +58,10 @@ interface AdminModalProps {
   onSetLiberado?: (id: string, liberado: 'S' | 'N') => Promise<void> | void;
   onSelectEvent: (event: EventItem) => void;
   onOpenSqlConsole: () => void;
+  isMasterAdminState?: boolean;
+  onMasterAuthChange?: (isMaster: boolean) => void;
+  sponsors?: SponsorItem[];
+  onUpdateSponsors?: (sponsors: SponsorItem[]) => void;
 }
 
 const ADMIN_PIN_KEY = 'praonde_admin_pin';
@@ -58,13 +69,15 @@ const SUPERVISORS_STORAGE_KEY = 'praonde_supervisors_v1';
 const CITIES_STORAGE_KEY = 'praonde_cities_v1';
 const INITIAL_PIN = '0612';
 
-// As 4 views principais solicitadas pelo usuário + menu e senhas
+// As views principais da central de gerenciamento
 type AdminPageView = 
   | 'menu' 
   | 'passwords' 
   | 'categories' 
   | 'supervisors' 
   | 'cities' 
+  | 'sponsors'
+  | 'liberar_patrocinadores'
   | 'liberar_eventos';
 
 const INITIAL_CITIES: CityItem[] = [
@@ -123,15 +136,63 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   onSetLiberado,
   onSelectEvent,
   onOpenSqlConsole,
+  isMasterAdminState = false,
+  onMasterAuthChange,
+  sponsors = [],
+  onUpdateSponsors,
 }) => {
+  // State for "Patrocinadores"
+  const [localSponsors, setLocalSponsors] = useState<SponsorItem[]>(sponsors);
+  const [sponsorName, setSponsorName] = useState('');
+  const [sponsorCategory, setSponsorCategory] = useState('Adega & Bebidas');
+  const [sponsorDesc, setSponsorDesc] = useState('');
+  const [sponsorBadge, setSponsorBadge] = useState('');
+  const [sponsorPhone, setSponsorPhone] = useState('');
+  const [sponsorAddress, setSponsorAddress] = useState('');
+  const [sponsorCity, setSponsorCity] = useState('Santo André');
+  const [sponsorState, setSponsorState] = useState('SP');
+  const [sponsorImage, setSponsorImage] = useState('');
+  const [sponsorFeedback, setSponsorFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+
+  useEffect(() => {
+    setLocalSponsors(sponsors);
+  }, [sponsors]);
   // Auth state - tela de senha ao clicar em administração (senha default: 0612 ou senha de supervisor)
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
-  const [isMasterAdmin, setIsMasterAdmin] = useState<boolean>(false);
-  const [authenticatedUser, setAuthenticatedUser] = useState<string>('');
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
+    if (isMasterAdminState) return true;
+    try {
+      return sessionStorage.getItem('praonde_master_0612') === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [isMasterAdmin, setIsMasterAdmin] = useState<boolean>(() => {
+    if (isMasterAdminState) return true;
+    try {
+      return sessionStorage.getItem('praonde_master_0612') === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [authenticatedUser, setAuthenticatedUser] = useState<string>(() => {
+    if (isMasterAdminState) return 'Administrador Master';
+    try {
+      if (sessionStorage.getItem('praonde_master_0612') === 'true') return 'Administrador Master';
+    } catch {}
+    return '';
+  });
   const [isVerifying, setIsVerifying] = useState<boolean>(false);
   const [passwordInput, setPasswordInput] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string>('');
+
+  useEffect(() => {
+    if (isMasterAdminState) {
+      setIsAuthenticated(true);
+      setIsMasterAdmin(true);
+      setAuthenticatedUser('Administrador Master');
+    }
+  }, [isMasterAdminState]);
 
   // Master Prompt para opções restritas exclusivamente à senha "0612" (Categorias, Supervisores, Cidades)
   const [masterPromptTarget, setMasterPromptTarget] = useState<AdminPageView | null>(null);
@@ -194,6 +255,45 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [eventFilterStatus, setEventFilterStatus] = useState<'blank' | 'rejected' | 'approved' | 'all'>('blank');
   const [selectedCategoryForLiberation, setSelectedCategoryForLiberation] = useState<string>('Todas');
   const [selectedEventForAnalysis, setSelectedEventForAnalysis] = useState<EventItem | null>(null);
+
+  // State for "Liberar Patrocinadores" (Revisão e Moderação de Anúncios)
+  const [dbSponsors, setDbSponsors] = useState<SponsorItem[]>([]);
+  const [loadingDbSponsors, setLoadingDbSponsors] = useState(false);
+  const [sponsorLiberationFilter, setSponsorLiberationFilter] = useState<'pendente' | 'S' | 'N' | 'all'>('pendente');
+  const [sponsorSearch, setSponsorSearch] = useState('');
+  const [sponsorLiberationFeedback, setSponsorLiberationFeedback] = useState<{ type: 'success' | 'error'; msg: string; whatsappUrl?: string } | null>(null);
+  const [actionInProgressSponsorId, setActionInProgressSponsorId] = useState<string | null>(null);
+
+  // Carregar patrocinadores do banco de dados para a Central de Gerenciamento
+  const fetchDbSponsors = async () => {
+    setLoadingDbSponsors(true);
+    try {
+      const res = await fetch('/api/admin/sponsors');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          setDbSponsors(data);
+          // Atualiza também a lista local caso sincronizada
+          setLocalSponsors((prev) => {
+            const map = new Map<string, SponsorItem>();
+            prev.forEach((s) => map.set(s.id, s));
+            data.forEach((s: SponsorItem) => map.set(s.id, s));
+            return Array.from(map.values());
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('Erro ao carregar patrocinadores do banco:', e);
+    } finally {
+      setLoadingDbSponsors(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isOpen) {
+      fetchDbSponsors();
+    }
+  }, [isOpen]);
 
   // Sincronizar supervisores do SQLite ao abrir
   useEffect(() => {
@@ -345,6 +445,10 @@ export const AdminModal: React.FC<AdminModalProps> = ({
       setAuthenticatedUser('Administrador Master');
       setIsAuthenticated(true);
       setIsMasterAdmin(true);
+      try {
+        sessionStorage.setItem('praonde_master_0612', 'true');
+      } catch {}
+      onMasterAuthChange?.(true);
       setCurrentView('menu');
       setErrorMessage('');
       setPasswordInput('');
@@ -360,6 +464,10 @@ export const AdminModal: React.FC<AdminModalProps> = ({
       setAuthenticatedUser(`Supervisor: ${matchedSupervisor.name}`);
       setIsAuthenticated(true);
       setIsMasterAdmin(false);
+      try {
+        sessionStorage.removeItem('praonde_master_0612');
+      } catch {}
+      onMasterAuthChange?.(false);
       setCurrentView('menu');
       setErrorMessage('');
       setPasswordInput('');
@@ -379,6 +487,10 @@ export const AdminModal: React.FC<AdminModalProps> = ({
         setAuthenticatedUser(data.user ? `Supervisor: ${data.user}` : 'Supervisor');
         setIsAuthenticated(true);
         setIsMasterAdmin(false);
+        try {
+          sessionStorage.removeItem('praonde_master_0612');
+        } catch {}
+        onMasterAuthChange?.(false);
         setCurrentView('menu');
         setErrorMessage('');
         setPasswordInput('');
@@ -421,6 +533,10 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     if (cleaned === INITIAL_PIN || cleaned === stored) {
       setIsMasterAdmin(true);
       setAuthenticatedUser('Administrador Master');
+      try {
+        sessionStorage.setItem('praonde_master_0612', 'true');
+      } catch {}
+      onMasterAuthChange?.(true);
       if (masterPromptTarget) {
         setCurrentView(masterPromptTarget);
       }
@@ -821,16 +937,16 @@ export const AdminModal: React.FC<AdminModalProps> = ({
             <div className="w-14 h-14 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 mx-auto mb-3 shadow-inner">
               <Lock className="w-7 h-7" />
             </div>
-            <h2 className="text-xl font-bold text-white mb-1">Acesso Administrativo</h2>
+            <h2 className="text-xl font-bold text-white mb-1">Central de Gerenciamento</h2>
             <p className="text-xs text-slate-400">
-              Senha do Supervisor
+              Digite a senha de Administrador Master ou Supervisor
             </p>
           </div>
 
           <form onSubmit={handlePasswordSubmit} className="space-y-4">
             <div>
               <label htmlFor="admin-password-input" className="block text-xs font-semibold text-slate-300 mb-2">
-                Senha do Supervisor
+                Senha de Acesso
               </label>
               <div className="relative">
                 <input
@@ -923,7 +1039,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <h2 className="text-sm sm:text-lg font-bold text-white truncate">
-                  Administração - Cadastro & Atualização
+                  Central de Gerenciamento
                 </h2>
                 <span className={`text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-md border shrink-0 ${
                   isMasterAdmin
@@ -934,7 +1050,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                 </span>
               </div>
               <p className="text-[11px] sm:text-xs text-slate-400 truncate hidden xs:block sm:block">
-                Cadastro e atualização de categorias, supervisores, cidades e eventos
+                Painel administrativo de liberação de eventos, cadastros e banco de dados
               </p>
             </div>
           </div>
@@ -946,6 +1062,10 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                 setIsMasterAdmin(false);
                 setAuthenticatedUser('');
                 setMasterPromptTarget(null);
+                try {
+                  sessionStorage.removeItem('praonde_master_0612');
+                } catch {}
+                onMasterAuthChange?.(false);
               }}
               className="px-2.5 py-1.5 rounded-xl bg-slate-800/80 hover:bg-rose-500/20 text-slate-300 hover:text-rose-300 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
               title="Bloquear / Trocar de usuário"
@@ -983,13 +1103,14 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                 </p>
               </div>
 
-              {/* OS 4 BOTÕES SOLICITADOS:
+              {/* OS BOTÕES PRINCIPAIS DA CENTRAL DE GERENCIAMENTO:
                   1. "Liberar Eventos"
                   2. "Cadastrar Categoria"
                   3. "Cadastrar Supervisor"
                   4. "Cadastrar Cidades"
+                  5. "Console Banco SQL" (Exclusivo senha 0612)
               */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 pt-2">
+              <div className={`grid grid-cols-1 sm:grid-cols-2 ${isMasterAdmin ? 'lg:grid-cols-3 xl:grid-cols-5' : 'lg:grid-cols-4'} gap-4 pt-2`}>
                 
                 {/* BOTÃO 1: LIBERAR EVENTOS */}
                 <button
@@ -1075,6 +1196,82 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   </div>
                 </button>
 
+                {/* BOTÃO 5: CADASTRAR PATROCINADORES (NOVIDADE MONETIZAÇÃO) */}
+                <button
+                  id="btn-admin-cadastrar-patrocinadores"
+                  onClick={() => setCurrentView('sponsors')}
+                  className="group relative flex flex-col items-center text-center p-5 rounded-2xl bg-gradient-to-b from-slate-800/80 to-slate-950 border border-slate-700/80 hover:border-amber-500/60 hover:shadow-xl hover:shadow-amber-500/10 transition-all duration-200 cursor-pointer"
+                >
+                  <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-amber-500/20 to-orange-500/20 border border-amber-500/40 flex items-center justify-center text-amber-300 group-hover:scale-105 transition-all mb-3 shadow-inner">
+                    <Sparkles className="w-7 h-7" />
+                  </div>
+                  <h4 className="text-base font-bold text-white group-hover:text-amber-300 transition-colors mb-1.5">
+                    Patrocinadores Locais
+                  </h4>
+                  <p className="text-xs text-slate-400 leading-relaxed flex-1">
+                    Cadastre novos parceiros e gerencie comércios da vitrine (R$ 100/mês).
+                  </p>
+                  <div className="mt-4 inline-flex items-center gap-1 text-xs font-bold text-amber-400">
+                    <span>Acessar ({localSponsors.length})</span>
+                    <span className="group-hover:translate-x-1 transition-transform">→</span>
+                  </div>
+                </button>
+
+                {/* BOTÃO NOVO: LIBERAR PATROCINADORES (REVISÃO DE SEGURANÇA ATÉ 48 HORAS) */}
+                <button
+                  id="btn-admin-liberar-patrocinadores"
+                  onClick={() => {
+                    fetchDbSponsors();
+                    setCurrentView('liberar_patrocinadores');
+                  }}
+                  className="group relative flex flex-col items-center text-center p-5 rounded-2xl bg-gradient-to-b from-slate-800/80 to-slate-950 border border-amber-500/50 hover:border-amber-400 hover:shadow-xl hover:shadow-amber-500/15 transition-all duration-200 cursor-pointer"
+                >
+                  <div className="relative w-14 h-14 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-300 group-hover:scale-105 group-hover:bg-amber-500/25 transition-all mb-3 shadow-inner">
+                    <ShieldCheck className="w-7 h-7" />
+                    {dbSponsors.filter((s) => s.liberado === 'pendente' || (s.statusPagamento === 'pago' && !s.active)).length > 0 && (
+                      <span className="absolute -top-1.5 -right-1.5 px-2 py-0.5 rounded-full bg-amber-500 text-slate-950 text-[10px] font-black animate-pulse shadow-md">
+                        {dbSponsors.filter((s) => s.liberado === 'pendente' || (s.statusPagamento === 'pago' && !s.active)).length}
+                      </span>
+                    )}
+                  </div>
+                  <h4 className="text-base font-bold text-white group-hover:text-amber-300 transition-colors mb-1.5">
+                    Liberar Patrocinadores
+                  </h4>
+                  <p className="text-xs text-slate-400 leading-relaxed flex-1">
+                    Análise e liberação de segurança em até 48h ({dbSponsors.filter((s) => s.liberado === 'pendente').length} aguardando análise).
+                  </p>
+                  <div className="mt-4 inline-flex items-center gap-1 text-xs font-bold text-amber-400">
+                    <span>Liberar Anúncios</span>
+                    <span className="group-hover:translate-x-1 transition-transform">→</span>
+                  </div>
+                </button>
+
+                {/* BOTÃO 6: CONSOLE BANCO SQL (Aparece SOMENTE na senha "0612") */}
+                {isMasterAdmin && (
+                  <button
+                    id="btn-admin-cadastrar-banco-sql"
+                    onClick={() => {
+                      onClose();
+                      onOpenSqlConsole();
+                    }}
+                    className="group relative flex flex-col items-center text-center p-5 rounded-2xl bg-gradient-to-b from-slate-800/80 to-slate-950 border border-amber-500/50 hover:border-amber-400 hover:shadow-xl hover:shadow-amber-500/15 transition-all duration-200 cursor-pointer animate-in fade-in"
+                  >
+                    <div className="w-14 h-14 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 group-hover:scale-105 group-hover:bg-amber-500/25 transition-all mb-3 shadow-inner">
+                      <Database className="w-7 h-7" />
+                    </div>
+                    <h4 className="text-base font-bold text-white group-hover:text-amber-300 transition-colors mb-1.5">
+                      Console Banco SQL
+                    </h4>
+                    <p className="text-xs text-slate-400 leading-relaxed flex-1">
+                      Consultas SQL nativas, tabelas, logs e manutenção do banco de dados praondeeu.db.
+                    </p>
+                    <div className="mt-4 inline-flex items-center gap-1 text-xs font-bold text-amber-400">
+                      <span>Acessar Console</span>
+                      <span className="group-hover:translate-x-1 transition-transform">→</span>
+                    </div>
+                  </button>
+                )}
+
               </div>
 
               {/* Barra inferior de ferramentas e configuração de senha */}
@@ -1091,16 +1288,21 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   <span>Banco de Dados: <code className="text-slate-300 font-mono">praondeeu.db</code></span>
                 </div>
 
-                <button
-                  onClick={() => {
-                    onClose();
-                    onOpenSqlConsole();
-                  }}
-                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer"
-                >
-                  <Database className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Abrir Console SQL</span>
-                </button>
+                {/* Console Banco SQL: Exclusivo Senha 0612 */}
+                {isMasterAdmin && (
+                  <button
+                    id="btn-admin-sql-console"
+                    onClick={() => {
+                      onClose();
+                      onOpenSqlConsole();
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 hover:text-amber-200 border border-amber-500/40 flex items-center gap-1.5 transition-colors cursor-pointer text-xs font-semibold shadow-sm"
+                    title="Console Banco SQL (Acesso Master)"
+                  >
+                    <Database className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Console Banco SQL</span>
+                  </button>
+                )}
               </div>
 
               {/* Modal de Desbloqueio com Senha "0612" */}
@@ -2247,6 +2449,736 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                     </button>
                   </div>
                 </form>
+              </div>
+            </div>
+          )}
+
+          {/* =========================================================================
+              VIEW: PATROCINADORES LOCAIS (R$ 100,00/MÊS)
+              ========================================================================= */}
+          {currentView === 'sponsors' && (
+            <div className="max-w-4xl mx-auto py-2 space-y-6 animate-in fade-in duration-200">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                <div className="flex items-center gap-2.5">
+                  <button
+                    onClick={() => setCurrentView('menu')}
+                    className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors cursor-pointer"
+                  >
+                    <ArrowLeft className="w-4 h-4" />
+                  </button>
+                  <div>
+                    <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                      <span>⭐ Patrocinadores em Destaque (Vitrine R$ 100,00)</span>
+                    </h3>
+                    <p className="text-xs text-slate-400">
+                      Cadastre os parceiros locais que aparecem na vitrine dos 5 mais próximos.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Formulário de Novo Patrocinador */}
+              <div className="bg-slate-950/70 border border-amber-500/30 rounded-2xl p-5 shadow-lg">
+                <h4 className="text-sm font-bold text-amber-300 mb-3 flex items-center gap-2">
+                  <Plus className="w-4 h-4 text-amber-400" />
+                  <span>Cadastrar Novo Patrocinador</span>
+                </h4>
+
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (!sponsorName.trim() || !sponsorPhone.trim() || !sponsorAddress.trim()) {
+                      setSponsorFeedback({ type: 'error', msg: 'Preencha o nome do comércio, WhatsApp e endereço.' });
+                      return;
+                    }
+
+                    const newSp: SponsorItem = {
+                      id: `sp-${Date.now()}`,
+                      name: sponsorName.trim(),
+                      category: sponsorCategory,
+                      description: sponsorDesc.trim() || 'Comércio parceiro recomendado na sua região.',
+                      badge: sponsorBadge.trim() || undefined,
+                      phone: sponsorPhone.replace(/\D/g, ''),
+                      address: sponsorAddress.trim(),
+                      city: sponsorCity.trim(),
+                      state: sponsorState.trim(),
+                      latitude: -23.6575 + (Math.random() - 0.5) * 0.05, // Coordenadas aproximadas
+                      longitude: -46.5312 + (Math.random() - 0.5) * 0.05,
+                      imageUrl: sponsorImage.trim() || 'https://images.unsplash.com/photo-1514933651103-005eec06c04b?auto=format&fit=crop&w=600&q=80',
+                      monthlyFee: 100,
+                      active: true,
+                      createdAt: new Date().toISOString().split('T')[0],
+                    };
+
+                    const updated = [newSp, ...localSponsors];
+                    setLocalSponsors(updated);
+                    onUpdateSponsors?.(updated);
+                    try {
+                      localStorage.setItem('praonde_sponsors_v1', JSON.stringify(updated));
+                    } catch {}
+
+                    setSponsorFeedback({ type: 'success', msg: `Patrocinador "${newSp.name}" cadastrado com sucesso!` });
+                    setSponsorName('');
+                    setSponsorPhone('');
+                    setSponsorAddress('');
+                    setSponsorDesc('');
+                    setSponsorBadge('');
+                    setSponsorImage('');
+                  }}
+                  className="space-y-4"
+                >
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div className="sm:col-span-2">
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">
+                        Nome do Comércio / Estabelecimento *
+                      </label>
+                      <input
+                        type="text"
+                        value={sponsorName}
+                        onChange={(e) => setSponsorName(e.target.value)}
+                        placeholder="Ex: Adega do Baile, Bar do Samba, Lava Rápido VIP..."
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">
+                        Segmento / Categoria
+                      </label>
+                      <select
+                        value={sponsorCategory}
+                        onChange={(e) => setSponsorCategory(e.target.value)}
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
+                      >
+                        <option value="Adega & Bebidas">Adega & Bebidas</option>
+                        <option value="Bar & Petiscaria">Bar & Petiscaria</option>
+                        <option value="Pizzaria & Lanches">Pizzaria & Lanches</option>
+                        <option value="Estacionamento Seguro">Estacionamento Seguro</option>
+                        <option value="Beleza & Estilo">Beleza & Estilo</option>
+                        <option value="Moda & Roupas de Festa">Moda & Roupas de Festa</option>
+                        <option value="Hotel & Hospedagem">Hotel & Hospedagem</option>
+                        <option value="Outros">Outros Serviços</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">
+                        WhatsApp Comercial (DDD + Número) *
+                      </label>
+                      <input
+                        type="text"
+                        value={sponsorPhone}
+                        onChange={(e) => setSponsorPhone(e.target.value)}
+                        placeholder="11999887766"
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">
+                        Cidade
+                      </label>
+                      <input
+                        type="text"
+                        value={sponsorCity}
+                        onChange={(e) => setSponsorCity(e.target.value)}
+                        placeholder="Santo André"
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">
+                        Selo Promocional (Opcional)
+                      </label>
+                      <input
+                        type="text"
+                        value={sponsorBadge}
+                        onChange={(e) => setSponsorBadge(e.target.value)}
+                        placeholder="Ex: Desconto no Esquenta, Top 1"
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">
+                        Endereço Completo (Para cálculo de proximidade) *
+                      </label>
+                      <input
+                        type="text"
+                        value={sponsorAddress}
+                        onChange={(e) => setSponsorAddress(e.target.value)}
+                        placeholder="Av. Dom Pedro II, 1420 - Bairro Jardim"
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">
+                        Foto / Fachada (Escolher do Celular ou Link)
+                      </label>
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <label
+                            htmlFor="sponsor-file-input"
+                            className="inline-flex items-center gap-1.5 px-3 py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-slate-950 font-bold text-xs rounded-xl cursor-pointer transition-all shadow-md active:scale-95 shrink-0"
+                          >
+                            <Upload className="w-3.5 h-3.5" />
+                            <span>Buscar no Celular</span>
+                          </label>
+                          <input
+                            id="sponsor-file-input"
+                            type="file"
+                            accept="image/*"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) {
+                                if (!file.type.startsWith('image/')) {
+                                  setSponsorFeedback({ type: 'error', msg: 'Por favor, selecione um arquivo de imagem válido (JPG, PNG, WEBP).' });
+                                  return;
+                                }
+                                const reader = new FileReader();
+                                reader.onload = (uploadEvt) => {
+                                  if (typeof uploadEvt.target?.result === 'string') {
+                                    setSponsorImage(uploadEvt.target.result);
+                                    setSponsorFeedback({ type: 'success', msg: 'Foto do celular carregada com sucesso!' });
+                                  }
+                                };
+                                reader.readAsDataURL(file);
+                              }
+                            }}
+                            className="hidden"
+                          />
+                          <input
+                            type="text"
+                            value={sponsorImage}
+                            onChange={(e) => setSponsorImage(e.target.value)}
+                            placeholder="Ou cole o link da foto..."
+                            className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500 min-w-0"
+                          />
+                        </div>
+
+                        {/* Preview da foto se selecionada ou linkada */}
+                        {sponsorImage && (
+                          <div className="flex items-center gap-2.5 p-2 bg-slate-900/90 border border-amber-500/30 rounded-xl">
+                            <img
+                              src={sponsorImage}
+                              alt="Pré-visualização da fachada"
+                              className="w-12 h-12 object-cover rounded-lg border border-slate-700 shrink-0 bg-slate-800"
+                              referrerPolicy="no-referrer"
+                            />
+                            <div className="min-w-0 flex-1">
+                              <span className="text-[11px] text-amber-300 font-semibold block truncate">
+                                Imagem carregada pronta para salvar
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => setSponsorImage('')}
+                                className="text-[10px] text-red-400 hover:text-red-300 underline font-medium mt-0.5"
+                              >
+                                Remover imagem
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">
+                      Breve Descrição / Chamada Promocional
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={sponsorDesc}
+                      onChange={(e) => setSponsorDesc(e.target.value)}
+                      placeholder="Cerveja trincando, combos e porções para curtir o melhor esquenta antes do baile."
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500 resize-none"
+                    />
+                  </div>
+
+                  {sponsorFeedback && (
+                    <div
+                      className={`p-3 rounded-xl text-xs flex items-center gap-2 border ${
+                        sponsorFeedback.type === 'success'
+                          ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                          : 'bg-rose-500/10 border-rose-500/30 text-rose-400'
+                      }`}
+                    >
+                      {sponsorFeedback.type === 'success' ? (
+                        <Check className="w-4 h-4 flex-shrink-0" />
+                      ) : (
+                        <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                      )}
+                      <span>{sponsorFeedback.msg}</span>
+                    </div>
+                  )}
+
+                  <div className="flex justify-end pt-1">
+                    <button
+                      type="submit"
+                      className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 text-xs font-bold shadow-md shadow-amber-500/20 flex items-center gap-1.5 transition-all cursor-pointer"
+                    >
+                      <Plus className="w-4 h-4" />
+                      <span>Salvar Patrocinador (R$ 100/mês)</span>
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              {/* Lista dos Patrocinadores Cadastrados */}
+              <div>
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">
+                  Patrocinadores Ativos no App ({localSponsors.length})
+                </h4>
+
+                <div className="space-y-3">
+                  {localSponsors.map((sp) => (
+                    <div
+                      key={sp.id}
+                      className="flex items-center justify-between gap-3 p-3.5 bg-slate-950 border border-slate-800 hover:border-slate-700 rounded-xl transition-all"
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <img
+                          src={sp.imageUrl}
+                          alt={sp.name}
+                          className="w-12 h-12 rounded-lg object-cover bg-slate-800 border border-slate-700 shrink-0"
+                        />
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <h5 className="text-xs font-bold text-white truncate">{sp.name}</h5>
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-semibold">
+                              {sp.category}
+                            </span>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold">
+                              R$ {sp.monthlyFee},00
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-400 truncate mt-0.5">
+                            {sp.address} • {sp.city}/{sp.state} • WhatsApp: {sp.phone}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          onClick={() => {
+                            const updated = localSponsors.filter((s) => s.id !== sp.id);
+                            setLocalSponsors(updated);
+                            onUpdateSponsors?.(updated);
+                            try {
+                              localStorage.setItem('praonde_sponsors_v1', JSON.stringify(updated));
+                            } catch {}
+                          }}
+                          className="p-1.5 text-slate-400 hover:text-rose-400 rounded-lg hover:bg-rose-500/10 transition-colors cursor-pointer"
+                          title="Remover patrocinador"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* =========================================================================
+              VIEW: LIBERAR PATROCINADORES (MODERAÇÃO E ANÁLISE DE SEGURANÇA EM ATÉ 48 HORAS)
+              ========================================================================= */}
+          {currentView === 'liberar_patrocinadores' && (
+            <div className="space-y-6 max-w-5xl mx-auto">
+              {/* Header com botões e filtros */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-4">
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => setCurrentView('menu')}
+                    className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors cursor-pointer"
+                    title="Voltar ao Menu"
+                  >
+                    <ArrowLeft className="w-4 h-4" />
+                  </button>
+                  <div>
+                    <h3 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+                      <span>Liberação de Patrocinadores Locais</span>
+                      <span className="text-xs px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-extrabold">
+                        R$ 100/mês
+                      </span>
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Controle de segurança: Anúncios pagos via Pix passam por análise e liberação em até 48h antes de aparecer no app.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={fetchDbSponsors}
+                    disabled={loadingDbSponsors}
+                    className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-60"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${loadingDbSponsors ? 'animate-spin' : ''}`} />
+                    <span>Atualizar Lista</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Feedback de Ação */}
+              {sponsorLiberationFeedback && (
+                <div className={`p-4 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                  sponsorLiberationFeedback.type === 'success' 
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' 
+                    : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                }`}>
+                  <div className="flex items-center gap-2 text-xs">
+                    {sponsorLiberationFeedback.type === 'success' ? (
+                      <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+                    )}
+                    <span>{sponsorLiberationFeedback.msg}</span>
+                  </div>
+
+                  {sponsorLiberationFeedback.whatsappUrl && (
+                    <a
+                      href={sponsorLiberationFeedback.whatsappUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-black text-xs shadow-md transition-all flex items-center gap-1.5 shrink-0 self-start sm:self-auto cursor-pointer"
+                    >
+                      <Send className="w-3.5 h-3.5" />
+                      <span>Avisar Anunciante no WhatsApp</span>
+                    </a>
+                  )}
+                </div>
+              )}
+
+              {/* Filtros e Busca */}
+              <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center justify-between bg-slate-950/60 p-3.5 rounded-2xl border border-slate-800">
+                {/* Tabs de status */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    onClick={() => setSponsorLiberationFilter('pendente')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                      sponsorLiberationFilter === 'pendente'
+                        ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20'
+                        : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                    }`}
+                  >
+                    <Clock className="w-3.5 h-3.5" />
+                    <span>Aguardando Liberação</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-950/40 text-current font-black">
+                      {dbSponsors.filter((s) => s.liberado === 'pendente').length}
+                    </span>
+                  </button>
+
+                  <button
+                    onClick={() => setSponsorLiberationFilter('S')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                      sponsorLiberationFilter === 'S'
+                        ? 'bg-emerald-500 text-slate-950 shadow-md shadow-emerald-500/20'
+                        : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                    }`}
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>Liberados / Ativos</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-950/40 text-current font-black">
+                      {dbSponsors.filter((s) => s.liberado === 'S' && s.active).length}
+                    </span>
+                  </button>
+
+                  <button
+                    onClick={() => setSponsorLiberationFilter('N')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                      sponsorLiberationFilter === 'N'
+                        ? 'bg-rose-500 text-slate-950 shadow-md shadow-rose-500/20'
+                        : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                    }`}
+                  >
+                    <Ban className="w-3.5 h-3.5" />
+                    <span>Rejeitados / Pausados</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-950/40 text-current font-black">
+                      {dbSponsors.filter((s) => s.liberado === 'N').length}
+                    </span>
+                  </button>
+
+                  <button
+                    onClick={() => setSponsorLiberationFilter('all')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                      sponsorLiberationFilter === 'all'
+                        ? 'bg-sky-500 text-slate-950 shadow-md shadow-sky-500/20'
+                        : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                    }`}
+                  >
+                    Todos ({dbSponsors.length})
+                  </button>
+                </div>
+
+                {/* Input de busca */}
+                <div className="relative min-w-[240px]">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={sponsorSearch}
+                    onChange={(e) => setSponsorSearch(e.target.value)}
+                    placeholder="Buscar por nome, cidade, protocolo..."
+                    className="w-full pl-9 pr-3 py-1.5 bg-slate-900 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  />
+                </div>
+              </div>
+
+              {/* Lista dos Patrocinadores para Moderação */}
+              <div className="space-y-3">
+                {(() => {
+                  const filtered = dbSponsors.filter((s) => {
+                    // Filtro de status
+                    if (sponsorLiberationFilter !== 'all') {
+                      if (sponsorLiberationFilter === 'pendente' && s.liberado !== 'pendente') return false;
+                      if (sponsorLiberationFilter === 'S' && s.liberado !== 'S') return false;
+                      if (sponsorLiberationFilter === 'N' && s.liberado !== 'N') return false;
+                    }
+
+                    // Filtro de busca
+                    if (sponsorSearch.trim()) {
+                      const q = sponsorSearch.toLowerCase();
+                      const matchName = s.name.toLowerCase().includes(q);
+                      const matchCity = s.city.toLowerCase().includes(q);
+                      const matchProt = s.protocolo ? s.protocolo.toLowerCase().includes(q) : false;
+                      const matchPhone = s.phone ? s.phone.includes(q) : false;
+                      return matchName || matchCity || matchProt || matchPhone;
+                    }
+
+                    return true;
+                  });
+
+                  if (filtered.length === 0) {
+                    return (
+                      <div className="p-12 text-center bg-slate-950/60 rounded-3xl border border-slate-800">
+                        <ShieldCheck className="w-12 h-12 text-slate-600 mx-auto mb-3" />
+                        <h4 className="text-sm font-bold text-white mb-1">
+                          Nenhum patrocinador encontrado neste filtro
+                        </h4>
+                        <p className="text-xs text-slate-400 max-w-sm mx-auto">
+                          {sponsorLiberationFilter === 'pendente'
+                            ? 'Excelente! No momento não há nenhum anúncio pendente de aprovação em 48 horas.'
+                            : 'Altere o filtro acima ou pesquise por outros termos.'}
+                        </p>
+                      </div>
+                    );
+                  }
+
+                  return filtered.map((sp) => {
+                    const isProcessing = actionInProgressSponsorId === sp.id;
+                    const isPending = sp.liberado === 'pendente';
+                    const isApproved = sp.liberado === 'S' && sp.active;
+                    const isPaid = sp.statusPagamento === 'pago';
+
+                    return (
+                      <div
+                        key={sp.id}
+                        className={`p-4 sm:p-5 rounded-2xl border transition-all ${
+                          isPending
+                            ? 'bg-slate-900/90 border-amber-500/50 hover:border-amber-400 shadow-lg shadow-amber-500/5'
+                            : isApproved
+                            ? 'bg-slate-950 border-slate-800 hover:border-emerald-500/40'
+                            : 'bg-slate-950/60 border-slate-800/80 opacity-75'
+                        }`}
+                      >
+                        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                          {/* Info do Comércio */}
+                          <div className="flex items-start gap-4 min-w-0 flex-1">
+                            <img
+                              src={sp.imageUrl}
+                              alt={sp.name}
+                              className="w-16 h-16 sm:w-20 sm:h-20 rounded-xl object-cover bg-slate-800 border border-slate-700 shrink-0"
+                            />
+
+                            <div className="min-w-0 flex-1 space-y-1.5">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <h4 className="text-sm sm:text-base font-bold text-white">
+                                  {sp.name}
+                                </h4>
+
+                                <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-amber-300 font-semibold border border-amber-500/30">
+                                  {sp.category}
+                                </span>
+
+                                {/* Status de Pagamento */}
+                                {isPaid ? (
+                                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-extrabold border border-emerald-500/40 flex items-center gap-1">
+                                    <Check className="w-3 h-3" /> Pix Pago (R$ 100,00)
+                                  </span>
+                                ) : (
+                                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-bold border border-amber-500/30">
+                                    Pagamento Pendente
+                                  </span>
+                                )}
+
+                                {/* Status de Moderação */}
+                                {isPending && (
+                                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/25 text-amber-300 font-black border border-amber-400/60 flex items-center gap-1 animate-pulse">
+                                    <Clock className="w-3 h-3" /> Análise até 48h
+                                  </span>
+                                )}
+                                {isApproved && (
+                                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/25 text-emerald-300 font-black border border-emerald-400/60 flex items-center gap-1">
+                                    <CheckCircle2 className="w-3 h-3" /> Ativo na Vitrine
+                                  </span>
+                                )}
+                                {sp.liberado === 'N' && (
+                                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 font-bold border border-rose-500/40">
+                                    Rejeitado / Inativo
+                                  </span>
+                                )}
+                              </div>
+
+                              <p className="text-xs text-slate-300 line-clamp-2">
+                                {sp.description || 'Sem descrição informada.'}
+                              </p>
+
+                              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-400 pt-1">
+                                <span className="flex items-center gap-1">
+                                  <MapPin className="w-3 h-3 text-amber-400" />
+                                  {sp.address} • {sp.city}/{sp.state}
+                                </span>
+                                <span className="flex items-center gap-1">
+                                  <Phone className="w-3 h-3 text-emerald-400" />
+                                  WhatsApp: <strong>{sp.phone}</strong>
+                                </span>
+                                {sp.protocolo && (
+                                  <span className="font-mono text-slate-400">
+                                    Protocolo: <strong className="text-amber-300">{sp.protocolo}</strong>
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Botões de Ação de Liberação */}
+                          <div className="flex items-center gap-2 shrink-0 pt-2 lg:pt-0 border-t lg:border-t-0 border-slate-800">
+                            {/* Botão APROVAR E LIBERAR */}
+                            {sp.liberado !== 'S' && (
+                              <button
+                                onClick={async () => {
+                                  setActionInProgressSponsorId(sp.id);
+                                  setSponsorLiberationFeedback(null);
+                                  try {
+                                    const res = await fetch(`/api/admin/sponsors/${sp.id}/liberacao`, {
+                                      method: 'POST',
+                                      headers: { 'Content-Type': 'application/json' },
+                                      body: JSON.stringify({ action: 'aprovar' }),
+                                    });
+                                    const data = await res.json();
+                                    if (data.success) {
+                                      setSponsorLiberationFeedback({
+                                        type: 'success',
+                                        msg: `Anúncio de "${sp.name}" foi APROVADO e LIBERADO com sucesso! Já está visível na vitrine por proximidade.`,
+                                        whatsappUrl: data.whatsappNotifyUrl,
+                                      });
+                                      await fetchDbSponsors();
+                                    }
+                                  } catch (err: any) {
+                                    setSponsorLiberationFeedback({
+                                      type: 'error',
+                                      msg: err.message || 'Erro ao aprovar patrocinador.',
+                                    });
+                                  } finally {
+                                    setActionInProgressSponsorId(null);
+                                  }
+                                }}
+                                disabled={isProcessing}
+                                className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-xs shadow-md shadow-emerald-500/20 flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
+                              >
+                                {isProcessing ? (
+                                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <CheckCircle2 className="w-3.5 h-3.5" />
+                                )}
+                                <span>Liberar Anúncio</span>
+                              </button>
+                            )}
+
+                            {/* Botão REJEITAR OU PAUSAR */}
+                            {sp.liberado === 'S' ? (
+                              <button
+                                onClick={async () => {
+                                  if (!confirm(`Deseja pausar a veiculação do anúncio "${sp.name}" na vitrine?`)) return;
+                                  setActionInProgressSponsorId(sp.id);
+                                  try {
+                                    await fetch(`/api/admin/sponsors/${sp.id}/liberacao`, {
+                                      method: 'POST',
+                                      headers: { 'Content-Type': 'application/json' },
+                                      body: JSON.stringify({ action: 'pausar' }),
+                                    });
+                                    await fetchDbSponsors();
+                                  } finally {
+                                    setActionInProgressSponsorId(null);
+                                  }
+                                }}
+                                disabled={isProcessing}
+                                className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs font-bold border border-slate-700 transition-colors cursor-pointer"
+                              >
+                                Pausar
+                              </button>
+                            ) : (
+                              <button
+                                onClick={async () => {
+                                  const motivo = prompt('Informe o motivo da recusa cadastral (opcional):', 'Ajuste de dados ou foto');
+                                  setActionInProgressSponsorId(sp.id);
+                                  try {
+                                    const res = await fetch(`/api/admin/sponsors/${sp.id}/liberacao`, {
+                                      method: 'POST',
+                                      headers: { 'Content-Type': 'application/json' },
+                                      body: JSON.stringify({ action: 'rejeitar', motivo }),
+                                    });
+                                    const data = await res.json();
+                                    if (data.success) {
+                                      setSponsorLiberationFeedback({
+                                        type: 'success',
+                                        msg: `Anúncio de "${sp.name}" marcado como rejeitado.`,
+                                        whatsappUrl: data.whatsappNotifyUrl,
+                                      });
+                                      await fetchDbSponsors();
+                                    }
+                                  } finally {
+                                    setActionInProgressSponsorId(null);
+                                  }
+                                }}
+                                disabled={isProcessing}
+                                className="px-3 py-2 rounded-xl bg-slate-800/80 hover:bg-rose-500/20 text-rose-300 text-xs font-semibold border border-slate-700 hover:border-rose-500/40 transition-colors cursor-pointer"
+                              >
+                                Rejeitar
+                              </button>
+                            )}
+
+                            {/* Botão de contato direto pelo WhatsApp */}
+                            {sp.phone && (
+                              <a
+                                href={`https://wa.me/55${sp.phone.replace(/\D/g, '')}?text=${encodeURIComponent(
+                                  `Olá, ${sp.name}! Somos da equipe de moderação do aplicativo Pra onde eu vou.`
+                                )}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="p-2.5 rounded-xl bg-slate-800 hover:bg-emerald-500/20 text-slate-300 hover:text-emerald-400 border border-slate-700 transition-colors cursor-pointer"
+                                title="Conversar com o anunciante no WhatsApp"
+                              >
+                                <Phone className="w-3.5 h-3.5" />
+                              </a>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  });
+                })()}
               </div>
             </div>
           )}
