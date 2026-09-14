@@ -1,0 +1,80 @@
+{
+  "entities": {
+    "Evento": {
+      "title": "Evento",
+      "description": "Eventos culturais, musicais e de dança",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "anuncianteId": { "type": "string" },
+        "categoryId": { "type": "number" },
+        "category": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "date": { "type": "string" },
+        "time": { "type": "string" },
+        "endDate": { "type": "string" },
+        "endTime": { "type": "string" },
+        "locationName": { "type": "string" },
+        "address": { "type": "string" },
+        "city": { "type": "string" },
+        "state": { "type": "string" },
+        "latitude": { "type": "string" },
+        "longitude": { "type": "string" },
+        "liberado": { "type": "string" },
+        "isFree": { "type": "boolean" },
+        "price": { "type": "number" },
+        "priceDetails": { "type": "string" },
+        "imageUrl": { "type": "string" },
+        "organizer": { "type": "string" },
+        "contact": { "type": "string" },
+        "tags": { "type": "string" },
+        "featured": { "type": "boolean" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["title", "category", "date", "time", "locationName", "city", "state"]
+    },
+    "Estado": {
+      "title": "Estado",
+      "description": "Tabela de estados/cidades para filtro",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "nome": { "type": "string" },
+        "estado": { "type": "string" },
+        "regiao": { "type": "string" },
+        "ativa": { "type": "number" },
+        "criado_em": { "type": "string" }
+      },
+      "required": ["nome", "estado"]
+    },
+    "Categoria": {
+      "title": "Categoria",
+      "description": "Categorias e ritmos de eventos",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "nome": { "type": "string" },
+        "descricao": { "type": "string" },
+        "ativa": { "type": "number" },
+        "criado_em": { "type": "string" }
+      },
+      "required": ["nome"]
+    }
+  },
+  "firestore": {
+    "/eventos/{eventoId}": {
+      "schema": "Evento",
+      "description": "Coleção global de eventos sincronizada em tempo real entre PC e Celular"
+    },
+    "/estado/{estadoId}": {
+      "schema": "Estado",
+      "description": "Coleção de estados e cidades disponíveis para filtros"
+    },
+    "/categorias/{categoriaId}": {
+      "schema": "Categoria",
+      "description": "Coleção de categorias cadastradas"
+    }
+  }
+}

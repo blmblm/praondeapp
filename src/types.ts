@@ -16,6 +16,15 @@ export interface CategoryItem {
   criadoEm?: string;
 }
 
+export interface CidadeItem {
+  id: number;
+  nome: string;
+  estado: string;
+  regiao?: string;
+  ativa?: boolean;
+  criadoEm?: string;
+}
+
 export interface EventItem {
   id: string;
   title: string;
@@ -74,5 +83,7 @@ export interface CityItem {
   region?: string;
   active: boolean;
 }
+
+export type EstadoItem = CidadeItem;
 
 export type ActiveScreen = 'home' | 'events' | 'register' | 'advertiser_auth' | 'sponsor_register';

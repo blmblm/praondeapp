@@ -13,9 +13,10 @@ import {
   ChevronDown,
   X,
   AlertCircle,
-  Navigation
+  Navigation,
+  CheckCircle2
 } from 'lucide-react';
-import { EventItem, EventCategory, ActiveScreen } from '../types';
+import { EventItem, EventCategory, ActiveScreen, EstadoItem } from '../types';
 import { useUserLocation } from '../context/LocationContext';
 
 interface EventCatalogProps {
@@ -24,6 +25,7 @@ interface EventCatalogProps {
   onSelectEvent: (event: EventItem) => void;
   initialQuery?: string;
   onDeleteEvent: (id: string) => void;
+  estadosList?: EstadoItem[];
 }
 
 const BASE_CATEGORIES = [
@@ -57,25 +59,67 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
   onSelectEvent,
   initialQuery = '',
   onDeleteEvent,
+  estadosList: propEstadosList,
 }) => {
   const { coords, getDistanceKmTo } = useUserLocation();
   const todayStr = useMemo(() => getTodayDateString(), []);
   const [searchQuery, setSearchQuery] = useState(initialQuery);
   const [selectedCategory, setSelectedCategory] = useState<string>('Todas');
-  const [selectedCity, setSelectedCity] = useState<string>('Todas');
+  const [estadosList, setEstadosList] = useState<EstadoItem[]>(() => propEstadosList || []);
+  const [isLoadingEstados, setIsLoadingEstados] = useState(false);
+  const [selectedEstado, setSelectedEstado] = useState<string>('Todos');
   const [selectedDate, setSelectedDate] = useState<string>(todayStr);
   const [dateError, setDateError] = useState<string>('');
   const [selectionNotice, setSelectionNotice] = useState<string>('');
 
+  // Sincroniza se estadosList vier via props
+  useEffect(() => {
+    if (propEstadosList && propEstadosList.length > 0) {
+      setEstadosList(propEstadosList);
+    }
+  }, [propEstadosList]);
+
+  // Carrega os dados diretamente da tabela estados do banco de dados SQLite
+  useEffect(() => {
+    const fetchEstadosFromDb = async () => {
+      setIsLoadingEstados(true);
+      try {
+        let res = await fetch('/api/estados');
+        if (!res.ok) {
+          res = await fetch('/api/estado');
+        }
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data)) {
+            setEstadosList(data);
+          }
+        }
+      } catch (err) {
+        console.warn('Erro ao carregar dados da tabela estados no catálogo:', err);
+      } finally {
+        setIsLoadingEstados(false);
+      }
+    };
+    fetchEstadosFromDb();
+  }, []);
+
+  // Lista ordenada de estados da tabela estados
+  const sortedEstados = useMemo(() => {
+    return [...estadosList].sort((a, b) => (a.nome || '').localeCompare(b.nome || '', 'pt-BR'));
+  }, [estadosList]);
+
+  // Controle para não trazer nenhum evento antes de clicar no botão "Selecionar Eventos"
+  const [hasExecutedSelection, setHasExecutedSelection] = useState<boolean>(false);
+
   // Filtros aplicados pelo botão "Selecionar Eventos"
   const [appliedFilters, setAppliedFilters] = useState<{
     category: string;
-    city: string;
+    estado: string;
     date: string;
     query: string;
   }>({
     category: 'Todas',
-    city: 'Todas',
+    estado: 'Todos',
     date: todayStr,
     query: initialQuery,
   });
@@ -101,28 +145,40 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
   // Atualiza se o usuário vier de busca inicial ou clique direto no ritmo
   useEffect(() => {
     if (initialQuery) {
-      // Verifica se o initialQuery corresponde a uma categoria existente
-      const matchingCategory = categoryOptions.find(
-        (c) =>
-          c.toLowerCase().replace(/\s+e\s+/g, ' ').trim() ===
-          initialQuery.toLowerCase().replace(/\s+e\s+/g, ' ').trim()
-      );
+      const normalizedInitial = initialQuery.toLowerCase().replace(/\s+e\s+/g, ' ').trim();
+
+      // Tratamento para ritmos e categorias (ex: 'Bailes' -> 'Baile Nostalgia')
+      const matchingCategory = categoryOptions.find((c) => {
+        const norm = c.toLowerCase().replace(/\s+e\s+/g, ' ').trim();
+        if (norm === normalizedInitial) return true;
+        if (normalizedInitial === 'bailes' && norm.includes('baile')) return true;
+        return false;
+      });
 
       if (matchingCategory && matchingCategory !== 'Todas') {
         setSelectedCategory(matchingCategory);
         setSearchQuery('');
-        setAppliedFilters((prev) => ({
-          ...prev,
+        setAppliedFilters({
           category: matchingCategory,
+          estado: 'Todos',
+          date: todayStr,
           query: '',
-        }));
-        setSelectionNotice(`Exibindo categoria: ${matchingCategory}`);
+        });
+        setHasExecutedSelection(true);
+        setSelectionNotice(`Exibindo eventos da categoria "${matchingCategory}".`);
       } else {
         setSearchQuery(initialQuery);
-        setAppliedFilters((prev) => ({ ...prev, query: initialQuery }));
+        setAppliedFilters({
+          category: 'Todas',
+          estado: 'Todos',
+          date: todayStr,
+          query: initialQuery,
+        });
+        setHasExecutedSelection(true);
+        setSelectionNotice(`Exibindo eventos para a busca "${initialQuery}".`);
       }
     }
-  }, [initialQuery, categoryOptions]);
+  }, [initialQuery, categoryOptions, todayStr]);
 
   const [favoriteIds, setFavoriteIds] = useState<string[]>(() => {
     try {
@@ -146,18 +202,13 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
     });
   };
 
-  // Extract unique cities (priorizando eventos com campo liberado = 'S')
-  const cities = useMemo(() => {
-    const liberados = events.filter(
-      (e) => (e.liberado || '').trim().toUpperCase() === 'S'
-    );
-    const source = liberados.length > 0 ? liberados : events;
-    const set = new Set(source.map((e) => e.city));
-    return ['Todas', ...Array.from(set).sort()];
-  }, [events]);
-
-  // Eventos selecionados por categorias, cidade, a partir da data informada e campo liberado = "S"
+  // Eventos selecionados por categorias, estado (dados da tabela Estado), a partir da data informada e campo liberado = "S"
+  // Regra: Não trazer nenhum evento antes de clicar no botão "Selecionar Eventos" (exceto se vier de redirecionamento de busca/ritmo)
   const filteredEvents = useMemo(() => {
+    if (!hasExecutedSelection) {
+      return [];
+    }
+
     return events
       .filter((event) => {
         // 1. REGRA CRÍTICA: Somente eventos com o campo liberado = "S"
@@ -166,10 +217,12 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
           return false;
         }
 
-        // 2. A partir da data informada
+        // 2. A partir da data informada (normalização de YYYY-MM-DD para evitar conflitos de hora/fuso)
         if (appliedFilters.date) {
           const eventEnd = event.endDate || event.date;
-          if (eventEnd < appliedFilters.date) {
+          const cleanEventDate = (eventEnd || '').split('T')[0].trim();
+          const cleanFilterDate = appliedFilters.date.split('T')[0].trim();
+          if (cleanEventDate && cleanFilterDate && cleanEventDate < cleanFilterDate) {
             return false;
           }
         }
@@ -183,20 +236,48 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
           }
         }
 
-        // 4. Seleção por Cidade
-        if (appliedFilters.city !== 'Todas' && event.city !== appliedFilters.city) {
-          return false;
+        // 4. Seleção por Estado (dados trazidos da tabela Estado)
+        if (appliedFilters.estado !== 'Todos') {
+          const selectedRecord = estadosList.find(
+            (item) =>
+              String(item.id) === appliedFilters.estado ||
+              item.estado.toUpperCase() === appliedFilters.estado.toUpperCase() ||
+              item.nome.toLowerCase() === appliedFilters.estado.toLowerCase()
+          );
+          if (selectedRecord) {
+            const selNome = selectedRecord.nome.toLowerCase().trim();
+            const selUf = (selectedRecord.estado || '').toLowerCase().trim();
+            const evtCity = (event.city || '').toLowerCase().trim();
+            const evtState = (event.state || '').toLowerCase().trim();
+
+            const matchesCity = evtCity && (evtCity === selNome || evtCity.includes(selNome) || selNome.includes(evtCity));
+            const matchesState = evtState && (evtState === selUf || evtState === selNome);
+
+            if (!matchesCity && !matchesState) {
+              return false;
+            }
+          } else {
+            const normFilter = appliedFilters.estado.toLowerCase().trim();
+            const evtState = (event.state || '').toLowerCase().trim();
+            const evtCity = (event.city || '').toLowerCase().trim();
+            if (evtState !== normFilter && evtCity !== normFilter && !evtCity.includes(normFilter)) {
+              return false;
+            }
+          }
         }
 
-        // 5. Query de busca textual (se preenchida)
+        // 5. Query de busca textual (se preenchida, com suporte a singular/plural e categoria)
         if (appliedFilters.query.trim()) {
-          const q = appliedFilters.query.toLowerCase();
-          const matchTitle = event.title.toLowerCase().includes(q);
-          const matchDesc = event.description.toLowerCase().includes(q);
-          const matchCity = event.city.toLowerCase().includes(q);
+          const q = appliedFilters.query.toLowerCase().trim();
+          const singularQ = q.endsWith('s') && q.length > 3 ? q.slice(0, -1) : q;
+          const matchTitle = event.title.toLowerCase().includes(q) || event.title.toLowerCase().includes(singularQ);
+          const matchDesc = event.description.toLowerCase().includes(q) || event.description.toLowerCase().includes(singularQ);
+          const matchCat = (event.category || '').toLowerCase().includes(q) || (event.category || '').toLowerCase().includes(singularQ);
+          const matchCity = event.city?.toLowerCase().includes(q);
+          const matchState = event.state?.toLowerCase().includes(q);
           const matchLocation = event.locationName.toLowerCase().includes(q);
-          const matchTag = event.tags?.some((t) => t.toLowerCase().includes(q));
-          if (!matchTitle && !matchDesc && !matchCity && !matchLocation && !matchTag) {
+          const matchTag = event.tags?.some((t) => t.toLowerCase().includes(q) || t.toLowerCase().includes(singularQ));
+          if (!matchTitle && !matchDesc && !matchCat && !matchCity && !matchState && !matchLocation && !matchTag) {
             return false;
           }
         }
@@ -204,22 +285,15 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
         return true;
       })
       .sort((a, b) => a.date.localeCompare(b.date));
-  }, [events, appliedFilters]);
+  }, [events, appliedFilters, estadosList, hasExecutedSelection]);
 
   const handleDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
-    if (!val) {
-      setSelectedDate('');
-      setDateError('');
-      return;
-    }
-    // Consistir que a data seja igual ou maior à data de hoje
-    if (val < todayStr) {
-      setDateError(`A data não pode ser anterior a hoje (${formatDateBr(todayStr)}).`);
-      setSelectedDate(todayStr);
+    setSelectedDate(val);
+    if (val && val < todayStr) {
+      setDateError(`Aviso: a data mínima para exibição é hoje (${formatDateBr(todayStr)}).`);
     } else {
       setDateError('');
-      setSelectedDate(val);
     }
   };
 
@@ -231,7 +305,7 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
       return;
     }
     if (val < todayStr) {
-      setDateError(`A data deve ser igual ou maior que a data de hoje (${formatDateBr(todayStr)}).`);
+      setDateError(`Data ajustada para a data de hoje (${formatDateBr(todayStr)}).`);
       setSelectedDate(todayStr);
     }
   };
@@ -239,36 +313,39 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
   const clearFilters = () => {
     setSearchQuery('');
     setSelectedCategory('Todas');
-    setSelectedCity('Todas');
+    setSelectedEstado('Todos');
     setSelectedDate(todayStr);
     setDateError('');
     setSelectionNotice('');
+    setHasExecutedSelection(false);
     setAppliedFilters({
       category: 'Todas',
-      city: 'Todas',
+      estado: 'Todos',
       date: todayStr,
       query: '',
     });
   };
 
-  // Executa a seleção de eventos por categorias, cidade, a partir da data informada e liberado = "S"
+  // Executa a seleção de eventos por categorias, estado, a partir da data informada e liberado = "S"
   const handleSelectEvents = () => {
+    let effectiveDate = selectedDate || todayStr;
     if (selectedDate && selectedDate < todayStr) {
+      effectiveDate = todayStr;
       setSelectedDate(todayStr);
-      setDateError(`A data deve ser igual ou maior que a data de hoje (${formatDateBr(todayStr)}).`);
-      return;
+      setDateError(`A data informada era anterior a hoje. Ajustada para hoje (${formatDateBr(todayStr)}).`);
+    } else {
+      setDateError('');
     }
-    setDateError('');
 
-    const effectiveDate = selectedDate || todayStr;
     setAppliedFilters({
       category: selectedCategory,
-      city: selectedCity,
+      estado: selectedEstado,
       date: effectiveDate,
       query: searchQuery,
     });
+    setHasExecutedSelection(true);
 
-    setSelectionNotice('Critérios aplicados com sucesso! Eventos liberados selecionados.');
+    setSelectionNotice('Eventos consultados com sucesso!');
     setTimeout(() => {
       setSelectionNotice('');
     }, 4000);
@@ -276,31 +353,63 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
 
   // Verifica se há alteração pendente nos campos para o usuário clicar em "Selecionar Eventos"
   const isPendingSelection =
+    !hasExecutedSelection ||
     selectedCategory !== appliedFilters.category ||
-    selectedCity !== appliedFilters.city ||
+    selectedEstado !== appliedFilters.estado ||
     selectedDate !== appliedFilters.date ||
     searchQuery.trim() !== appliedFilters.query.trim();
 
   const hasActiveFilters =
+    hasExecutedSelection ||
+    searchQuery.trim() !== '' ||
+    selectedCategory !== 'Todas' ||
+    selectedEstado !== 'Todos' ||
+    (selectedDate !== '' && selectedDate !== todayStr) ||
     appliedFilters.query.trim() !== '' ||
     appliedFilters.category !== 'Todas' ||
-    appliedFilters.city !== 'Todas' ||
+    appliedFilters.estado !== 'Todos' ||
     (appliedFilters.date !== '' && appliedFilters.date !== todayStr);
+
+  const handleExitAndClear = () => {
+    setSearchQuery('');
+    setSelectedCategory('Todas');
+    setSelectedEstado('Todos');
+    setSelectedDate(todayStr);
+    setDateError('');
+    setSelectionNotice('');
+    setHasExecutedSelection(false);
+    setAppliedFilters({
+      category: 'Todas',
+      estado: 'Todos',
+      date: todayStr,
+      query: '',
+    });
+    onNavigate('home');
+  };
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full">
       {/* Top Header & Navigation */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-slate-800">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2.5 sm:gap-3 flex-wrap">
+          <button
+            id="btn-catalog-sair"
+            onClick={handleExitAndClear}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800/90 hover:bg-rose-500/20 text-slate-200 hover:text-rose-300 border border-slate-700 hover:border-rose-500/40 text-xs font-bold transition-colors cursor-pointer shadow-sm"
+            title="Sair desta tela e limpar toda a visualização"
+          >
+            <X className="w-4 h-4 text-rose-400" />
+            <span>Sair</span>
+          </button>
           <button
             id="btn-catalog-back-home"
-            onClick={() => onNavigate('home')}
+            onClick={handleExitAndClear}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs font-semibold border border-slate-800 transition-colors"
           >
             <ArrowLeft className="w-4 h-4" />
             <span>Voltar ao Início</span>
           </button>
-          <div className="h-4 w-px bg-slate-800" />
+          <div className="h-4 w-px bg-slate-800 hidden sm:block" />
           <h1 className="text-xl sm:text-2xl font-extrabold text-white">
             Consultar Eventos
           </h1>
@@ -330,7 +439,10 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
               <select
                 id="select-catalog-category"
                 value={selectedCategory}
-                onChange={(e) => setSelectedCategory(e.target.value)}
+                onChange={(e) => {
+                  setSelectedCategory(e.target.value);
+                  setSearchQuery('');
+                }}
                 className="w-full py-3 pl-3.5 pr-9 bg-slate-900 border border-slate-800 rounded-xl text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500/60 appearance-none cursor-pointer"
               >
                 {categoryOptions.map((cat) => (
@@ -345,18 +457,31 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
             </div>
           </div>
 
-          {/* City select */}
+          {/* Dropdown Estado - Traz os dados da tabela Estado */}
           <div className="flex-1">
             <div className="relative">
               <select
-                id="select-catalog-city"
-                value={selectedCity}
-                onChange={(e) => setSelectedCity(e.target.value)}
+                id="select-catalog-state"
+                value={selectedEstado}
+                onChange={(e) => setSelectedEstado(e.target.value)}
                 className="w-full py-3 pl-3.5 pr-9 bg-slate-900 border border-slate-800 rounded-xl text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500/60 appearance-none cursor-pointer"
               >
-                {cities.map((city) => (
-                  <option key={city} value={city} className="bg-slate-900 text-white">
-                    {city === 'Todas' ? 'Cidades' : `📍 ${city}`}
+                <option value="Todos" className="bg-slate-900 text-white">
+                  Estado
+                </option>
+                {isLoadingEstados && estadosList.length === 0 && (
+                  <option value="" disabled className="bg-slate-900 text-slate-400">
+                    Carregando tabela estados...
+                  </option>
+                )}
+                {!isLoadingEstados && estadosList.length === 0 && (
+                  <option value="" disabled className="bg-slate-900 text-slate-400">
+                    Nenhum registro na tabela estados
+                  </option>
+                )}
+                {sortedEstados.map((item) => (
+                  <option key={item.id} value={item.estado} className="bg-slate-900 text-white">
+                    📍 {item.nome} - {item.estado}
                   </option>
                 ))}
               </select>
@@ -366,7 +491,7 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
             </div>
           </div>
 
-          {/* Campo de Data (após Cidades) com texto A partir de: */}
+          {/* Campo de Data (após Estado) com texto A partir de: */}
           <div className="flex-1 sm:max-w-[270px]">
             <div className="relative flex items-center bg-slate-900 border border-slate-800 rounded-xl px-3.5 h-[46px] focus-within:ring-2 focus-within:ring-amber-500/50 focus-within:border-amber-500/60 transition-all">
               <span className="text-xs font-semibold text-slate-400 whitespace-nowrap mr-2 select-none">
@@ -394,7 +519,7 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
               id="btn-catalog-select-events"
               type="button"
               onClick={handleSelectEvents}
-              title="Selecionar eventos por categorias, cidade, a partir da data informada e campo liberado = 'S'"
+              title="Selecionar eventos por categorias, estado, a partir da data informada e campo liberado = 'S'"
               className={`w-full sm:w-auto px-6 py-3 rounded-xl text-slate-950 text-sm font-bold shadow-md transition-all flex items-center justify-center gap-2 whitespace-nowrap cursor-pointer active:scale-95 ${
                 isPendingSelection
                   ? 'bg-gradient-to-r from-amber-400 via-amber-500 to-orange-500 hover:from-amber-300 hover:to-orange-400 shadow-amber-500/40 ring-2 ring-amber-400/70'
@@ -441,24 +566,38 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
 
           {/* Filter Summary */}
           <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
-            <span>
-              Exibindo <strong className="text-white">{filteredEvents.length}</strong> evento(s) liberado(s)
-              {appliedFilters.date && (
-                <span className="ml-1 text-amber-400 font-medium">
-                  • a partir de {formatDateBr(appliedFilters.date)}
-                </span>
-              )}
-              {appliedFilters.category !== 'Todas' && (
-                <span className="ml-1 text-slate-300">
-                  • {appliedFilters.category}
-                </span>
-              )}
-              {appliedFilters.city !== 'Todas' && (
-                <span className="ml-1 text-slate-300">
-                  • {appliedFilters.city}
-                </span>
-              )}
-            </span>
+            {hasExecutedSelection ? (
+              <span>
+                Exibindo <strong className="text-white">{filteredEvents.length}</strong> evento(s) liberado(s)
+                {appliedFilters.date && (
+                  <span className="ml-1 text-amber-400 font-medium">
+                    • a partir de {formatDateBr(appliedFilters.date)}
+                  </span>
+                )}
+                {appliedFilters.category !== 'Todas' && (
+                  <span className="ml-1 text-slate-300">
+                    • {appliedFilters.category}
+                  </span>
+                )}
+                {appliedFilters.estado !== 'Todos' && (
+                  <span className="ml-1 text-slate-300">
+                    • {(() => {
+                      const found = estadosList.find(
+                        (item) =>
+                          String(item.id) === appliedFilters.estado ||
+                          item.estado.toUpperCase() === appliedFilters.estado.toUpperCase() ||
+                          item.nome.toLowerCase() === appliedFilters.estado.toLowerCase()
+                      );
+                      return found ? `${found.nome} - ${found.estado}` : appliedFilters.estado;
+                    })()}
+                  </span>
+                )}
+              </span>
+            ) : (
+              <span className="text-slate-400 italic">
+                Aguardando clique no botão <strong className="text-amber-400 font-semibold not-italic">"Selecionar Eventos"</strong>
+              </span>
+            )}
             {hasActiveFilters && (
               <button
                 onClick={clearFilters}
@@ -472,8 +611,30 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
         </div>
       </div>
 
-      {/* Events Grid */}
-      {filteredEvents.length > 0 ? (
+      {/* Events Grid or Initial / Empty State */}
+      {!hasExecutedSelection ? (
+        <div className="text-center py-16 px-4 bg-slate-900/40 rounded-2xl border border-slate-800/80 mt-6">
+          <div className="w-16 h-16 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center mx-auto mb-4">
+            <SlidersHorizontal className="w-8 h-8" />
+          </div>
+          <h3 className="text-lg font-bold text-white mb-2">Consulta de Eventos</h3>
+          <p className="text-sm text-slate-400 max-w-md mx-auto mb-6 leading-relaxed">
+            Selecione as opções desejadas de <strong>Categorias</strong>, <strong>Estado</strong> e <strong>Data</strong> nos campos acima e clique no botão{' '}
+            <strong className="text-amber-400">"Selecionar Eventos"</strong> para carregar os eventos.
+          </p>
+          <div className="flex items-center justify-center">
+            <button
+              id="btn-trigger-select-events"
+              type="button"
+              onClick={handleSelectEvents}
+              className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-amber-400 via-amber-500 to-orange-500 hover:from-amber-300 hover:to-orange-400 text-slate-950 text-xs font-bold shadow-md shadow-amber-500/20 transition-all active:scale-95 flex items-center gap-2 cursor-pointer"
+            >
+              <CheckCircle2 className="w-4 h-4" />
+              <span>Selecionar Eventos Agora</span>
+            </button>
+          </div>
+        </div>
+      ) : filteredEvents.length > 0 ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 pt-4">
           {filteredEvents.map((event) => {
             const isFav = favoriteIds.includes(event.id);
@@ -484,20 +645,38 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
                 onClick={() => onSelectEvent(event)}
                 className="group relative bg-slate-900/80 hover:bg-slate-900 border border-slate-800 hover:border-amber-500/40 rounded-2xl overflow-hidden shadow-lg transition-all duration-200 flex flex-col justify-between cursor-pointer"
               >
-                {/* Thumbnail Header */}
-                <div className="relative h-48 w-full overflow-hidden bg-slate-950">
+                {/* Cartaz no Padrão Vertical (3:4) */}
+                <div className="relative aspect-[3/4] w-full overflow-hidden bg-slate-950 flex items-center justify-center">
+                  {/* Blur ambiente de fundo */}
+                  <img
+                    src={event.imageUrl}
+                    alt=""
+                    aria-hidden="true"
+                    className="absolute inset-0 w-full h-full object-cover filter blur-xl opacity-30 scale-110 pointer-events-none"
+                  />
+                  {/* Imagem do cartaz no formato vertical */}
                   <img
                     src={event.imageUrl}
                     alt={event.title}
-                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                    className="relative z-10 w-full h-full object-contain group-hover:scale-105 transition-transform duration-300"
                     referrerPolicy="no-referrer"
                   />
-                  <div className="absolute inset-0 bg-gradient-to-t from-slate-900 via-slate-900/20 to-transparent" />
+                  <div className="absolute inset-0 z-20 bg-gradient-to-t from-slate-900 via-transparent to-transparent pointer-events-none" />
+
+                  {/* Badge de Data no topo esquerdo */}
+                  <div className="absolute top-3 left-3 z-30 bg-slate-950/90 backdrop-blur-sm rounded-xl p-1 px-2.5 text-center border border-slate-700/60 shadow-lg">
+                    <span className="block text-[10px] font-bold uppercase text-amber-400">
+                      {new Date(event.date + 'T12:00:00').toLocaleDateString('pt-BR', { month: 'short' })}
+                    </span>
+                    <span className="block text-base font-extrabold text-white leading-none">
+                      {new Date(event.date + 'T12:00:00').getDate()}
+                    </span>
+                  </div>
 
                   {/* Favorite Button */}
                   <button
                     onClick={(e) => toggleFavorite(e, event.id)}
-                    className={`absolute top-3 right-3 p-2 rounded-full backdrop-blur-md transition-transform active:scale-90 ${
+                    className={`absolute top-3 right-3 z-30 p-2 rounded-full backdrop-blur-md transition-transform active:scale-90 ${
                       isFav
                         ? 'bg-rose-500 text-white shadow-md'
                         : 'bg-slate-950/70 hover:bg-slate-950 text-slate-300 border border-slate-700/60'
@@ -508,14 +687,14 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
                   </button>
 
                   {/* Category Pill */}
-                  <div className="absolute bottom-2 left-3">
-                    <span className="inline-block text-[11px] font-semibold text-amber-300 bg-slate-950/80 px-2.5 py-0.5 rounded-md backdrop-blur-sm border border-amber-500/20">
+                  <div className="absolute bottom-2 left-3 z-30">
+                    <span className="inline-block text-[11px] font-semibold text-amber-300 bg-slate-950/90 px-2.5 py-0.5 rounded-md backdrop-blur-sm border border-amber-500/20 shadow">
                       {event.category}
                     </span>
                   </div>
 
                   {/* Price Pill */}
-                  <div className="absolute bottom-2 right-3">
+                  <div className="absolute bottom-2 right-3 z-30">
                     <span className={`text-[11px] font-bold px-2 py-0.5 rounded-md backdrop-blur-sm shadow-sm ${
                       event.isFree
                         ? 'bg-emerald-500 text-slate-950 font-extrabold'
@@ -547,7 +726,17 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
 
                     <div className="flex items-center gap-1.5 text-xs text-slate-400">
                       <MapPin className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
-                      <span className="truncate">{event.locationName} ({event.city} - {event.state})</span>
+                      <span className="truncate" title={`${event.locationName} (${event.city} - ${event.state})`}>
+                        {event.locationName} ({event.city} - {(() => {
+                          const est = estadosList.find(
+                            (e) =>
+                              (e.estado && e.estado.toUpperCase() === (event.state || '').toUpperCase()) ||
+                              (e.nome && e.nome.toLowerCase() === (event.state || '').toLowerCase()) ||
+                              String(e.id) === (event.state || '')
+                          );
+                          return est ? est.estado : (event.state || '');
+                        })()})
+                      </span>
                     </div>
 
                     {/* Distância calculada em tempo real com base na latitude e longitude exatas */}

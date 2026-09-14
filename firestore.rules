@@ -1,0 +1,18 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Permite leitura pública e gravação pública de eventos e estados no app
+    match /eventos/{eventoId} {
+      allow read, write: if true;
+    }
+    match /estado/{estadoId} {
+      allow read, write: if true;
+    }
+    match /categorias/{categoriaId} {
+      allow read, write: if true;
+    }
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}

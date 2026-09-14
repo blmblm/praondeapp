@@ -20,10 +20,10 @@ import {
   Navigation,
   Loader2,
   Globe,
-  ExternalLink
+  ExternalLink,
+  X
 } from 'lucide-react';
-import { EventItem, EventCategory, ActiveScreen, Advertiser, CategoryItem } from '../types';
-import { useUserLocation } from '../context/LocationContext';
+import { EventItem, EventCategory, ActiveScreen, Advertiser, CategoryItem, CidadeItem } from '../types';
 
 interface EventRegisterProps {
   onAddEvent: (event: EventItem) => Promise<EventItem> | void;
@@ -33,6 +33,7 @@ interface EventRegisterProps {
   onChangeAdvertiser: () => void;
   categories?: string[];
   categoryItems?: CategoryItem[];
+  cidadesList?: CidadeItem[];
 }
 
 const DEFAULT_CATEGORIES: { id: number; nome: string }[] = [
@@ -61,8 +62,8 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
   onChangeAdvertiser,
   categories,
   categoryItems,
+  cidadesList: propCidadesList,
 }) => {
-  const { coords } = useUserLocation();
   const availableCategories = useMemo(() => {
     if (categoryItems && categoryItems.length > 0) {
       return categoryItems.map(c => ({ id: c.id, nome: c.nome }));
@@ -80,8 +81,11 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
   const [endTime, setEndTime] = useState('');
   const [locationName, setLocationName] = useState('');
   const [address, setAddress] = useState('');
-  const [city, setCity] = useState('');
-  const [state, setState] = useState('SP');
+  const [cidadesList, setCidadesList] = useState<CidadeItem[]>(() => propCidadesList || []);
+  const [isLoadingCidades, setIsLoadingCidades] = useState(false);
+  const [selectedCidadeId, setSelectedCidadeId] = useState<number | ''>(() => propCidadesList?.[0]?.id || '');
+  const [city, setCity] = useState<string>(() => propCidadesList?.[0]?.nome || '');
+  const [state, setState] = useState<string>(() => propCidadesList?.[0]?.estado || 'SP');
   const [latitude, setLatitude] = useState('');
   const [longitude, setLongitude] = useState('');
   const [isGeocoding, setIsGeocoding] = useState(false);
@@ -99,16 +103,63 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
     currentAdvertiser?.phone || currentAdvertiser?.email || ''
   );
 
-  // Função para buscar coordenadas geográficas pelo endereço e cidade
+  // Sincroniza se cidadesList vier via props
+  useEffect(() => {
+    if (propCidadesList && propCidadesList.length > 0) {
+      setCidadesList(propCidadesList);
+      const found = propCidadesList.find((c) => c.nome.toLowerCase() === city.toLowerCase()) || propCidadesList[0];
+      if (found) {
+        setSelectedCidadeId(found.id);
+        setCity(found.nome);
+        setState(found.estado);
+      }
+    }
+  }, [propCidadesList]);
+
+  // Carrega cidades/estados diretamente da tabela estado do SQLite
+  useEffect(() => {
+    const fetchCidades = async () => {
+      setIsLoadingCidades(true);
+      try {
+        const res = await fetch('/api/estado');
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data)) {
+            setCidadesList(data);
+            if (data.length > 0) {
+              const matched = data.find((c: CidadeItem) => c.nome.toLowerCase() === city.toLowerCase()) || data[0];
+              if (matched) {
+                setSelectedCidadeId(matched.id);
+                setCity(matched.nome);
+                setState(matched.estado);
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Erro ao carregar registros da tabela estado:', err);
+      } finally {
+        setIsLoadingCidades(false);
+      }
+    };
+    fetchCidades();
+  }, []);
+
+  // Função para buscar coordenadas geográficas baseadas no endereço do evento
   const fetchCoordinates = async (
     customAddr = address,
     customCity = city,
-    customState = state
+    customState = state,
+    customLocName = locationName
   ): Promise<{ latitude: string; longitude: string } | null> => {
-    const targetAddr = (customAddr || '').trim() || locationName.trim();
+    const targetAddr = (customAddr || '').trim();
     const targetCity = (customCity || '').trim();
+    const targetLocName = (customLocName || '').trim();
 
-    if (!targetAddr && !targetCity) {
+    if (!targetAddr && !targetCity && !targetLocName) {
+      setLatitude('');
+      setLongitude('');
+      setGeocodeInfo(null);
       return null;
     }
 
@@ -120,28 +171,54 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
         address: targetAddr,
         city: targetCity,
         state: customState,
+        locationName: targetLocName,
       });
 
       const response = await fetch(`/api/geocode?${params.toString()}`);
       if (response.ok) {
         const data = await response.json();
         if (data.latitude && data.longitude) {
-          setLatitude(String(data.latitude));
-          setLongitude(String(data.longitude));
-          setGeocodeInfo(`Geolocalização identificada: Lat ${Number(data.latitude).toFixed(4)}, Lon ${Number(data.longitude).toFixed(4)}`);
-          return { latitude: String(data.latitude), longitude: String(data.longitude) };
+          const latStr = String(data.latitude);
+          const lonStr = String(data.longitude);
+          setLatitude(latStr);
+          setLongitude(lonStr);
+          const detail = data.displayName ? ` (${data.displayName.split(',').slice(0, 3).join(',')})` : '';
+          setGeocodeInfo(`Coordenadas do endereço confirmadas: Lat ${Number(latStr).toFixed(4)}, Lon ${Number(lonStr).toFixed(4)}${detail}`);
+          return { latitude: latStr, longitude: lonStr };
         }
       } else {
-        setGeocodeInfo('Não foi possível obter coordenadas exatas; o sistema tentará uma aproximação no momento de salvar.');
+        setGeocodeInfo('Coordenadas em processamento: serão calculadas pelo endereço ao salvar.');
       }
     } catch (err) {
-      console.warn('Erro ao consultar serviço de geolocalização:', err);
+      console.warn('Erro ao consultar serviço de geolocalização do endereço:', err);
     } finally {
       setIsGeocoding(false);
     }
 
     return null;
   };
+
+  // Efeito automático: Sempre que o endereço, cidade, estado ou local do evento forem alterados,
+  // atualiza automaticamente as coordenadas com base no endereço do evento
+  useEffect(() => {
+    const cleanAddr = address.trim();
+    const cleanCity = city.trim();
+    const cleanLoc = locationName.trim();
+
+    if (!cleanAddr && !cleanCity && !cleanLoc) {
+      setLatitude('');
+      setLongitude('');
+      setGeocodeInfo(null);
+      return;
+    }
+
+    // Debounce de 700ms para aguardar término da digitação
+    const timer = setTimeout(() => {
+      fetchCoordinates(cleanAddr, cleanCity, state, cleanLoc);
+    }, 700);
+
+    return () => clearTimeout(timer);
+  }, [address, city, state, locationName]);
 
   const handleFileSelect = (file: File) => {
     if (!file.type.startsWith('image/')) {
@@ -197,12 +274,12 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
 
     setIsSubmitting(true);
 
-    // Atualização baseada no campo endereco: se ainda não temos latitude e longitude, buscamos agora
+    // Atualização baseada no endereço do evento: garante coordenadas calculadas a partir do endereço
     let finalLat = latitude.trim();
     let finalLon = longitude.trim();
 
     if (!finalLat || !finalLon) {
-      const detected = await fetchCoordinates(address, city, state);
+      const detected = await fetchCoordinates(address, city, state, locationName);
       if (detected) {
         finalLat = detected.latitude;
         finalLon = detected.longitude;
@@ -267,8 +344,10 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
     setEndTime('');
     setLocationName('');
     setAddress('');
-    setCity('');
-    setState('SP');
+    const defaultCid = cidadesList[0];
+    setSelectedCidadeId(defaultCid?.id || 1);
+    setCity(defaultCid?.nome || '');
+    setState(defaultCid?.estado || 'SP');
     setLatitude('');
     setLongitude('');
     setGeocodeInfo(null);
@@ -308,49 +387,114 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
           O evento <strong className="text-amber-400">"{submittedEvent.title}"</strong> foi enviado para análise e liberação em até 2 dias úteis.
         </p>
 
-        {/* Card preview */}
-        <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 text-left mb-8 max-w-md mx-auto shadow-md">
-          <div className="flex items-center gap-3">
-            <img
-              src={submittedEvent.imageUrl}
-              alt={submittedEvent.title}
-              className="w-16 h-16 rounded-xl object-cover"
-              referrerPolicy="no-referrer"
-            />
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center justify-between gap-2 mb-0.5">
-                <span className="text-[11px] font-semibold text-amber-400">{submittedEvent.category}</span>
-                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                  Em análise (até 2 dias úteis)
-                </span>
-              </div>
-              <h4 className="font-bold text-white text-sm truncate">{submittedEvent.title}</h4>
-              <p className="text-xs text-slate-400">
-                {new Date(submittedEvent.date + 'T12:00:00').toLocaleDateString('pt-BR')} • {submittedEvent.city}/{submittedEvent.state}
-              </p>
-            </div>
+        {/* Card preview do evento recém-publicado */}
+        <div className="max-w-md mx-auto mb-8 text-left">
+          <div className="flex items-center justify-center gap-2 text-xs font-bold uppercase tracking-wider text-amber-400 mb-3">
+            <Eye className="w-4 h-4 text-amber-400" />
+            <span>Pré-visualização do Card Publicado</span>
           </div>
 
-          {/* Coordenadas Atualizadas e Salvas */}
-          {submittedEvent.latitude && submittedEvent.longitude && (
-            <div className="mt-3 pt-3 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-xs">
-              <div className="flex items-center gap-1.5 text-emerald-400 font-medium">
-                <Navigation className="w-3.5 h-3.5 flex-shrink-0" />
-                <span>
-                  Coordenadas: Lat {submittedEvent.latitude}, Lon {submittedEvent.longitude}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-2xl">
+            {/* Visualizador do Cartaz no Formato Vertical */}
+            <div className="relative aspect-[3/4] w-full bg-slate-950 overflow-hidden flex items-center justify-center">
+              {/* Blur de fundo ambiente */}
+              <img
+                src={submittedEvent.imageUrl}
+                alt=""
+                aria-hidden="true"
+                className="absolute inset-0 w-full h-full object-cover filter blur-2xl opacity-35 scale-110 pointer-events-none"
+              />
+              <img
+                src={submittedEvent.imageUrl}
+                alt={submittedEvent.title}
+                className="relative z-10 w-full h-full object-contain"
+                referrerPolicy="no-referrer"
+              />
+              <div className="absolute inset-0 z-20 bg-gradient-to-t from-slate-900 via-transparent to-transparent pointer-events-none" />
+
+              <div className="absolute top-3 left-3 z-30 bg-slate-950/90 backdrop-blur-sm rounded-xl p-1 px-2.5 text-center border border-slate-700/60 shadow-lg">
+                <span className="block text-[10px] font-bold uppercase text-amber-400">
+                  {new Date(submittedEvent.date + 'T12:00:00').toLocaleDateString('pt-BR', { month: 'short' })}
+                </span>
+                <span className="block text-base font-extrabold text-white">
+                  {new Date(submittedEvent.date + 'T12:00:00').getDate()}
                 </span>
               </div>
-              <a
-                href={`https://www.google.com/maps/search/?api=1&query=${submittedEvent.latitude},${submittedEvent.longitude}`}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-300 hover:text-amber-200 transition-colors"
-              >
-                <span>Ver no Mapa</span>
-                <ExternalLink className="w-3 h-3" />
-              </a>
+
+              <div className="absolute top-3 right-3 z-30">
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 backdrop-blur-sm shadow">
+                  Em análise
+                </span>
+              </div>
+
+              <div className="absolute bottom-2 left-3 z-30">
+                <span className="text-[11px] font-semibold text-amber-300 bg-slate-950/90 px-2 py-0.5 rounded border border-amber-500/30 backdrop-blur-sm shadow">
+                  {submittedEvent.category}
+                </span>
+              </div>
+
+              <div className="absolute bottom-2 right-3 z-30">
+                <span className={`text-[11px] font-bold px-2 py-0.5 rounded shadow-sm ${
+                  submittedEvent.isFree
+                    ? 'bg-emerald-500 text-slate-950 font-extrabold'
+                    : 'bg-slate-950/90 text-amber-300 border border-amber-500/30 backdrop-blur-sm'
+                }`}>
+                  {submittedEvent.isFree ? 'Gratuito' : (submittedEvent.price ? `R$ ${submittedEvent.price.toFixed(2).replace('.', ',')}` : (submittedEvent.priceDetails || 'Consulte'))}
+                </span>
+              </div>
             </div>
-          )}
+
+            <div className="p-4 space-y-3">
+              <div>
+                <h4 className="font-bold text-white text-base truncate">
+                  {submittedEvent.title}
+                </h4>
+                {submittedEvent.description && (
+                  <p className="text-xs text-slate-400 line-clamp-2 mt-1">
+                    {submittedEvent.description}
+                  </p>
+                )}
+              </div>
+
+              <div className="pt-2 border-t border-slate-800 space-y-1.5 text-xs text-slate-400">
+                <div className="flex items-center gap-1.5 text-slate-300 font-medium">
+                  <Calendar className="w-3.5 h-3.5 text-amber-400" />
+                  <span>{new Date(submittedEvent.date + 'T12:00:00').toLocaleDateString('pt-BR')} • {submittedEvent.time || '19:00'}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <MapPin className="w-3.5 h-3.5 text-slate-500" />
+                  <span className="truncate">{submittedEvent.locationName} ({submittedEvent.city} - {submittedEvent.state})</span>
+                </div>
+              </div>
+
+              {submittedEvent.organizer && (
+                <div className="pt-1 text-[11px] text-slate-400">
+                  Organizado por: <strong className="text-slate-300">{submittedEvent.organizer}</strong>
+                </div>
+              )}
+
+              {/* Coordenadas Atualizadas e Salvas */}
+              {submittedEvent.latitude && submittedEvent.longitude && (
+                <div className="mt-2 pt-2 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <div className="flex items-center gap-1.5 text-emerald-400 font-medium">
+                    <MapPin className="w-3.5 h-3.5 flex-shrink-0 text-emerald-400" />
+                    <span>
+                      Lat: {submittedEvent.latitude}, Lon: {submittedEvent.longitude}
+                    </span>
+                  </div>
+                  <a
+                    href={`https://www.google.com/maps/search/?api=1&query=${submittedEvent.latitude},${submittedEvent.longitude}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-300 hover:text-amber-200 transition-colors"
+                  >
+                    <span>Ver no Mapa</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* Action options */}
@@ -389,15 +533,29 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
     <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full">
       {/* Header */}
       <div className="flex items-center justify-between pb-6 border-b border-slate-800 mb-8">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2.5 sm:gap-3 flex-wrap">
           <button
-            onClick={() => onNavigate('home')}
+            onClick={() => {
+              handleResetForm();
+              onNavigate('home');
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800/90 hover:bg-rose-500/20 text-slate-200 hover:text-rose-300 border border-slate-700 hover:border-rose-500/40 text-xs font-bold transition-colors cursor-pointer shadow-sm"
+            title="Sair e limpar formulário"
+          >
+            <X className="w-4 h-4 text-rose-400" />
+            <span>Sair</span>
+          </button>
+          <button
+            onClick={() => {
+              handleResetForm();
+              onNavigate('home');
+            }}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs font-semibold border border-slate-800 transition-colors"
           >
             <ArrowLeft className="w-4 h-4" />
             <span>Voltar ao Início</span>
           </button>
-          <div className="h-4 w-px bg-slate-800" />
+          <div className="h-4 w-px bg-slate-800 hidden sm:block" />
           <h1 className="text-xl sm:text-2xl font-extrabold text-white">
             Cadastrar Novo Evento
           </h1>
@@ -450,10 +608,9 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
         </div>
       )}
 
-      {/* Two Column Grid: Form & Live Preview */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-        {/* Registration Form */}
-        <form onSubmit={handleSubmit} className="lg:col-span-7 space-y-6">
+      {/* Formulário de Cadastro Centralizado (Sem pré-visualização ao entrar na tela) */}
+      <div className="max-w-3xl mx-auto">
+        <form onSubmit={handleSubmit} className="space-y-6">
           {/* Section: Basic info */}
           <div className="p-5 sm:p-6 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-4">
             <h3 className="text-sm font-bold uppercase tracking-wider text-amber-400 flex items-center gap-2">
@@ -589,6 +746,11 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                 type="text"
                 value={locationName}
                 onChange={(e) => setLocationName(e.target.value)}
+                onBlur={() => {
+                  if (locationName.trim() || address.trim() || city.trim()) {
+                    fetchCoordinates(address, city, state, locationName);
+                  }
+                }}
                 placeholder="Ex: Parque Ibirapuera, Circo Voador, Galeria de Arte..."
                 required
                 className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
@@ -603,6 +765,11 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                 type="text"
                 value={address}
                 onChange={(e) => setAddress(e.target.value)}
+                onBlur={() => {
+                  if (address.trim() || city.trim() || locationName.trim()) {
+                    fetchCoordinates(address, city, state, locationName);
+                  }
+                }}
                 placeholder="Ex: Av. Paulista, 1000 - Bela Vista"
                 className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
               />
@@ -610,83 +777,86 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
 
             <div className="grid grid-cols-3 gap-3">
               <div className="col-span-2">
-                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                  Cidade *
+                <label className="block text-xs font-semibold text-slate-300 mb-1.5 flex items-center justify-between">
+                  <span>Cidade do Evento *</span>
+                  <span className="text-[10px] text-amber-400 font-normal">
+                    {isLoadingCidades ? 'Carregando registros...' : `${cidadesList.length} cadastradas na tabela estado`}
+                  </span>
                 </label>
-                <input
-                  type="text"
-                  value={city}
-                  onChange={(e) => setCity(e.target.value)}
-                  placeholder="Ex: São Paulo"
-                  required
-                  className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
-                />
+                <select
+                  id="select-register-city"
+                  value={selectedCidadeId}
+                  disabled={isLoadingCidades && cidadesList.length === 0}
+                  onChange={(e) => {
+                    const id = Number(e.target.value);
+                    setSelectedCidadeId(id);
+                    const found = cidadesList.find((c) => c.id === id);
+                    if (found) {
+                      setCity(found.nome);
+                      setState(found.estado);
+                      fetchCoordinates(address, found.nome, found.estado, locationName);
+                    }
+                  }}
+                  className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white focus:outline-none focus:ring-2 focus:ring-amber-500/50 cursor-pointer disabled:opacity-50"
+                >
+                  {isLoadingCidades && cidadesList.length === 0 && (
+                    <option value="">Carregando da tabela estado...</option>
+                  )}
+                  {!isLoadingCidades && cidadesList.length === 0 && (
+                    <option value="">Nenhum registro cadastrado na tabela estado</option>
+                  )}
+                  {cidadesList.map((cid) => (
+                    <option key={cid.id} value={cid.id}>
+                      {cid.nome} - {cid.estado}
+                    </option>
+                  ))}
+                </select>
               </div>
 
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1.5">
                   UF *
                 </label>
-                <select
+                <input
+                  id="select-register-state"
+                  type="text"
+                  readOnly
                   value={state}
-                  onChange={(e) => setState(e.target.value)}
-                  className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white focus:outline-none focus:ring-2 focus:ring-amber-500/50"
-                >
-                  {BRAZILIAN_STATES.map((uf) => (
-                    <option key={uf} value={uf}>
-                      {uf}
-                    </option>
-                  ))}
-                </select>
+                  className="w-full px-3.5 py-2.5 bg-slate-900 border border-slate-800 rounded-xl text-sm font-bold text-amber-400 text-center cursor-not-allowed focus:outline-none"
+                  title="Estado (UF) definido automaticamente pela cidade cadastrada na tabela estado"
+                />
               </div>
             </div>
 
-            {/* Geolocation Feedback & Auto-detection */}
-            <div className="pt-2 border-t border-slate-800/80">
+            {/* Geolocation strictly based on event address */}
+            <div className="pt-2.5 border-t border-slate-800/80">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 mb-2">
                 <div className="flex items-center gap-2">
-                  <Navigation className="w-4 h-4 text-emerald-400" />
+                  <MapPin className="w-4 h-4 text-amber-400" />
                   <span className="text-xs font-bold text-slate-200">
-                    Geolocalização Automática (Lat / Long)
+                    Coordenadas Baseadas no Endereço do Evento
                   </span>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2">
-                  {coords && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setLatitude(String(coords.latitude.toFixed(6)));
-                        setLongitude(String(coords.longitude.toFixed(6)));
-                        setGeocodeInfo(`Coordenadas físicas exatas obtidas pelo GPS: Lat ${coords.latitude.toFixed(6)}, Lon ${coords.longitude.toFixed(6)}`);
-                      }}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 transition-colors cursor-pointer w-fit"
-                      title="Preencher com a localização física exata do seu aparelho agora"
-                    >
-                      <Navigation className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>Usar Meu GPS Atual</span>
-                    </button>
+                <button
+                  type="button"
+                  onClick={() => fetchCoordinates(address, city, state, locationName)}
+                  disabled={isGeocoding || (!address.trim() && !city.trim() && !locationName.trim())}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 transition-colors disabled:opacity-50 cursor-pointer w-fit"
+                  title="Consultar coordenadas com base no endereço digitado"
+                >
+                  {isGeocoding ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                      <span>Buscando pelo endereço...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Globe className="w-3.5 h-3.5 text-amber-400" />
+                      <span>{latitude && longitude ? 'Recalcular pelo Endereço' : 'Calcular Coordenadas do Endereço'}</span>
+                    </>
                   )}
-
-                  <button
-                    type="button"
-                    onClick={() => fetchCoordinates(address, city, state)}
-                    disabled={isGeocoding || (!address.trim() && !city.trim())}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 transition-colors disabled:opacity-50 cursor-pointer w-fit"
-                  >
-                    {isGeocoding ? (
-                      <>
-                        <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
-                        <span>Buscando coordenadas...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Globe className="w-3.5 h-3.5 text-amber-400" />
-                        <span>{latitude && longitude ? 'Recalcular Coordenadas' : 'Testar Coordenadas do Endereço'}</span>
-                      </>
-                    )}
-                  </button>
-                </div>
+                </button>
               </div>
 
               {/* Status Banner */}
@@ -695,7 +865,7 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                   <div className="flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
                     <span>
-                      <strong>Coordenadas prontas:</strong> Lat <code className="text-white font-mono bg-emerald-950/60 px-1 py-0.5 rounded">{latitude}</code>, Long <code className="text-white font-mono bg-emerald-950/60 px-1 py-0.5 rounded">{longitude}</code>
+                      <strong>Coordenadas do endereço do evento:</strong> Lat <code className="text-white font-mono bg-emerald-950/60 px-1 py-0.5 rounded">{latitude}</code>, Long <code className="text-white font-mono bg-emerald-950/60 px-1 py-0.5 rounded">{longitude}</code>
                     </span>
                   </div>
                   <a
@@ -704,18 +874,21 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                     rel="noreferrer"
                     className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-300 hover:underline"
                   >
-                    <span>Ver no Mapa</span>
+                    <span>Conferir Endereço no Mapa</span>
                     <ExternalLink className="w-3 h-3" />
                   </a>
                 </div>
               ) : (
                 <p className="text-[11px] text-slate-400 leading-relaxed">
-                  💡 Ao clicar em <strong>"Publicar Evento"</strong>, o sistema consulta e atualiza automaticamente as coordenadas de <strong>latitude</strong> e <strong>longitude</strong> da tabela com base no endereço digitado.
+                  📍 O sistema calcula a <strong>latitude</strong> e <strong>longitude</strong> automaticamente com base no <strong>endereço</strong>, <strong>local</strong> e <strong>cidade</strong> do evento informados acima.
                 </p>
               )}
 
-              {geocodeInfo && !latitude && (
-                <p className="text-xs text-amber-400/90 mt-1.5">{geocodeInfo}</p>
+              {geocodeInfo && (
+                <p className="text-xs text-amber-300/90 mt-1.5 flex items-center gap-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 inline shrink-0" />
+                  <span>{geocodeInfo}</span>
+                </p>
               )}
             </div>
           </div>
@@ -786,15 +959,20 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
 
           {/* Section: Image & Presets */}
           <div className="p-5 sm:p-6 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-4">
-            <h3 className="text-sm font-bold uppercase tracking-wider text-amber-400 flex items-center gap-2">
-              <ImageIcon className="w-4 h-4" />
-              Imagem de Capa
-            </h3>
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold uppercase tracking-wider text-amber-400 flex items-center gap-2">
+                <ImageIcon className="w-4 h-4" />
+                Cartaz do Evento (Formato Vertical)
+              </h3>
+              <span className="text-[11px] font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded-md">
+                Proporção Vertical (3:4 / 4:5)
+              </span>
+            </div>
 
             {/* File Upload Box (Drag and Drop + Click) */}
             <div>
               <label className="block text-xs font-semibold text-slate-300 mb-2">
-                Envie uma foto do seu dispositivo ou informe a URL:
+                Envie o cartaz do seu evento no formato vertical ou informe a URL da imagem:
               </label>
 
               <div
@@ -829,21 +1007,33 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                 />
 
                 {imageUrl ? (
-                  <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-                    <div className="relative w-36 h-24 rounded-xl overflow-hidden border border-slate-700 shadow-md">
+                  <div className="flex flex-col sm:flex-row items-center justify-center gap-6 p-2">
+                    {/* Visualizador Vertical do Cartaz */}
+                    <div className="relative w-40 sm:w-48 aspect-[3/4] rounded-2xl overflow-hidden border-2 border-amber-500/50 shadow-2xl bg-slate-950 flex-shrink-0 ring-1 ring-amber-500/30 group">
                       <img
                         src={imageUrl}
-                        alt="Imagem selecionada"
-                        className="w-full h-full object-cover"
+                        alt="Cartaz vertical selecionado"
+                        className="w-full h-full object-cover sm:object-contain bg-slate-950"
                         referrerPolicy="no-referrer"
                       />
+                      <div className="absolute top-2 left-2 pointer-events-none">
+                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-950/90 text-emerald-400 border border-emerald-500/30 shadow backdrop-blur-sm">
+                          Cartaz Vertical
+                        </span>
+                      </div>
                     </div>
-                    <div className="flex flex-col sm:items-start gap-2 text-center sm:text-left">
+                    <div className="flex flex-col sm:items-start gap-2.5 text-center sm:text-left">
                       <span className="text-xs font-semibold text-emerald-400 flex items-center gap-1.5 justify-center sm:justify-start">
                         <CheckCircle2 className="w-4 h-4" />
-                        Imagem anexada com sucesso
+                        Cartaz anexado com sucesso
                       </span>
-                      <div className="flex gap-2">
+                      <p className="text-xs text-slate-300 font-medium">
+                        Visualização vertical ativa (ideal para cartazes e folders)
+                      </p>
+                      <p className="text-[11px] text-slate-400 max-w-xs leading-relaxed">
+                        Este cartaz será apresentado verticalmente na página inicial, na busca de eventos e no modal de detalhes completos.
+                      </p>
+                      <div className="flex gap-2 pt-1">
                         <label
                           htmlFor="input-file-event-image"
                           className="cursor-pointer px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg transition-colors inline-block"
@@ -853,7 +1043,7 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                         <button
                           type="button"
                           onClick={() => setImageUrl('')}
-                          className="px-3 py-1.5 bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1"
+                          className="px-3 py-1.5 bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                           Remover
@@ -864,16 +1054,19 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                 ) : (
                   <label
                     htmlFor="input-file-event-image"
-                    className="cursor-pointer flex flex-col items-center justify-center gap-2"
+                    className="cursor-pointer flex flex-col items-center justify-center gap-2.5 py-4"
                   >
-                    <div className="w-12 h-12 rounded-xl bg-slate-800 flex items-center justify-center text-amber-400">
-                      <Upload className="w-6 h-6" />
+                    <div className="w-14 h-14 rounded-2xl bg-slate-800 flex items-center justify-center text-amber-400 shadow-md">
+                      <Upload className="w-7 h-7" />
                     </div>
                     <span className="text-sm font-semibold text-white">
-                      Clique para selecionar uma foto ou arraste aqui
+                      Clique para selecionar o cartaz ou arraste o arquivo aqui
                     </span>
-                    <span className="text-xs text-slate-400">
-                      Formatos suportados: JPG, PNG, WEBP (recomendado proporção 16:9)
+                    <span className="text-xs text-amber-300/80 font-medium">
+                      Recomendado formato vertical (proporção 3:4 ou 4:5 — padrão cartaz/flyer)
+                    </span>
+                    <span className="text-[11px] text-slate-500">
+                      Formatos suportados: JPG, PNG, WEBP
                     </span>
                   </label>
                 )}
@@ -956,83 +1149,6 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
             </button>
           </div>
         </form>
-
-        {/* Live Preview Card */}
-        <div className="lg:col-span-5 sticky top-24 space-y-4">
-          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
-            <Eye className="w-4 h-4 text-amber-400" />
-            <span>Pré-visualização do Card</span>
-          </div>
-
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
-            <div className="relative h-48 w-full bg-slate-950">
-              <img
-                src={imageUrl || DEFAULT_FALLBACK_IMAGE}
-                alt="Preview"
-                className="w-full h-full object-cover"
-                referrerPolicy="no-referrer"
-              />
-              <div className="absolute inset-0 bg-gradient-to-t from-slate-900 via-slate-900/20 to-transparent" />
-
-              <div className="absolute top-3 left-3 bg-slate-950/90 rounded-xl p-1 px-2.5 text-center border border-slate-700/60">
-                <span className="block text-[10px] font-bold uppercase text-amber-400">
-                  {date ? new Date(date + 'T12:00:00').toLocaleDateString('pt-BR', { month: 'short' }) : 'MÊS'}
-                </span>
-                <span className="block text-base font-extrabold text-white">
-                  {date ? new Date(date + 'T12:00:00').getDate() : '--'}
-                </span>
-              </div>
-
-              <div className="absolute bottom-2 left-3">
-                <span className="text-[11px] font-semibold text-amber-300 bg-slate-950/80 px-2 py-0.5 rounded border border-amber-500/20">
-                  {category}
-                </span>
-              </div>
-
-              <div className="absolute bottom-2 right-3">
-                <span className={`text-[11px] font-bold px-2 py-0.5 rounded shadow-sm ${
-                  isFree
-                    ? 'bg-emerald-500 text-slate-950 font-extrabold'
-                    : 'bg-slate-950/90 text-amber-300 border border-amber-500/30'
-                }`}>
-                  {isFree ? 'Gratuito' : (price ? `R$ ${parseFloat(price).toFixed(2).replace('.', ',')}` : (priceDetails || 'Consulte'))}
-                </span>
-              </div>
-            </div>
-
-            <div className="p-4 space-y-3">
-              <div>
-                <h4 className="font-bold text-white text-base truncate">
-                  {title || 'Título do seu evento incrível'}
-                </h4>
-                <p className="text-xs text-slate-400 line-clamp-2 mt-1">
-                  {description || 'Sua descrição aparecerá aqui para convidar as pessoas...'}
-                </p>
-              </div>
-
-              <div className="pt-2 border-t border-slate-800 space-y-1.5 text-xs text-slate-400">
-                <div className="flex items-center gap-1.5 text-slate-300 font-medium">
-                  <Calendar className="w-3.5 h-3.5 text-amber-400" />
-                  <span>{date ? new Date(date + 'T12:00:00').toLocaleDateString('pt-BR') : 'Data a definir'} • {time || '19:00'}</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <MapPin className="w-3.5 h-3.5 text-slate-500" />
-                  <span className="truncate">{locationName || 'Local a definir'} ({city || 'Cidade'} - {state})</span>
-                </div>
-              </div>
-
-              {organizer && (
-                <div className="pt-1 text-[11px] text-slate-400">
-                  Organizado por: <strong className="text-slate-300">{organizer}</strong>
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-300/90 leading-relaxed">
-            💡 <strong>Dica:</strong> Seu evento é salvo no navegador e fica imediatamente visível na consulta de eventos com opções de localização, compartilhamento e adição na agenda!
-          </div>
-        </div>
       </div>
     </div>
   );

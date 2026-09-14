@@ -11,13 +11,14 @@ import {
   KeyRound, 
   Building2, 
   Phone, 
-  Send,
-  RefreshCw,
-  Info,
-  Smartphone,
-  MessageSquare,
-  ExternalLink,
-  Search
+  Send, 
+  RefreshCw, 
+  Info, 
+  Smartphone, 
+  MessageSquare, 
+  ExternalLink, 
+  Search,
+  X
 } from 'lucide-react';
 import { Advertiser, ActiveScreen } from '../types';
 
@@ -224,14 +225,24 @@ export const AdvertiserAuth: React.FC<AdvertiserAuthProps> = ({
 
   return (
     <div className="max-w-2xl mx-auto px-4 py-10 w-full animate-fadeIn">
-      {/* Back button */}
-      <button
-        onClick={() => onNavigate('home')}
-        className="inline-flex items-center gap-2 text-sm text-slate-400 hover:text-white transition-colors mb-6 group"
-      >
-        <ArrowLeft className="w-4 h-4 group-hover:-translate-x-1 transition-transform" />
-        <span>Voltar para o Início</span>
-      </button>
+      {/* Back / Exit buttons */}
+      <div className="flex items-center gap-3 mb-6">
+        <button
+          onClick={() => onNavigate('home')}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800/90 hover:bg-rose-500/20 text-slate-200 hover:text-rose-300 border border-slate-700 hover:border-rose-500/40 text-xs font-bold transition-colors cursor-pointer shadow-sm"
+          title="Sair desta tela e voltar ao início"
+        >
+          <X className="w-4 h-4 text-rose-400" />
+          <span>Sair</span>
+        </button>
+        <button
+          onClick={() => onNavigate('home')}
+          className="inline-flex items-center gap-2 text-sm text-slate-400 hover:text-white transition-colors group"
+        >
+          <ArrowLeft className="w-4 h-4 group-hover:-translate-x-1 transition-transform" />
+          <span>Voltar para o Início</span>
+        </button>
+      </div>
 
       {/* Main Container Card */}
       <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl backdrop-blur-sm relative overflow-hidden">

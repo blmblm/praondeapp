@@ -17,6 +17,7 @@ import appIconUrl from '../assets/images/app_icon_1788820561686.jpg';
 interface NavbarProps {
   currentScreen: ActiveScreen;
   onNavigate: (screen: ActiveScreen) => void;
+  onExitAndClear?: () => void;
   eventCount: number;
   currentAdvertiser?: Advertiser | null;
   onOpenAdvertiserAuth?: () => void;
@@ -28,6 +29,7 @@ interface NavbarProps {
 export const Navbar: React.FC<NavbarProps> = ({ 
   currentScreen, 
   onNavigate, 
+  onExitAndClear,
   eventCount,
   currentAdvertiser,
   onOpenAdvertiserAuth,
@@ -137,38 +139,28 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           {currentScreen !== 'home' && (
             <button
-              id="nav-register-btn"
-              onClick={() => onNavigate('register')}
-              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-sm font-semibold transition-all ${
-                currentScreen === 'register' || currentScreen === 'advertiser_auth'
-                  ? 'bg-emerald-500 text-slate-950 shadow-md shadow-emerald-500/20'
-                  : 'bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 hover:from-amber-400 hover:to-orange-400 shadow-sm'
-              }`}
+              id="nav-exit-clear-btn"
+              onClick={onExitAndClear || (() => onNavigate('home'))}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800/90 hover:bg-rose-500/20 text-slate-200 hover:text-rose-300 border border-slate-700 hover:border-rose-500/40 font-bold text-xs shadow-sm cursor-pointer transition-colors"
+              title="Sair desta tela e limpar o aplicativo"
             >
-              <PlusCircle className="w-4 h-4 text-slate-950" />
-              <span>Cadastrar Evento</span>
+              <X className="w-4 h-4 text-rose-400" />
+              <span>Sair</span>
             </button>
           )}
         </nav>
 
         {/* Mobile Right Bar (md:hidden) */}
         <div className="flex md:hidden items-center gap-2">
-          {currentScreen !== 'home' ? (
+          {currentScreen !== 'home' && (
             <button
-              onClick={() => onNavigate('home')}
+              id="mobile-nav-exit-clear-btn"
+              onClick={onExitAndClear || (() => onNavigate('home'))}
               className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-800/90 hover:bg-rose-500/20 text-slate-200 hover:text-rose-300 border border-slate-700 hover:border-rose-500/40 font-bold text-xs shadow-sm cursor-pointer transition-colors"
-              title="Sair desta tela e voltar ao início"
+              title="Sair desta tela e limpar o aplicativo"
             >
               <X className="w-4 h-4 text-rose-400" />
               <span>Sair</span>
-            </button>
-          ) : (
-            <button
-              onClick={() => onNavigate('register')}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 font-bold text-xs shadow-sm"
-            >
-              <PlusCircle className="w-3.5 h-3.5" />
-              <span>Cadastrar</span>
             </button>
           )}
 
@@ -282,20 +274,17 @@ export const Navbar: React.FC<NavbarProps> = ({
             <button
               onClick={() => {
                 setIsMobileMenuOpen(false);
-                onNavigate('home');
-                try {
-                  if (window.history.length > 1) {
-                    window.history.back();
-                  } else {
-                    window.close();
-                  }
-                } catch {}
+                if (onExitAndClear) {
+                  onExitAndClear();
+                } else {
+                  onNavigate('home');
+                }
               }}
               className="w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-semibold text-rose-300 hover:bg-rose-500/15 border border-rose-500/20 transition-colors"
             >
               <div className="flex items-center gap-2.5">
                 <X className="w-4 h-4 text-rose-400" />
-                <span>Fechar / Sair da Tela</span>
+                <span>Sair e Limpar Tela</span>
               </div>
               <span className="text-[10px] uppercase font-bold text-rose-400/80">Sair</span>
             </button>

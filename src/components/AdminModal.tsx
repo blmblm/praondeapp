@@ -43,6 +43,13 @@ import {
 import { EventItem, Advertiser, Supervisor, CityItem, CategoryItem } from '../types';
 import { SponsorItem } from '../data/sponsors';
 import { EventLiberationModal } from './EventLiberationModal';
+import {
+  saveEstadoToFirestore,
+  deleteEstadoFromFirestore,
+  deleteAllEstadosFromFirestore,
+  saveCategoriaToFirestore,
+  deleteCategoriaFromFirestore,
+} from '../lib/firestoreSync';
 
 interface AdminModalProps {
   isOpen: boolean;
@@ -333,7 +340,29 @@ export const AdminModal: React.FC<AdminModalProps> = ({
         console.warn('Erro ao sincronizar supervisores do SQLite:', err);
       }
     };
+
+    const fetchCidadesFromDb = async () => {
+      try {
+        const res = await fetch('/api/estado');
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data)) {
+            setCities(data.map((c: any) => ({
+              id: String(c.id),
+              name: c.nome,
+              state: c.estado,
+              region: c.regiao || '',
+              active: c.ativa !== false,
+            })));
+          }
+        }
+      } catch (err) {
+        console.warn('Erro ao sincronizar da tabela estado:', err);
+      }
+    };
+
     fetchSupervisorsFromDb();
+    fetchCidadesFromDb();
   }, [isOpen]);
 
   // Save supervisors to localStorage
@@ -769,7 +798,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   };
 
   // Handle Cadastrar Cidades
-  const handleCreateCity = (e: React.FormEvent) => {
+  const handleCreateCity = async (e: React.FormEvent) => {
     e.preventDefault();
     setCityFeedback(null);
 
@@ -788,6 +817,49 @@ export const AdminModal: React.FC<AdminModalProps> = ({
       return;
     }
 
+    try {
+      const res = await fetch('/api/estado', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          nome: trimmed,
+          estado: newCityState,
+          regiao: newCityRegion,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const newCity: CityItem = {
+          id: String(data.id),
+          name: data.nome,
+          state: data.estado,
+          region: data.regiao || newCityRegion,
+          active: true,
+        };
+        setCities((prev) => [newCity, ...prev]);
+        setCityFeedback({ type: 'success', msg: `Registro "${trimmed} - ${newCityState}" cadastrado na tabela de estado com sucesso!` });
+        setNewCityName('');
+
+        // Sincroniza no Firestore
+        try {
+          await saveEstadoToFirestore({
+            id: typeof data.id === 'number' ? data.id : parseInt(String(data.id), 10) || 1,
+            nome: data.nome,
+            estado: data.estado,
+            regiao: data.regiao || newCityRegion,
+            ativa: true,
+            criadoEm: data.criado_em || new Date().toISOString(),
+          });
+        } catch (fErr) {
+          console.warn('[Firestore] Erro ao sincronizar estado:', fErr);
+        }
+
+        return;
+      }
+    } catch (err) {
+      console.warn('Erro ao salvar na tabela estado:', err);
+    }
+
     const newCity: CityItem = {
       id: `city-${Date.now()}`,
       name: trimmed,
@@ -797,15 +869,58 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     };
 
     setCities((prev) => [newCity, ...prev]);
-    setCityFeedback({ type: 'success', msg: `Cidade "${trimmed} - ${newCityState}" cadastrada com sucesso!` });
+    setCityFeedback({ type: 'success', msg: `Registro "${trimmed} - ${newCityState}" cadastrado com sucesso!` });
     setNewCityName('');
+
+    try {
+      await saveEstadoToFirestore({
+        id: Date.now(),
+        nome: newCity.name,
+        estado: newCity.state,
+        regiao: newCity.region,
+        ativa: true,
+        criadoEm: new Date().toISOString(),
+      });
+    } catch (fErr) {
+      console.warn('[Firestore] Erro ao sincronizar estado:', fErr);
+    }
   };
 
-  const handleDeleteCity = (id: string) => {
+  const handleDeleteCity = async (id: string) => {
     const target = cities.find((c) => c.id === id);
     if (!target) return;
-    if (window.confirm(`Deseja remover a cidade "${target.name} - ${target.state}"?`)) {
+    if (window.confirm(`Deseja remover "${target.name} - ${target.state}" da tabela estado?`)) {
+      try {
+        await deleteEstadoFromFirestore(id);
+      } catch (fErr) {
+        console.warn('[Firestore] Erro ao deletar estado:', fErr);
+      }
+
+      try {
+        await fetch(`/api/estado/${id}`, { method: 'DELETE' });
+      } catch (err) {
+        console.warn('Erro ao remover da tabela estado:', err);
+      }
       setCities((prev) => prev.filter((c) => c.id !== id));
+    }
+  };
+
+  const handleDeleteAllCities = async () => {
+    if (cities.length === 0) return;
+    if (window.confirm(`Atenção: Tem certeza que deseja excluir TODOS os ${cities.length} registros da tabela estado? Esta ação não pode ser desfeita.`)) {
+      try {
+        await deleteAllEstadosFromFirestore();
+      } catch (fErr) {
+        console.warn('[Firestore] Erro ao excluir todos do Firestore:', fErr);
+      }
+
+      try {
+        await fetch('/api/estado', { method: 'DELETE' });
+      } catch (err) {
+        console.warn('Erro ao remover todos da tabela estado:', err);
+      }
+      setCities([]);
+      setCityFeedback({ type: 'success', msg: 'Todos os registros foram excluídos da tabela estado com sucesso!' });
     }
   };
 
@@ -1076,10 +1191,11 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
             <button
               onClick={onClose}
-              className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer shrink-0"
-              title="Fechar painel"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800/90 hover:bg-rose-500/20 text-slate-200 hover:text-rose-300 border border-slate-700 hover:border-rose-500/40 text-xs font-bold transition-colors cursor-pointer shrink-0"
+              title="Sair e fechar painel"
             >
-              <X className="w-5 h-5" />
+              <X className="w-4 h-4 text-rose-400" />
+              <span>Sair</span>
             </button>
           </div>
         </div>
@@ -1898,9 +2014,21 @@ export const AdminModal: React.FC<AdminModalProps> = ({
               {/* Lista de Cidades */}
               <div className="space-y-3">
                 <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2">
-                  <span className="font-semibold text-white text-xs">
-                    Cidades Cadastradas ({cities.length})
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold text-white text-xs">
+                      Cidades Cadastradas ({cities.length})
+                    </span>
+                    {cities.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleDeleteAllCities}
+                        className="text-[11px] text-rose-400 hover:text-rose-300 hover:underline font-medium cursor-pointer ml-1"
+                        title="Excluir todas as cidades da tabela"
+                      >
+                        Excluir Todas
+                      </button>
+                    )}
+                  </div>
 
                   <div className="relative w-full sm:w-60">
                     <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -1914,49 +2042,55 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
-                  {filteredCities.map((c) => {
-                    const eventCount = events.filter((e) => e.city.toLowerCase() === c.name.toLowerCase()).length;
-                    return (
-                      <div
-                        key={c.id}
-                        className="bg-slate-950/70 border border-slate-800 hover:border-slate-700 rounded-xl p-3 flex items-center justify-between gap-2 transition-all"
-                      >
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-1.5">
-                            <span className="font-bold text-white text-xs truncate">{c.name}</span>
-                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-amber-400 border border-slate-700">
-                              {c.state}
-                            </span>
+                {cities.length === 0 ? (
+                  <div className="p-8 text-center bg-slate-950/40 border border-slate-800/80 rounded-xl text-slate-400 text-xs">
+                    Nenhum registro cadastrado na tabela de estado no momento. Utilize o formulário acima para cadastrar novas cidades/estados.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
+                    {filteredCities.map((c) => {
+                      const eventCount = events.filter((e) => e.city.toLowerCase() === c.name.toLowerCase()).length;
+                      return (
+                        <div
+                          key={c.id}
+                          className="bg-slate-950/70 border border-slate-800 hover:border-slate-700 rounded-xl p-3 flex items-center justify-between gap-2 transition-all"
+                        >
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-bold text-white text-xs truncate">{c.name}</span>
+                              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-amber-400 border border-slate-700">
+                                {c.state}
+                              </span>
+                            </div>
+                            <div className="text-[10px] text-slate-400 mt-0.5">
+                              {c.region || 'Brasil'} • {eventCount} {eventCount === 1 ? 'evento' : 'eventos'}
+                            </div>
                           </div>
-                          <div className="text-[10px] text-slate-400 mt-0.5">
-                            {c.region || 'Brasil'} • {eventCount} {eventCount === 1 ? 'evento' : 'eventos'}
+
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={() => handleToggleCityActive(c.id)}
+                              className={`p-1.5 rounded-lg text-xs font-bold cursor-pointer transition-colors ${
+                                c.active ? 'text-emerald-400 hover:bg-emerald-500/10' : 'text-slate-500 hover:bg-slate-800'
+                              }`}
+                              title={c.active ? 'Cidade ativa' : 'Cidade inativa'}
+                            >
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                            </button>
+
+                            <button
+                              onClick={() => handleDeleteCity(c.id)}
+                              className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
+                              title={`Excluir cidade ${c.name}`}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
                           </div>
                         </div>
-
-                        <div className="flex items-center gap-1">
-                          <button
-                            onClick={() => handleToggleCityActive(c.id)}
-                            className={`p-1.5 rounded-lg text-xs font-bold cursor-pointer transition-colors ${
-                              c.active ? 'text-emerald-400 hover:bg-emerald-500/10' : 'text-slate-500 hover:bg-slate-800'
-                            }`}
-                            title={c.active ? 'Cidade ativa' : 'Cidade inativa'}
-                          >
-                            <CheckCircle2 className="w-3.5 h-3.5" />
-                          </button>
-
-                          <button
-                            onClick={() => handleDeleteCity(c.id)}
-                            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
-                            title={`Excluir cidade ${c.name}`}
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </div>
           )}

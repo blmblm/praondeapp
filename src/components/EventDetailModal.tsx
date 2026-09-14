@@ -14,7 +14,9 @@ import {
   Copy,
   CalendarPlus,
   Trash2,
-  Navigation
+  Navigation,
+  ZoomIn,
+  Sparkles
 } from 'lucide-react';
 import { EventItem } from '../types';
 import { useUserLocation } from '../context/LocationContext';
@@ -32,6 +34,7 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
 }) => {
   const [copied, setCopied] = useState(false);
   const [copiedAddress, setCopiedAddress] = useState(false);
+  const [isZoomed, setIsZoomed] = useState(false);
   const { coords, getDistanceKmTo } = useUserLocation();
 
   if (!event) return null;
@@ -102,38 +105,90 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
         {/* Close button */}
         <button
           onClick={onClose}
-          className="absolute top-4 right-4 z-20 w-9 h-9 rounded-full bg-slate-950/70 hover:bg-slate-950 text-white flex items-center justify-center backdrop-blur-md border border-slate-700/60 transition-colors"
-          aria-label="Fechar"
+          className="absolute top-4 right-4 z-20 px-3 py-1.5 rounded-full bg-slate-950/85 hover:bg-rose-500/30 text-slate-100 hover:text-rose-200 flex items-center gap-1.5 backdrop-blur-md border border-slate-700/80 hover:border-rose-500/50 transition-all text-xs font-bold shadow-lg cursor-pointer"
+          aria-label="Fechar e sair dos detalhes"
+          title="Fechar e sair dos detalhes do evento"
         >
-          <X className="w-5 h-5" />
+          <X className="w-4 h-4 text-rose-400" />
+          <span>Sair</span>
         </button>
 
         {/* Modal Scrollable Body */}
         <div className="overflow-y-auto flex-1">
-          {/* Cover Image Header */}
-          <div className="relative h-64 sm:h-72 w-full bg-slate-950">
-            <img
-              src={event.imageUrl}
-              alt={event.title}
-              className="w-full h-full object-cover"
-              referrerPolicy="no-referrer"
-            />
-            <div className="absolute inset-0 bg-gradient-to-t from-slate-900 via-slate-900/40 to-transparent" />
+          {/* Vertical Poster Header Showcase */}
+          <div className="relative py-6 sm:py-8 px-4 flex flex-col items-center justify-center bg-gradient-to-b from-slate-950 via-slate-900 to-slate-900 border-b border-slate-800 overflow-hidden">
+            {/* Ambient Blur Backdrop */}
+            <div className="absolute inset-0 overflow-hidden pointer-events-none">
+              <img
+                src={event.imageUrl}
+                alt=""
+                aria-hidden="true"
+                className="w-full h-full object-cover filter blur-3xl opacity-25 scale-125"
+              />
+              <div className="absolute inset-0 bg-slate-950/60" />
+            </div>
 
-            <div className="absolute bottom-4 left-4 right-4 flex flex-wrap items-center justify-between gap-2">
-              <span className="inline-block px-3 py-1 rounded-lg text-xs font-bold uppercase tracking-wider bg-amber-500 text-slate-950 shadow-md">
-                {event.category}
-              </span>
-              <div className="flex items-center gap-2">
-                <span className={`px-3 py-1 rounded-lg text-xs font-bold shadow-md ${
-                  event.isFree
-                    ? 'bg-emerald-500/90 text-slate-950'
-                    : 'bg-slate-950/90 text-amber-300 border border-amber-500/30'
-                }`}>
-                  {event.isFree
-                    ? 'Entrada Franca'
-                    : (event.price ? `R$ ${event.price.toFixed(2).replace('.', ',')}` : (event.priceDetails || 'Consulte valores'))}
-                </span>
+            {/* Poster in Vertical Format (3:4 or 4:5) */}
+            <div className="relative z-10 flex flex-col items-center">
+              <div 
+                onClick={() => setIsZoomed(true)}
+                className="relative group cursor-pointer transition-transform duration-200 hover:scale-[1.02]"
+                title="Clique para ampliar o cartaz no formato vertical"
+              >
+                <div className="w-56 sm:w-64 md:w-72 aspect-[3/4] sm:aspect-[4/5] rounded-2xl overflow-hidden shadow-2xl border-2 border-slate-700/80 bg-slate-950 relative ring-1 ring-white/10 flex items-center justify-center">
+                  <img
+                    src={event.imageUrl}
+                    alt=""
+                    aria-hidden="true"
+                    className="absolute inset-0 w-full h-full object-cover filter blur-xl opacity-30 scale-110 pointer-events-none"
+                  />
+                  <img
+                    src={event.imageUrl}
+                    alt={event.title}
+                    className="relative z-10 w-full h-full object-contain bg-transparent"
+                    referrerPolicy="no-referrer"
+                  />
+                  <div className="absolute inset-0 bg-gradient-to-t from-slate-950/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-center p-3">
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-900/90 text-amber-300 text-xs font-semibold border border-amber-500/40 shadow-lg">
+                      <ZoomIn className="w-3.5 h-3.5" />
+                      Ampliar Cartaz Vertical
+                    </span>
+                  </div>
+                </div>
+
+                {/* Floating Badges */}
+                <div className="absolute top-2.5 left-2.5 flex flex-col gap-1.5 pointer-events-none">
+                  <span className="inline-block px-2.5 py-1 rounded-lg text-xs font-bold uppercase tracking-wider bg-amber-500 text-slate-950 shadow-md">
+                    {event.category}
+                  </span>
+                  <span className="inline-block px-2 py-0.5 rounded-md text-[10px] font-semibold bg-slate-950/85 text-emerald-400 border border-emerald-500/30 backdrop-blur-sm shadow">
+                    Formato Vertical
+                  </span>
+                </div>
+
+                <div className="absolute bottom-2.5 right-2.5 pointer-events-none">
+                  <span className={`px-2.5 py-1 rounded-lg text-xs font-bold shadow-md ${
+                    event.isFree
+                      ? 'bg-emerald-500/95 text-slate-950'
+                      : 'bg-slate-950/90 text-amber-300 border border-amber-500/30'
+                  }`}>
+                    {event.isFree
+                      ? 'Entrada Franca'
+                      : (event.price ? `R$ ${event.price.toFixed(2).replace('.', ',')}` : (event.priceDetails || 'Consulte valores'))}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 mt-2.5 text-[11px] text-slate-400">
+                <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span>Cartaz oficial do evento no formato vertical</span>
+                <button
+                  type="button"
+                  onClick={() => setIsZoomed(true)}
+                  className="text-amber-400 hover:text-amber-300 font-semibold underline ml-1 cursor-pointer"
+                >
+                  Ampliar
+                </button>
               </div>
             </div>
           </div>
@@ -314,6 +369,35 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Lightbox / Zoom do Cartaz Vertical */}
+      {isZoomed && (
+        <div 
+          className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-slate-950/95 backdrop-blur-md animate-fadeIn"
+          onClick={() => setIsZoomed(false)}
+        >
+          <div className="relative max-w-md w-full flex flex-col items-center" onClick={(e) => e.stopPropagation()}>
+            <button
+              onClick={() => setIsZoomed(false)}
+              className="absolute -top-11 right-0 px-3 py-1.5 rounded-full bg-slate-900 border border-slate-700 text-white hover:text-rose-400 flex items-center gap-1.5 text-xs font-bold cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+              <span>Fechar</span>
+            </button>
+            <div className="w-full max-h-[85vh] aspect-[3/4] sm:aspect-[4/5] rounded-2xl overflow-hidden border-2 border-amber-500/50 shadow-2xl bg-slate-950 flex items-center justify-center">
+              <img
+                src={event.imageUrl}
+                alt={event.title}
+                className="w-full h-full object-contain"
+                referrerPolicy="no-referrer"
+              />
+            </div>
+            <p className="text-xs text-slate-300 font-medium mt-3 text-center">
+              {event.title} • {event.category}
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { EventItem, EventCategory, ActiveScreen, Advertiser, CategoryItem } from './types';
+import { EventItem, EventCategory, ActiveScreen, Advertiser, CategoryItem, CidadeItem } from './types';
 import { INITIAL_EVENTS } from './data/initialEvents';
 import { INITIAL_ADVERTISERS } from './data/initialAdvertisers';
 import { INITIAL_SPONSORS, SponsorItem } from './data/sponsors';
@@ -12,6 +12,19 @@ import { AdvertiserAuth } from './components/AdvertiserAuth';
 import { SqlConsoleModal } from './components/SqlConsoleModal';
 import { AdminModal } from './components/AdminModal';
 import { SponsorRegistrationScreen } from './components/SponsorRegistrationScreen';
+import {
+  subscribeToEvents,
+  saveEventToFirestore,
+  deleteEventFromFirestore,
+  updateEventLiberadoInFirestore,
+  subscribeToEstados,
+  saveEstadoToFirestore,
+  deleteEstadoFromFirestore,
+  subscribeToCategorias,
+  saveCategoriaToFirestore,
+  deleteCategoriaFromFirestore,
+} from './lib/firestoreSync';
+import { testFirestoreConnection } from './lib/firebase';
 
 const STORAGE_KEY = 'praonde_events_data_v2';
 const ADVERTISERS_STORAGE_KEY = 'praonde_advertisers_v1';
@@ -47,6 +60,7 @@ export default function App() {
   });
 
   const [categoryItems, setCategoryItems] = useState<CategoryItem[]>([]);
+  const [cidadesList, setCidadesList] = useState<CidadeItem[]>([]);
   
   // Advertisers State & Persistence
   const [advertisers, setAdvertisers] = useState<Advertiser[]>(() => {
@@ -119,14 +133,23 @@ export default function App() {
     }
   });
 
-  // Sync with backend SQLite database
+  // Sync with backend SQLite database e espelha no Firestore
   const loadEventsFromApi = async () => {
     try {
       const res = await fetch('/api/events');
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data) && data.length > 0) {
-          setEvents(data);
+          setEvents((prev) => (prev.length === 0 ? data : prev));
+          // Sincroniza cada evento da base com o Firestore para garantir disponibilidade imediata no celular
+          data.forEach((evt: EventItem) => {
+            saveEventToFirestore(evt).catch(() => {});
+          });
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+          } catch {
+            // ignore
+          }
         }
       }
     } catch (e) {
@@ -150,6 +173,23 @@ export default function App() {
     }
   };
 
+  const loadCidadesFromApi = async () => {
+    try {
+      let res = await fetch('/api/estados');
+      if (!res.ok) {
+        res = await fetch('/api/estado');
+      }
+      if (res.ok) {
+        const data: CidadeItem[] = await res.json();
+        if (Array.isArray(data)) {
+          setCidadesList(data);
+        }
+      }
+    } catch (e) {
+      console.warn('Usando dados da tabela estados locais:', e);
+    }
+  };
+
   const loadSponsorsFromApi = async () => {
     try {
       const res = await fetch('/api/admin/sponsors');
@@ -170,9 +210,46 @@ export default function App() {
   };
 
   useEffect(() => {
+    testFirestoreConnection();
+
+    // 1. Ouvir eventos do Firestore em tempo real (compartilhado entre PC e Celular)
+    const unsubEvents = subscribeToEvents((firestoreEvents) => {
+      if (Array.isArray(firestoreEvents) && firestoreEvents.length > 0) {
+        setEvents(firestoreEvents);
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(firestoreEvents));
+        } catch {
+          // ignore
+        }
+      }
+    });
+
+    // 2. Ouvir estados/cidades do Firestore em tempo real
+    const unsubEstados = subscribeToEstados((firestoreEstados) => {
+      if (Array.isArray(firestoreEstados) && firestoreEstados.length > 0) {
+        setCidadesList(firestoreEstados);
+      }
+    });
+
+    // 3. Ouvir categorias do Firestore em tempo real
+    const unsubCategorias = subscribeToCategorias((firestoreCategorias) => {
+      if (Array.isArray(firestoreCategorias) && firestoreCategorias.length > 0) {
+        setCategoryItems(firestoreCategorias);
+        setCategories(firestoreCategorias.map((c) => c.nome));
+      }
+    });
+
+    // Carga inicial das APIs REST locais como fallback complementar
     loadEventsFromApi();
     loadCategoriesFromApi();
+    loadCidadesFromApi();
     loadSponsorsFromApi();
+
+    return () => {
+      unsubEvents();
+      unsubEstados();
+      unsubCategorias();
+    };
   }, []);
 
   // Persist events whenever modified
@@ -219,9 +296,28 @@ export default function App() {
       if (res.ok) {
         const created: CategoryItem = await res.json();
         setCategoryItems((prev) => [...prev.filter((c) => c.id !== created.id), created]);
+
+        try {
+          await saveCategoriaToFirestore(created);
+        } catch (fErr) {
+          console.warn('[Firestore] Erro ao salvar categoria:', fErr);
+        }
+        return;
       }
     } catch (err) {
       console.warn('Erro ao salvar categoria no SQLite:', err);
+    }
+
+    try {
+      await saveCategoriaToFirestore({
+        id: Date.now(),
+        nome: trimmed,
+        descricao: '',
+        ativa: true,
+        criadoEm: new Date().toISOString(),
+      });
+    } catch (fErr) {
+      console.warn('[Firestore] Erro ao salvar categoria:', fErr);
     }
   };
 
@@ -231,6 +327,13 @@ export default function App() {
     const item = categoryItems.find((c) => c.nome.toLowerCase() === categoryName.toLowerCase());
     if (item) {
       setCategoryItems((prev) => prev.filter((c) => c.id !== item.id));
+
+      try {
+        await deleteCategoriaFromFirestore(item.id);
+      } catch (fErr) {
+        console.warn('[Firestore] Erro ao deletar categoria no Firestore:', fErr);
+      }
+
       try {
         await fetch(`/api/categories/${item.id}`, { method: 'DELETE' });
       } catch (err) {
@@ -240,7 +343,9 @@ export default function App() {
   };
 
   const handleAddEvent = async (newEvent: EventItem): Promise<EventItem> => {
-    // Save directly to SQLite database and get geocoded coordinates
+    let finalEvent = newEvent;
+
+    // 1. Tentar salvar no servidor local para geocodificação
     try {
       const res = await fetch('/api/events', {
         method: 'POST',
@@ -253,15 +358,21 @@ export default function App() {
 
       if (res.ok) {
         const savedData: EventItem = await res.json();
-        setEvents((prev) => [savedData, ...prev.filter((e) => e.id !== savedData.id && e.id !== newEvent.id)]);
-        return savedData;
+        finalEvent = savedData;
       }
     } catch (e) {
       console.error('Erro ao gravar evento no SQLite:', e);
     }
 
-    setEvents((prev) => [newEvent, ...prev.filter((e) => e.id !== newEvent.id)]);
-    return newEvent;
+    // 2. Salvar no Firestore para sincronização global imediata (PC + Celular)
+    try {
+      await saveEventToFirestore(finalEvent);
+    } catch (fireErr) {
+      console.warn('[Firestore] Erro ao sincronizar evento no Firestore:', fireErr);
+    }
+
+    setEvents((prev) => [finalEvent, ...prev.filter((e) => e.id !== finalEvent.id && e.id !== newEvent.id)]);
+    return finalEvent;
   };
 
   const handleDeleteEvent = async (id: string) => {
@@ -270,6 +381,14 @@ export default function App() {
       setSelectedEvent(null);
     }
 
+    // Deletar do Firestore
+    try {
+      await deleteEventFromFirestore(id);
+    } catch (fireErr) {
+      console.warn('[Firestore] Erro ao deletar evento do Firestore:', fireErr);
+    }
+
+    // Deletar da API local
     try {
       await fetch(`/api/events/${id}`, { method: 'DELETE' });
     } catch (e) {
@@ -283,6 +402,14 @@ export default function App() {
       prev.map((evt) => (evt.id === id ? { ...evt, liberado: nextLiberado } : evt))
     );
 
+    // Sincronizar no Firestore
+    try {
+      await updateEventLiberadoInFirestore(id, nextLiberado);
+    } catch (fireErr) {
+      console.warn('[Firestore] Erro ao atualizar liberado no Firestore:', fireErr);
+    }
+
+    // Sincronizar na API local
     try {
       await fetch(`/api/events/${id}`, {
         method: 'PUT',
@@ -298,6 +425,13 @@ export default function App() {
     setEvents((prev) =>
       prev.map((evt) => (evt.id === id ? { ...evt, liberado: nextLiberado } : evt))
     );
+
+    // Sincronizar no Firestore
+    try {
+      await updateEventLiberadoInFirestore(id, nextLiberado);
+    } catch (fireErr) {
+      console.warn('[Firestore] Erro ao atualizar liberado no Firestore:', fireErr);
+    }
 
     try {
       await fetch(`/api/events/${id}`, {
@@ -315,10 +449,18 @@ export default function App() {
     setCurrentScreen('events');
   };
 
+  // Limpar a tela por completo e voltar à home inicial limpa
+  const handleExitAndClearScreen = () => {
+    setSelectedEvent(null);
+    setCatalogInitialQuery('');
+    setIsSqlConsoleOpen(false);
+    setIsAdminOpen(false);
+    setCurrentScreen('home');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   const handleNavigate = (screen: ActiveScreen) => {
-    if (screen !== 'events') {
-      setCatalogInitialQuery('');
-    }
+    setCatalogInitialQuery('');
 
     // Before registering an event, check if advertiser is identified
     if (screen === 'register' && !currentAdvertiser) {
@@ -347,6 +489,7 @@ export default function App() {
       <Navbar
         currentScreen={currentScreen}
         onNavigate={handleNavigate}
+        onExitAndClear={handleExitAndClearScreen}
         eventCount={events.length}
         currentAdvertiser={currentAdvertiser}
         onOpenAdvertiserAuth={handleChangeAdvertiser}
@@ -375,6 +518,7 @@ export default function App() {
             onSelectEvent={setSelectedEvent}
             initialQuery={catalogInitialQuery}
             onDeleteEvent={handleDeleteEvent}
+            estadosList={cidadesList}
           />
         )}
 
@@ -400,6 +544,7 @@ export default function App() {
             currentAdvertiser={currentAdvertiser}
             onChangeAdvertiser={handleChangeAdvertiser}
             categoryItems={categoryItems}
+            cidadesList={cidadesList}
           />
         )}
 

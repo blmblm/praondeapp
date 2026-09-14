@@ -50,6 +50,20 @@ function initDatabase(db: any) {
     );
   `);
 
+  // Tabela de Estado
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS estado (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      nome TEXT UNIQUE NOT NULL,
+      estado TEXT NOT NULL,
+      regiao TEXT,
+      ativa INTEGER DEFAULT 1,
+      criado_em TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE VIEW IF NOT EXISTS cidades AS SELECT * FROM estado;
+    CREATE VIEW IF NOT EXISTS estados AS SELECT * FROM estado;
+  `);
+
   // Tabela de Supervisor
   db.exec(`
     CREATE TABLE IF NOT EXISTS supervisor (
@@ -59,6 +73,15 @@ function initDatabase(db: any) {
       criado_em TEXT DEFAULT CURRENT_TIMESTAMP
     );
   `);
+
+  // Observação: O auto-seed da tabela cidades foi desativado a pedido do usuário
+  // para permitir que a tabela permaneça vazia ou personalizada manualmente.
+  /*
+  try {
+    const cidCount = db.prepare('SELECT COUNT(*) as count FROM cidades;').get() as { count: number };
+    ...
+  } catch (e) {}
+  */
 
   // Seed categorias padrão se ainda não existirem
   try {
@@ -82,6 +105,78 @@ function initDatabase(db: any) {
     }
   } catch (e) {
     console.warn('Erro ao inserir categorias iniciais:', e);
+  }
+
+  // Observação: O auto-seed da tabela estado foi desativado a pedido do usuário
+  // para permitir que a tabela permaneça vazia ou personalizada manualmente.
+  /*
+  try {
+    const estCount = db.prepare('SELECT COUNT(*) as count FROM estado;').get() as { count: number };
+    if (!estCount || estCount.count === 0) {
+      const insertEst = db.prepare(`
+        INSERT OR IGNORE INTO estado (nome, estado, regiao, ativa)
+        VALUES (?, ?, ?, 1);
+      `);
+      const defaultEstados = [
+        ['Acre', 'AC', 'Norte'],
+        ['Alagoas', 'AL', 'Nordeste'],
+        ['Amapá', 'AP', 'Norte'],
+        ['Amazonas', 'AM', 'Norte'],
+        ['Bahia', 'BA', 'Nordeste'],
+        ['Ceará', 'CE', 'Nordeste'],
+        ['Distrito Federal', 'DF', 'Centro-Oeste'],
+        ['Espírito Santo', 'ES', 'Sudeste'],
+        ['Goiás', 'GO', 'Centro-Oeste'],
+        ['Maranhão', 'MA', 'Nordeste'],
+        ['Mato Grosso', 'MT', 'Centro-Oeste'],
+        ['Mato Grosso do Sul', 'MS', 'Centro-Oeste'],
+        ['Minas Gerais', 'MG', 'Sudeste'],
+        ['Pará', 'PA', 'Norte'],
+        ['Paraíba', 'PB', 'Nordeste'],
+        ['Paraná', 'PR', 'Sul'],
+        ['Pernambuco', 'PE', 'Nordeste'],
+        ['Piauí', 'PI', 'Nordeste'],
+        ['Rio de Janeiro', 'RJ', 'Sudeste'],
+        ['Rio Grande do Norte', 'RN', 'Nordeste'],
+        ['Rio Grande do Sul', 'RS', 'Sul'],
+        ['Rondônia', 'RO', 'Norte'],
+        ['Roraima', 'RR', 'Norte'],
+        ['Santa Catarina', 'SC', 'Sul'],
+        ['São Paulo', 'SP', 'Sudeste'],
+        ['Sergipe', 'SE', 'Nordeste'],
+        ['Tocantins', 'TO', 'Norte'],
+      ];
+      for (const [nome, uf, regiao] of defaultEstados) {
+        insertEst.run(nome, uf, regiao);
+      }
+    }
+  } catch (e) {
+    console.warn('Erro ao inserir estados iniciais:', e);
+  }
+  */
+
+  // View e gatilhos para a tabela 'estados' (compatibilidade total com 'estados' e 'estado')
+  try {
+    db.exec(`
+      CREATE VIEW IF NOT EXISTS estados AS SELECT id, nome, estado, regiao, ativa, criado_em FROM estado;
+
+      CREATE TRIGGER IF NOT EXISTS trg_insert_estados INSTEAD OF INSERT ON estados
+      BEGIN
+        INSERT INTO estado (nome, estado, regiao, ativa) VALUES (NEW.nome, NEW.estado, NEW.regiao, coalesce(NEW.ativa, 1));
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_delete_estados INSTEAD OF DELETE ON estados
+      BEGIN
+        DELETE FROM estado WHERE id = OLD.id;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_update_estados INSTEAD OF UPDATE ON estados
+      BEGIN
+        UPDATE estado SET nome = NEW.nome, estado = NEW.estado, regiao = NEW.regiao, ativa = NEW.ativa WHERE id = OLD.id;
+      END;
+    `);
+  } catch (e) {
+    console.warn('Erro ao criar view estados:', e);
   }
 
   // 2. Tabela de Anunciantes
@@ -275,13 +370,15 @@ function seedInitialData(db: any) {
     new Date().toISOString()
   );
 
-  // Eventos iniciais
+  // Observação: O auto-seed dos eventos de demonstração foi desativado a pedido do usuário
+  // para permitir que a tabela de eventos permaneça limpa ou receba apenas eventos reais cadastrados.
+  /*
   const insertEvt = db.prepare(`
     INSERT OR IGNORE INTO eventos (
       id, anunciante_id, titulo, descricao, categoria, data_evento, horario, horario_fim,
-      local_nome, endereco, cidade, estado, is_gratuito, preco, detalhes_preco,
+      local_nome, endereco, cidade, estado, liberado, is_gratuito, preco, detalhes_preco,
       imagem_url, organizador, contato, tags, destaque, status, criado_em
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'S', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
   `);
 
   const initialSeedEvents = [
@@ -457,8 +554,7 @@ function seedInitialData(db: any) {
       item.createdAt
     );
   }
-
-  console.log(`Sucesso: ${initialSeedEvents.length} eventos inseridos no banco SQLite.`);
+  */
 }
 
 export function executeSqlQuery(sql: string, params: any[] = []) {

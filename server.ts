@@ -9,7 +9,9 @@ import { createMercadoPagoPixPayment, checkMercadoPagoPaymentStatus } from './se
 const app = express();
 const PORT = 3000;
 
-app.use(express.json());
+// Configura limite amplo para suportar uploads de imagens (base64) e cadastros completos
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Initialize SQLite database
 const db = getDatabase();
@@ -28,7 +30,7 @@ app.get('/api/health', (req, res) => {
 // 1. Listar Eventos do SQLite
 app.get('/api/events', (req, res) => {
   try {
-    const { category, city, search, status } = req.query;
+    const { category, city, estado, state, search, status } = req.query;
     let sql = 'SELECT * FROM eventos WHERE 1=1';
     const params: any[] = [];
 
@@ -39,6 +41,26 @@ app.get('/api/events', (req, res) => {
     if (city && city !== 'Todas' && city !== 'Cidades') {
       sql += ' AND cidade = ?';
       params.push(String(city));
+    }
+    const estadoParam = estado || state;
+    if (estadoParam && estadoParam !== 'Todos' && estadoParam !== 'Todas') {
+      // Se for ID numérico da tabela estado, busca o registro
+      let ufVal = String(estadoParam).trim();
+      let nomeVal = '';
+      if (/^\d+$/.test(ufVal)) {
+        const estRow = db.prepare('SELECT nome, estado FROM estado WHERE id = ?').get(ufVal) as any;
+        if (estRow) {
+          ufVal = estRow.estado;
+          nomeVal = estRow.nome;
+        }
+      }
+      if (nomeVal) {
+        sql += ' AND (UPPER(estado) = ? OR UPPER(cidade) LIKE ? OR UPPER(estado) = ?)';
+        params.push(ufVal.toUpperCase(), `%${nomeVal.toUpperCase()}%`, nomeVal.toUpperCase());
+      } else {
+        sql += ' AND (UPPER(estado) = ? OR UPPER(cidade) LIKE ?)';
+        params.push(ufVal.toUpperCase(), `%${ufVal.toUpperCase()}%`);
+      }
     }
     if (search) {
       sql += ' AND (titulo LIKE ? OR descricao LIKE ? OR local_nome LIKE ?)';
@@ -99,17 +121,54 @@ app.get('/api/events', (req, res) => {
   }
 });
 
-// Helper: Obter coordenadas geográficas (latitude e longitude) a partir do endereço
-async function fetchGeocodeCoordinates(address?: string, city?: string, state?: string): Promise<{ latitude: string; longitude: string; displayName?: string } | null> {
+// Coordenadas padrão de apoio para cidades brasileiras (fallback seguro)
+const BRAZIL_CITY_COORDINATES: Record<string, { latitude: string; longitude: string }> = {
+  'santo andre': { latitude: '-23.6575', longitude: '-46.5312' },
+  'sao paulo': { latitude: '-23.5505', longitude: '-46.6333' },
+  'sao bernardo do campo': { latitude: '-23.6944', longitude: '-46.5654' },
+  'sao caetano do sul': { latitude: '-23.6229', longitude: '-46.5547' },
+  'diadema': { latitude: '-23.6865', longitude: '-46.6234' },
+  'maua': { latitude: '-23.6687', longitude: '-46.4614' },
+  'ribeirao pires': { latitude: '-23.7142', longitude: '-46.4137' },
+  'rio de janeiro': { latitude: '-22.9068', longitude: '-43.1729' },
+  'belo horizonte': { latitude: '-19.9167', longitude: '-43.9345' },
+  'curitiba': { latitude: '-25.4284', longitude: '-49.2733' },
+  'porto alegre': { latitude: '-30.0346', longitude: '-51.2177' },
+  'salvador': { latitude: '-12.9777', longitude: '-38.5016' },
+  'recife': { latitude: '-8.0476', longitude: '-34.8770' },
+  'fortaleza': { latitude: '-3.7172', longitude: '-38.5433' },
+  'brasilia': { latitude: '-15.7975', longitude: '-47.8919' },
+  'campinas': { latitude: '-22.9099', longitude: '-47.0626' },
+  'santos': { latitude: '-23.9608', longitude: '-46.3336' },
+  'sorocaba': { latitude: '-23.5015', longitude: '-47.4526' },
+  'sao jose dos campos': { latitude: '-23.2237', longitude: '-45.9009' },
+  'ribeirao preto': { latitude: '-21.1704', longitude: '-47.8103' },
+};
+
+function normalizeCityKey(str: string): string {
+  return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+}
+
+// Helper: Obter coordenadas geográficas (latitude e longitude) a partir do endereço do evento
+async function fetchGeocodeCoordinates(
+  address?: string, 
+  city?: string, 
+  state?: string, 
+  locationName?: string
+): Promise<{ latitude: string; longitude: string; displayName?: string } | null> {
   const cleanAddress = (address || '').trim();
   const cleanCity = (city || '').trim();
   const cleanState = (state || '').trim();
+  const cleanLocation = (locationName || '').trim();
 
-  if (!cleanAddress && !cleanCity) return null;
+  if (!cleanAddress && !cleanCity && !cleanLocation) return null;
 
+  // Montar consultas em ordem de especificidade para o endereço
   const queries = [
     cleanAddress && cleanCity && cleanState ? `${cleanAddress}, ${cleanCity}, ${cleanState}, Brasil` : '',
     cleanAddress && cleanCity ? `${cleanAddress}, ${cleanCity}, Brasil` : '',
+    cleanAddress.includes('-') && cleanCity ? `${cleanAddress.split('-')[0].trim()}, ${cleanCity}, Brasil` : '',
+    cleanLocation && cleanCity ? `${cleanLocation}, ${cleanCity}, Brasil` : '',
     cleanAddress ? `${cleanAddress}, Brasil` : '',
     cleanCity && cleanState ? `${cleanCity}, ${cleanState}, Brasil` : '',
     cleanCity ? `${cleanCity}, Brasil` : '',
@@ -135,6 +194,19 @@ async function fetchGeocodeCoordinates(address?: string, city?: string, state?: 
     }
   }
 
+  // Fallback baseado na cidade se a rua exata não retornou
+  if (cleanCity) {
+    const cityKey = normalizeCityKey(cleanCity);
+    const fallback = BRAZIL_CITY_COORDINATES[cityKey];
+    if (fallback) {
+      return {
+        latitude: fallback.latitude,
+        longitude: fallback.longitude,
+        displayName: `${cleanCity} - ${cleanState || 'Brasil'} (Centro da cidade)`,
+      };
+    }
+  }
+
   return null;
 }
 
@@ -144,8 +216,9 @@ app.get('/api/geocode', async (req, res) => {
     const address = String(req.query.address || '');
     const city = String(req.query.city || '');
     const state = String(req.query.state || '');
+    const locationName = String(req.query.locationName || '');
 
-    const coords = await fetchGeocodeCoordinates(address, city, state);
+    const coords = await fetchGeocodeCoordinates(address, city, state, locationName);
     if (!coords) {
       return res.status(404).json({ error: 'Endereço não localizado para geocodificação' });
     }
@@ -166,17 +239,18 @@ app.post('/api/events', async (req, res) => {
     let latitude = body.latitude || null;
     let longitude = body.longitude || null;
 
-    // Se latitude e longitude não foram enviadas ou precisam de geocodificação baseada no endereço
-    if (!latitude || !longitude) {
+    // As coordenadas do evento SEMPRE são baseadas no endereço do evento
+    // Se o evento tem endereço ou cidade informados, prioriza a geocodificação do endereço do evento
+    if (body.address || body.city || body.locationName) {
       try {
-        const geocoded = await fetchGeocodeCoordinates(body.address, body.city, body.state);
+        const geocoded = await fetchGeocodeCoordinates(body.address, body.city, body.state, body.locationName);
         if (geocoded) {
           latitude = geocoded.latitude;
           longitude = geocoded.longitude;
-          console.log(`[Geocoding] Endereço "${body.address}" geocodificado para: Lat ${latitude}, Lon ${longitude}`);
+          console.log(`[Geocoding] Endereço "${body.address || body.locationName}, ${body.city}" geocodificado com sucesso: Lat ${latitude}, Lon ${longitude}`);
         }
       } catch (geoErr) {
-        console.warn('[Geocoding] Não foi possível geolocalizar automaticamente:', geoErr);
+        console.warn('[Geocoding] Não foi possível geolocalizar automaticamente pelo endereço:', geoErr);
       }
     }
 
@@ -423,7 +497,17 @@ app.put('/api/events/:id', async (req, res) => {
   }
 });
 
-// 3. Excluir Evento
+// 3. Excluir Evento (unitário ou todos)
+app.delete('/api/events', (req, res) => {
+  try {
+    const delFav = db.prepare('DELETE FROM favoritos;').run();
+    const result = db.prepare('DELETE FROM eventos;').run();
+    res.json({ success: true, changes: result.changes, favoritesDeleted: delFav.changes });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.delete('/api/events/:id', (req, res) => {
   try {
     const { id } = req.params;
@@ -563,6 +647,114 @@ app.delete('/api/categories/:id', (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// 6b. Estado (Tabela estado do SQLite)
+const getEstadoHandler = (req: any, res: any) => {
+  try {
+    const { estado, search } = req.query;
+    let sql = 'SELECT id, nome, estado, regiao, ativa, criado_em FROM estado WHERE ativa = 1';
+    const params: any[] = [];
+
+    if (estado && estado !== 'Todos' && estado !== 'Todas') {
+      sql += ' AND estado = ?';
+      params.push(String(estado).toUpperCase());
+    }
+
+    if (search) {
+      sql += ' AND (nome LIKE ? OR regiao LIKE ?)';
+      const term = `%${search}%`;
+      params.push(term, term);
+    }
+
+    sql += ' ORDER BY nome COLLATE NOCASE ASC;';
+
+    const rows = db.prepare(sql).all(...params) as any[];
+    const items = rows.map((r) => ({
+      id: r.id,
+      nome: r.nome,
+      estado: r.estado,
+      regiao: r.regiao || '',
+      ativa: Boolean(r.ativa),
+      criadoEm: r.criado_em,
+    }));
+    res.json(items);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const postEstadoHandler = (req: any, res: any) => {
+  try {
+    const { nome, estado, regiao } = req.body;
+    if (!nome || !nome.trim()) {
+      return res.status(400).json({ error: 'Nome é obrigatório' });
+    }
+    const cleanNome = nome.trim();
+    const cleanEstado = (estado || 'SP').trim().toUpperCase();
+    const cleanRegiao = (regiao || '').trim();
+
+    const stmt = db.prepare(`
+      INSERT INTO estado (nome, estado, regiao, ativa)
+      VALUES (?, ?, ?, 1);
+    `);
+    const result = stmt.run(cleanNome, cleanEstado, cleanRegiao);
+    const newItem = {
+      id: Number(result.lastInsertRowid),
+      nome: cleanNome,
+      estado: cleanEstado,
+      regiao: cleanRegiao,
+      ativa: true,
+      criadoEm: new Date().toISOString(),
+    };
+    res.status(201).json(newItem);
+  } catch (error: any) {
+    if (error.message?.includes('UNIQUE')) {
+      return res.status(409).json({ error: 'Registro já existe na tabela de estado' });
+    }
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const deleteAllEstadoHandler = (req: any, res: any) => {
+  try {
+    const stmt = db.prepare('DELETE FROM estado;');
+    const result = stmt.run();
+    try {
+      db.prepare("DELETE FROM sqlite_sequence WHERE name = 'estado';").run();
+    } catch {}
+    res.json({ success: true, changes: result.changes });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const deleteSingleEstadoHandler = (req: any, res: any) => {
+  try {
+    const { id } = req.params;
+    const stmt = db.prepare('DELETE FROM estado WHERE id = ?;');
+    const result = stmt.run(id);
+    res.json({ success: true, changes: result.changes });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// Rotas da tabela estado
+app.get('/api/estado', getEstadoHandler);
+app.post('/api/estado', postEstadoHandler);
+app.delete('/api/estado', deleteAllEstadoHandler);
+app.delete('/api/estado/:id', deleteSingleEstadoHandler);
+
+// Compatibilidade de rotas (estados / cidades)
+app.get('/api/estados', getEstadoHandler);
+app.post('/api/estados', postEstadoHandler);
+app.delete('/api/estados', deleteAllEstadoHandler);
+app.delete('/api/estados/:id', deleteSingleEstadoHandler);
+
+app.get('/api/cidades', getEstadoHandler);
+app.post('/api/cidades', postEstadoHandler);
+app.delete('/api/cidades', deleteAllEstadoHandler);
+app.delete('/api/cidades/:id', deleteSingleEstadoHandler);
 
 // 7. Supervisors (CRUD na tabela supervisor do SQLite)
 app.get('/api/supervisors', (req, res) => {

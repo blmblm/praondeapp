@@ -46,27 +46,39 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
 
   const QUICK_QUERIES = [
     {
-      label: 'Todos os Eventos (com Lat/Long e Liberado)',
+      label: '📍 Tabela de Estado (estado)',
+      sql: 'SELECT id, nome, estado, regiao, ativa, criado_em FROM estado ORDER BY nome COLLATE NOCASE ASC;',
+    },
+    {
+      label: '🎭 Todos os Eventos (eventos)',
       sql: 'SELECT id, titulo, categoria, cidade, latitude, longitude, liberado, status FROM eventos ORDER BY data_evento ASC;',
     },
     {
-      label: 'Eventos Liberados (liberado = S)',
+      label: '🏷️ Tabela de Categorias (categorias)',
+      sql: 'SELECT id, nome, descricao, ativa FROM categorias ORDER BY nome ASC;',
+    },
+    {
+      label: '🏢 Tabela de Anunciantes (anunciantes)',
+      sql: 'SELECT id, nome, email, telefone, cidade, estado, verificado FROM anunciantes;',
+    },
+    {
+      label: '👑 Tabela de Supervisor (supervisor)',
+      sql: 'SELECT id, nome, criado_em FROM supervisor;',
+    },
+    {
+      label: '⭐ Tabela de Patrocinadores (patrocinadores)',
+      sql: 'SELECT id, nome, categoria, cidade, estado, status_pagamento, liberado FROM patrocinadores;',
+    },
+    {
+      label: '✅ Eventos Liberados (liberado = S)',
       sql: "SELECT id, titulo, cidade, latitude, longitude, liberado FROM eventos WHERE liberado = 'S';",
     },
     {
-      label: 'Agrupado por Categoria',
+      label: '📊 Eventos Agrupados por Categoria',
       sql: 'SELECT categoria, COUNT(*) as total_eventos FROM eventos GROUP BY categoria ORDER BY total_eventos DESC;',
     },
     {
-      label: 'Eventos Gratuitos vs Pagos',
-      sql: 'SELECT is_gratuito, COUNT(*) as quantidade, AVG(preco) as preco_medio FROM eventos GROUP BY is_gratuito;',
-    },
-    {
-      label: 'Tabela de Anunciantes',
-      sql: 'SELECT id, nome, email, telefone, cidade, estado FROM anunciantes;',
-    },
-    {
-      label: 'Tabela de Favoritos',
+      label: '❤️ Tabela de Favoritos (favoritos)',
       sql: 'SELECT f.id, f.evento_id, e.titulo, f.criado_em FROM favoritos f LEFT JOIN eventos e ON f.evento_id = e.id;',
     },
   ];
@@ -154,9 +166,11 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
 
           <button
             onClick={onClose}
-            className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800/90 hover:bg-rose-500/20 text-slate-200 hover:text-rose-300 border border-slate-700 hover:border-rose-500/40 text-xs font-bold transition-colors cursor-pointer shrink-0"
+            title="Sair e fechar console"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4 text-rose-400" />
+            <span>Sair</span>
           </button>
         </div>
 
@@ -204,6 +218,48 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           {activeTab === 'console' ? (
             <>
+              {/* Quick Table Access Bar */}
+              {schemaInfo?.tables && schemaInfo.tables.length > 0 && (
+                <div className="p-3 bg-slate-950/60 border border-slate-800 rounded-xl">
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+                      <Table className="w-3.5 h-3.5 text-amber-400" />
+                      Tabelas do Banco SQLite (Clique para abrir):
+                    </label>
+                    <span className="text-[11px] text-slate-400">
+                      {schemaInfo.tables.length} tabelas encontradas
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {schemaInfo.tables.map((tbl) => {
+                      const isEstado = tbl.name === 'estado' || tbl.name === 'estados' || tbl.name === 'cidades';
+                      const q = `SELECT * FROM ${tbl.name};`;
+                      return (
+                        <button
+                          key={tbl.name}
+                          onClick={() => {
+                            setQuery(q);
+                            handleExecute(q);
+                          }}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-mono font-medium flex items-center gap-2 border transition-all cursor-pointer ${
+                            isEstado
+                              ? 'bg-amber-500/20 border-amber-500/60 text-amber-300 hover:bg-amber-500/30'
+                              : 'bg-slate-800/80 border-slate-700 text-slate-200 hover:bg-slate-750 hover:border-slate-600'
+                          }`}
+                        >
+                          <span className="font-bold">{tbl.name}</span>
+                          <span className={`px-1.5 py-0.2 rounded-full text-[10px] ${
+                            isEstado ? 'bg-amber-500/30 text-amber-200' : 'bg-slate-700 text-slate-300'
+                          }`}>
+                            {tbl.rowCount}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {/* Quick Query Presets */}
               <div>
                 <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2">

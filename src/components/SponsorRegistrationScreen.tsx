@@ -11,13 +11,14 @@ import {
   Clock, 
   ShieldCheck, 
   Compass, 
-  RefreshCw,
-  Send,
-  AlertCircle,
-  Lock,
-  Hourglass,
-  Upload,
-  Camera
+  RefreshCw, 
+  Send, 
+  AlertCircle, 
+  Lock, 
+  Hourglass, 
+  Upload, 
+  Camera,
+  X
 } from 'lucide-react';
 import { SponsorItem } from '../data/sponsors';
 
@@ -199,13 +200,23 @@ export const SponsorRegistrationScreen: React.FC<SponsorRegistrationScreenProps>
       <div className="max-w-3xl mx-auto">
         {/* Top Bar */}
         <div className="flex items-center justify-between gap-4 mb-6 pb-4 border-b border-slate-800">
-          <button
-            onClick={onBack}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-700 hover:border-amber-500/50 text-slate-300 hover:text-white transition-all text-xs font-bold cursor-pointer"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            <span>Voltar para o Início</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onBack}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800/90 hover:bg-rose-500/20 text-slate-200 hover:text-rose-300 border border-slate-700 hover:border-rose-500/40 text-xs font-bold transition-colors cursor-pointer shadow-sm"
+              title="Sair e voltar ao início"
+            >
+              <X className="w-4 h-4 text-rose-400" />
+              <span>Sair</span>
+            </button>
+            <button
+              onClick={onBack}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-700 hover:border-amber-500/50 text-slate-300 hover:text-white transition-all text-xs font-bold cursor-pointer"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              <span>Voltar para o Início</span>
+            </button>
+          </div>
 
           <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs font-extrabold">
             <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
