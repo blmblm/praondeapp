@@ -112,6 +112,19 @@ export const Navbar: React.FC<NavbarProps> = ({
             )}
           </button>
 
+          <button
+            id="nav-divulgar-evento-btn"
+            onClick={() => onNavigate('register')}
+            className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-sm font-semibold transition-all cursor-pointer ${
+              currentScreen === 'register' || currentScreen === 'advertiser_auth'
+                ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 font-bold shadow-md shadow-amber-500/20'
+                : 'text-amber-400 hover:text-amber-300 hover:bg-slate-900 border border-amber-500/30'
+            }`}
+          >
+            <PlusCircle className="w-4 h-4" />
+            <span>Divulgar Evento</span>
+          </button>
+
           {currentAdvertiser && onOpenAdvertiserAuth && (
             <button
               onClick={onOpenAdvertiserAuth}
@@ -218,13 +231,13 @@ export const Navbar: React.FC<NavbarProps> = ({
             onClick={() => handleMobileNav('register')}
             className={`w-full flex items-center justify-between px-3.5 py-3 rounded-xl text-sm font-medium transition-colors ${
               currentScreen === 'register' || currentScreen === 'advertiser_auth'
-                ? 'bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30'
+                ? 'bg-amber-500/20 text-amber-300 font-semibold border border-amber-500/30'
                 : 'text-slate-300 hover:bg-slate-900 hover:text-white'
             }`}
           >
             <div className="flex items-center gap-3">
               <PlusCircle className="w-4 h-4 text-amber-400" />
-              <span>Cadastrar Novo Evento</span>
+              <span>Divulgar Evento</span>
             </div>
           </button>
 

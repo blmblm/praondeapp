@@ -61,6 +61,22 @@
         "criado_em": { "type": "string" }
       },
       "required": ["nome"]
+    },
+    "Anunciante": {
+      "title": "Anunciante",
+      "description": "Cadastro de anunciantes e organizadores de eventos",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "nome": { "type": "string" },
+        "email": { "type": "string" },
+        "telefone": { "type": "string" },
+        "cidade": { "type": "string" },
+        "estado": { "type": "string" },
+        "verificado": { "type": "boolean" },
+        "criado_em": { "type": "string" }
+      },
+      "required": ["email", "nome"]
     }
   },
   "firestore": {
@@ -75,6 +91,10 @@
     "/categorias/{categoriaId}": {
       "schema": "Categoria",
       "description": "Coleção de categorias cadastradas"
+    },
+    "/anunciantes/{anuncianteId}": {
+      "schema": "Anunciante",
+      "description": "Coleção de anunciantes cadastrados"
     }
   }
 }

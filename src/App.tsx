@@ -38,6 +38,7 @@ const INITIAL_CATEGORIES: string[] = [
   'Baile Terceira Idade',
   'Forró',
   'Forró Pé de Serra',
+  'Festas',
 ];
 
 export default function App() {
@@ -69,26 +70,17 @@ export default function App() {
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
+          // Filtra possíveis anunciantes mock legados
+          return parsed.filter((a) => a.email !== 'praondeeu@gmail.com' && a.email !== 'amigosdosamba@email.com');
         }
       }
     } catch (e) {
       console.error('Error loading advertisers from storage', e);
     }
-    return INITIAL_ADVERTISERS;
+    return [];
   });
 
-  const [currentAdvertiser, setCurrentAdvertiser] = useState<Advertiser | null>(() => {
-    try {
-      const saved = localStorage.getItem(CURRENT_ADVERTISER_KEY);
-      if (saved) {
-        return JSON.parse(saved);
-      }
-    } catch (e) {
-      console.error('Error loading current advertiser from storage', e);
-    }
-    return null;
-  });
+  const [currentAdvertiser, setCurrentAdvertiser] = useState<Advertiser | null>(null);
 
   // Events State & Persistence
   const [events, setEvents] = useState<EventItem[]>(() => {
@@ -108,6 +100,10 @@ export default function App() {
 
   const [selectedEvent, setSelectedEvent] = useState<EventItem | null>(null);
   const [catalogInitialQuery, setCatalogInitialQuery] = useState<string>('');
+  const [catalogInitialCategory, setCatalogInitialCategory] = useState<string>('');
+  const [catalogInitialEstado, setCatalogInitialEstado] = useState<string>('');
+  const [catalogInitialDate, setCatalogInitialDate] = useState<string>('');
+  const [catalogInitialSortByProximity, setCatalogInitialSortByProximity] = useState<boolean>(true);
   const [isSqlConsoleOpen, setIsSqlConsoleOpen] = useState<boolean>(false);
   const [isAdminOpen, setIsAdminOpen] = useState<boolean>(false);
   const [sponsors, setSponsors] = useState<SponsorItem[]>(() => {
@@ -139,12 +135,8 @@ export default function App() {
       const res = await fetch('/api/events');
       if (res.ok) {
         const data = await res.json();
-        if (Array.isArray(data) && data.length > 0) {
-          setEvents((prev) => (prev.length === 0 ? data : prev));
-          // Sincroniza cada evento da base com o Firestore para garantir disponibilidade imediata no celular
-          data.forEach((evt: EventItem) => {
-            saveEventToFirestore(evt).catch(() => {});
-          });
+        if (Array.isArray(data)) {
+          setEvents(data);
           try {
             localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
           } catch {
@@ -166,6 +158,11 @@ export default function App() {
           setCategoryItems(data);
           const names = data.map((c) => c.nome);
           setCategories(names);
+
+          const festasObj = data.find((c) => (c.nome || '').trim().toLowerCase() === 'festas');
+          if (festasObj) {
+            saveCategoriaToFirestore(festasObj).catch(() => {});
+          }
         }
       }
     } catch (e) {
@@ -209,18 +206,59 @@ export default function App() {
     }
   };
 
+  const loadAdvertisersFromApi = async () => {
+    try {
+      const res = await fetch('/api/advertisers');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          setAdvertisers(data);
+          try {
+            localStorage.setItem(ADVERTISERS_STORAGE_KEY, JSON.stringify(data));
+          } catch {}
+        }
+      }
+    } catch (e) {
+      console.warn('Erro ao carregar anunciantes da API:', e);
+    }
+  };
+
   useEffect(() => {
     testFirestoreConnection();
 
     // 1. Ouvir eventos do Firestore em tempo real (compartilhado entre PC e Celular)
     const unsubEvents = subscribeToEvents((firestoreEvents) => {
       if (Array.isArray(firestoreEvents) && firestoreEvents.length > 0) {
-        setEvents(firestoreEvents);
-        try {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(firestoreEvents));
-        } catch {
-          // ignore
-        }
+        setEvents((prev) => {
+          const map = new Map<string, EventItem>();
+          // Mantém os eventos que já estão no estado (incluindo recém cadastrados no SQLite)
+          prev.forEach((p) => map.set(p.id, p));
+          firestoreEvents.forEach((fe) => {
+            const existing = map.get(fe.id);
+            if (existing && existing.videoUrl?.startsWith('data:video/') && fe.videoUrl === '[video_local_sqlite]') {
+              map.set(fe.id, { ...fe, videoUrl: existing.videoUrl, url: existing.url || existing.videoUrl });
+            } else {
+              map.set(fe.id, { ...(existing || {}), ...fe });
+            }
+          });
+          const merged = Array.from(map.values());
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+          } catch {
+            // ignore
+          }
+
+          // Sincroniza em lote com o banco SQLite enviando a lista mesclada com vídeos preservados
+          fetch('/api/events/sync-batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ events: merged }),
+          }).catch((err) => {
+            console.warn('[Sync] Erro ao sincronizar lote com SQLite:', err);
+          });
+
+          return merged;
+        });
       }
     });
 
@@ -235,7 +273,21 @@ export default function App() {
     const unsubCategorias = subscribeToCategorias((firestoreCategorias) => {
       if (Array.isArray(firestoreCategorias) && firestoreCategorias.length > 0) {
         setCategoryItems(firestoreCategorias);
-        setCategories(firestoreCategorias.map((c) => c.nome));
+        const names = firestoreCategorias.map((c) => c.nome);
+        setCategories(names);
+
+        const hasFestas = firestoreCategorias.some(
+          (c) => (c.nome || '').trim().toLowerCase() === 'festas'
+        );
+        if (!hasFestas) {
+          saveCategoriaToFirestore({
+            id: 1003,
+            nome: 'Festas',
+            descricao: 'Festas, comemorações e confraternizações',
+            ativa: true,
+            criadoEm: new Date().toISOString(),
+          }).catch(() => {});
+        }
       }
     });
 
@@ -244,13 +296,27 @@ export default function App() {
     loadCategoriesFromApi();
     loadCidadesFromApi();
     loadSponsorsFromApi();
+    loadAdvertisersFromApi();
+
+    const handleQuarantineCleared = () => {
+      loadEventsFromApi();
+    };
+    window.addEventListener('praonde:quarantine-cleared', handleQuarantineCleared);
 
     return () => {
       unsubEvents();
       unsubEstados();
       unsubCategorias();
+      window.removeEventListener('praonde:quarantine-cleared', handleQuarantineCleared);
     };
   }, []);
+
+  // Sempre que a central administrativa for aberta, recarrega a lista completa e atualizada de eventos da API
+  useEffect(() => {
+    if (isAdminOpen) {
+      loadEventsFromApi();
+    }
+  }, [isAdminOpen]);
 
   // Persist events whenever modified
   useEffect(() => {
@@ -345,7 +411,7 @@ export default function App() {
   const handleAddEvent = async (newEvent: EventItem): Promise<EventItem> => {
     let finalEvent = newEvent;
 
-    // 1. Tentar salvar no servidor local para geocodificação
+    // 1. Gravar de forma prioritária no SQLite na tabela independente 'eventos'
     try {
       const res = await fetch('/api/events', {
         method: 'POST',
@@ -359,9 +425,14 @@ export default function App() {
       if (res.ok) {
         const savedData: EventItem = await res.json();
         finalEvent = savedData;
+      } else {
+        const errJson = await res.json().catch(() => ({}));
+        console.error('Erro na resposta ao gravar evento no SQLite:', res.status, errJson);
+        throw new Error(errJson.error || `Erro HTTP ${res.status} ao cadastrar na tabela eventos.`);
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error('Erro ao gravar evento no SQLite:', e);
+      throw e;
     }
 
     // 2. Salvar no Firestore para sincronização global imediata (PC + Celular)
@@ -372,6 +443,7 @@ export default function App() {
     }
 
     setEvents((prev) => [finalEvent, ...prev.filter((e) => e.id !== finalEvent.id && e.id !== newEvent.id)]);
+    loadEventsFromApi();
     return finalEvent;
   };
 
@@ -402,12 +474,20 @@ export default function App() {
       prev.map((evt) => (evt.id === id ? { ...evt, liberado: nextLiberado } : evt))
     );
 
-    // Sincronizar no Firestore
-    try {
-      await updateEventLiberadoInFirestore(id, nextLiberado);
-    } catch (fireErr) {
+    // Sincronizar no Firestore em background (não bloqueia a interface)
+    updateEventLiberadoInFirestore(id, nextLiberado).catch((fireErr) => {
       console.warn('[Firestore] Erro ao atualizar liberado no Firestore:', fireErr);
-    }
+    });
+
+    // Atualizar no localStorage imediatamente
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (stored) {
+        const parsed: EventItem[] = JSON.parse(stored);
+        const updated = parsed.map((evt) => (evt.id === id ? { ...evt, liberado: nextLiberado } : evt));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+      }
+    } catch {}
 
     // Sincronizar na API local
     try {
@@ -421,27 +501,82 @@ export default function App() {
     }
   };
 
-  const handleSetLiberado = async (id: string, nextLiberado: 'S' | 'N') => {
+  const handleSetLiberado = async (
+    id: string,
+    nextLiberado: 'S' | 'N',
+    updatedUrl?: string,
+    urlType?: 'video' | 'image' | 'link'
+  ) => {
+    const isVid = urlType === 'video' || (updatedUrl && (updatedUrl.startsWith('data:video/') || updatedUrl.includes('youtube') || updatedUrl.includes('fb.') || updatedUrl.includes('.mp4')));
+
+    // 1. Atualização de estado imediata na interface
     setEvents((prev) =>
-      prev.map((evt) => (evt.id === id ? { ...evt, liberado: nextLiberado } : evt))
+      prev.map((evt) => (evt.id === id ? {
+        ...evt,
+        liberado: nextLiberado,
+        ...(updatedUrl ? { url: updatedUrl } : {}),
+        ...(isVid ? { videoUrl: updatedUrl, mediaType: 'video' as const } : {}),
+      } : evt))
     );
 
-    // Sincronizar no Firestore
-    try {
-      await updateEventLiberadoInFirestore(id, nextLiberado);
-    } catch (fireErr) {
+    // 2. Sincronizar no Firestore em background
+    updateEventLiberadoInFirestore(id, nextLiberado).catch((fireErr) => {
       console.warn('[Firestore] Erro ao atualizar liberado no Firestore:', fireErr);
-    }
+    });
 
+    // 3. Atualizar no localStorage imediatamente
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (stored) {
+        const parsed: EventItem[] = JSON.parse(stored);
+        const updated = parsed.map((evt) => (evt.id === id ? {
+          ...evt,
+          liberado: nextLiberado,
+          ...(updatedUrl ? { url: updatedUrl } : {}),
+          ...(isVid ? { videoUrl: updatedUrl, mediaType: 'video' as const } : {}),
+        } : evt));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+      }
+    } catch {}
+
+    // 4. Sincronizar na API local SQLite (grava no arquivo de lançamento quando for vídeo)
     try {
       await fetch(`/api/events/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ liberado: nextLiberado }),
+        body: JSON.stringify({
+          liberado: nextLiberado,
+          url: updatedUrl,
+          urlType,
+          videoUrl: isVid ? updatedUrl : undefined,
+        }),
       });
     } catch (e) {
       console.warn('Erro ao atualizar status liberado no SQLite:', e);
     }
+  };
+
+  // Inclusão instantânea de evento liberado da quarentena na tabela de eventos
+  const handleEventApproved = (newEvent: EventItem) => {
+    // 1. Atualização instantânea imediata no estado da interface
+    setEvents((prev) => {
+      const filtered = prev.filter(
+        (e) => e.id !== newEvent.id && (e.title.toLowerCase().trim() !== newEvent.title.toLowerCase().trim() || e.city !== newEvent.city)
+      );
+      return [newEvent, ...filtered];
+    });
+
+    // 2. Persistência imediata
+    saveEventToFirestore(newEvent).catch(() => {});
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      const arr: EventItem[] = stored ? JSON.parse(stored) : [];
+      const updated = [newEvent, ...arr.filter((e) => e.id !== newEvent.id)];
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+    } catch {}
+
+    // 3. Sincronização em background com o SQLite
+    loadEventsFromApi();
   };
 
   const handleSearchRedirect = (term: string) => {
@@ -453,6 +588,7 @@ export default function App() {
   const handleExitAndClearScreen = () => {
     setSelectedEvent(null);
     setCatalogInitialQuery('');
+    setCurrentAdvertiser(null);
     setIsSqlConsoleOpen(false);
     setIsAdminOpen(false);
     setCurrentScreen('home');
@@ -462,8 +598,9 @@ export default function App() {
   const handleNavigate = (screen: ActiveScreen) => {
     setCatalogInitialQuery('');
 
-    // Before registering an event, check if advertiser is identified
-    if (screen === 'register' && !currentAdvertiser) {
+    // Ao clicar em Divulgar Evento, direciona SEMPRE para a tela de verificação de e-mail (se existe ou não)
+    if (screen === 'register' || screen === 'advertiser_auth') {
+      setCurrentAdvertiser(null);
       setCurrentScreen('advertiser_auth');
     } else {
       setCurrentScreen(screen);
@@ -480,6 +617,7 @@ export default function App() {
   const handleAdvertiserAuthSuccess = (advertiser: Advertiser) => {
     setCurrentAdvertiser(advertiser);
     setCurrentScreen('register');
+    loadAdvertisersFromApi();
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -508,6 +646,16 @@ export default function App() {
             onSearchRedirect={handleSearchRedirect}
             onOpenAdmin={() => setIsAdminOpen(true)}
             sponsors={sponsors}
+            categories={categories}
+            cidadesList={cidadesList}
+            onDiscoverySearch={({ category, estado, date, sortByProximity }) => {
+              setCatalogInitialCategory(category);
+              setCatalogInitialEstado(estado);
+              setCatalogInitialDate(date);
+              setCatalogInitialSortByProximity(sortByProximity);
+              setCatalogInitialQuery('');
+              handleNavigate('events');
+            }}
           />
         )}
 
@@ -517,23 +665,31 @@ export default function App() {
             onNavigate={handleNavigate}
             onSelectEvent={setSelectedEvent}
             initialQuery={catalogInitialQuery}
+            initialCategory={catalogInitialCategory}
+            initialEstado={catalogInitialEstado}
+            initialDate={catalogInitialDate}
+            initialSortByProximity={catalogInitialSortByProximity}
             onDeleteEvent={handleDeleteEvent}
             estadosList={cidadesList}
+            onRefreshEvents={loadEventsFromApi}
+            categoriesList={categories}
           />
         )}
 
-        {currentScreen === 'advertiser_auth' && (
+        {(currentScreen === 'advertiser_auth' || (currentScreen === 'register' && !currentAdvertiser)) && (
           <AdvertiserAuth
             onSuccess={handleAdvertiserAuthSuccess}
             onNavigate={handleNavigate}
             registeredAdvertisers={advertisers}
+            currentAdvertiser={currentAdvertiser}
             onRegisterAdvertiser={(newAdv) => {
-              setAdvertisers((prev) => [newAdv, ...prev]);
+              setAdvertisers((prev) => [newAdv, ...prev.filter((a) => a.id !== newAdv.id)]);
+              loadAdvertisersFromApi();
             }}
           />
         )}
 
-        {currentScreen === 'register' && (
+        {currentScreen === 'register' && currentAdvertiser && (
           <EventRegister
             onAddEvent={handleAddEvent}
             onNavigate={handleNavigate}
@@ -575,7 +731,12 @@ export default function App() {
       <SqlConsoleModal
         isOpen={isSqlConsoleOpen}
         onClose={() => setIsSqlConsoleOpen(false)}
-        onEventModified={loadEventsFromApi}
+        onEventModified={(deletedIds?: string[]) => {
+          if (Array.isArray(deletedIds) && deletedIds.length > 0) {
+            setEvents((prev) => prev.filter((e) => !deletedIds.includes(e.id)));
+          }
+          loadEventsFromApi();
+        }}
       />
 
       {/* Admin Panel Modal */}
@@ -602,6 +763,8 @@ export default function App() {
             localStorage.setItem('praonde_sponsors_v1', JSON.stringify(newSponsors));
           } catch {}
         }}
+        onEventsUpdated={loadEventsFromApi}
+        onEventApproved={handleEventApproved}
       />
     </div>
   );

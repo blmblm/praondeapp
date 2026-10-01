@@ -3,19 +3,81 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      // Redirecionamento automático e seguro para a URL de produção limpa (ais-pre-)
+      // caso o link de desenvolvimento (ais-dev-) seja aberto diretamente no navegador (fora do iframe do AI Studio)
+      if (window.location.hostname.includes('ais-dev-') && window.self === window.top) {
+        window.location.replace(window.location.href.replace('ais-dev-', 'ais-pre-'));
+      }
+    </script>
     <title>Pra onde eu vou</title>
     <meta name="description" content="Aplicativo de cadastro e consulta de eventos para descobrir shows, festivais e experiências." />
     <meta property="og:title" content="Pra onde eu vou" />
     <meta property="og:description" content="Aplicativo de cadastro e consulta de eventos para descobrir shows, festivais e experiências." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#0b0d17" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Pra onde eu vou" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/app-icon.jpg" />
     <link rel="icon" type="image/jpeg" href="/app-icon.jpg" />
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=Plus+Jakarta+Sans:ital,wght@0,300..800;1,300..800&display=swap" rel="stylesheet">
   </head>
   <body class="bg-[#0b0d17] text-slate-100 font-sans antialiased min-h-screen selection:bg-amber-500 selection:text-slate-950">
-    <div id="root"></div>
+    <div id="root">
+      <!-- Tela de Carregamento Nativa em Português Brasileiro (PT-BR) no Celular e Navegador -->
+      <div id="app-initial-loader" style="position: fixed; inset: 0; background: linear-gradient(180deg, #0b0d17 0%, #0f172a 100%); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 9999; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; color: #f8fafc; padding: 24px; text-align: center; user-select: none; -webkit-user-select: none;">
+        <!-- Ícone do Aplicativo -->
+        <div style="position: relative; margin-bottom: 24px;">
+          <div style="width: 80px; height: 80px; border-radius: 22px; overflow: hidden; border: 2px solid rgba(245, 158, 11, 0.7); box-shadow: 0 12px 30px -5px rgba(245, 158, 11, 0.35), 0 0 20px rgba(245, 158, 11, 0.2); background-color: #0f172a; display: flex; align-items: center; justify-content: center;">
+            <img src="/app-icon.jpg" alt="Ícone do Pra onde eu vou" style="width: 100%; height: 100%; object-fit: cover;" />
+          </div>
+        </div>
+
+        <!-- Título e Slogan Oficial -->
+        <h1 style="font-size: 26px; font-weight: 800; margin: 0 0 6px 0; color: #ffffff; letter-spacing: -0.5px;">
+          Pra onde eu <span style="color: #f59e0b; text-shadow: 0 0 15px rgba(245, 158, 11, 0.4);">vou</span>?
+        </h1>
+        <p style="font-size: 14px; font-weight: 500; color: #fde68a; margin: 0 0 28px 0; max-width: 300px; line-height: 1.5; opacity: 0.95;">
+          A vida é feita de momentos que aquecem o coração
+        </p>
+
+        <!-- Container de Status de Carregamento em Português -->
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 12px; max-width: 320px; width: 100%;">
+          <div style="display: flex; align-items: center; gap: 10px; color: #f59e0b; font-size: 15px; font-weight: 700;">
+            <svg style="width: 20px; height: 20px; animation: app-spin 1s linear infinite; flex-shrink: 0;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12a9 9 0 1 1-6.219-8.56"></path>
+            </svg>
+            <span id="app-loading-text">Carregando o aplicativo...</span>
+          </div>
+
+          <!-- Barra de Progresso Fluida -->
+          <div style="width: 220px; height: 5px; background: rgba(255, 255, 255, 0.1); border-radius: 9999px; overflow: hidden; position: relative;">
+            <div style="position: absolute; top: 0; left: 0; height: 100%; width: 45%; background: linear-gradient(90deg, #f59e0b, #ea580c); border-radius: 9999px; animation: app-pulse-bar 1.5s ease-in-out infinite;"></div>
+          </div>
+
+          <p style="font-size: 12px; color: #94a3b8; margin: 4px 0 0 0; line-height: 1.4;">
+            Aguarde um instante enquanto conectamos os eventos para você...
+          </p>
+        </div>
+
+        <style>
+          @keyframes app-spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+          }
+          @keyframes app-pulse-bar {
+            0% { left: -45%; width: 45%; }
+            50% { width: 70%; }
+            100% { left: 100%; width: 45%; }
+          }
+        </style>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

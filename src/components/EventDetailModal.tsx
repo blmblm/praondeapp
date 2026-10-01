@@ -16,10 +16,15 @@ import {
   Trash2,
   Navigation,
   ZoomIn,
-  Sparkles
+  Sparkles,
+  Video,
+  Play,
+  ImageIcon
 } from 'lucide-react';
 import { EventItem } from '../types';
 import { useUserLocation } from '../context/LocationContext';
+import { parseVideoUrl, isVideoFormatUrl } from '../lib/videoUtils';
+import { VideoPlayer } from './VideoPlayer';
 
 interface EventDetailModalProps {
   event: EventItem | null;
@@ -35,9 +40,36 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
   const [copied, setCopied] = useState(false);
   const [copiedAddress, setCopiedAddress] = useState(false);
   const [isZoomed, setIsZoomed] = useState(false);
+  
+  const effectiveVideoUrl = event
+    ? (
+        event.video_url ||
+        event.video_utl ||
+        event.videoUrl ||
+        (event.url && isVideoFormatUrl(event.url) ? event.url : '') ||
+        (event.Url && isVideoFormatUrl(event.Url) ? event.Url : '') ||
+        (event.mediaType === 'video' ? (event.url || event.Url || event.videoUrl || event.video_url || event.video_utl) : '')
+      )
+    : '';
+  const hasVideo = Boolean(effectiveVideoUrl);
+
+  const [activeMediaView, setActiveMediaView] = useState<'poster' | 'video'>(() => {
+    return hasVideo ? 'video' : 'poster';
+  });
+
+  React.useEffect(() => {
+    if (hasVideo) {
+      setActiveMediaView('video');
+    } else {
+      setActiveMediaView('poster');
+    }
+  }, [event?.id, hasVideo]);
+
   const { coords, getDistanceKmTo } = useUserLocation();
 
   if (!event) return null;
+
+  const parsedVideo = effectiveVideoUrl ? parseVideoUrl(effectiveVideoUrl) : null;
 
   const distKm = getDistanceKmTo(event.latitude, event.longitude);
 
@@ -56,13 +88,23 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
     : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(fullAddress)}`;
 
   const handleShare = async () => {
-    const textToShare = `${event.title} no "Pra onde eu vou" - ${event.date} às ${event.time} em ${event.city}!\n${window.location.href}`;
+    // Força o uso da URL de produção pública e limpa do app para evitar links do console do Google AI Studio ou links de desenvolvimento
+    let cleanShareUrl = 'https://ais-pre-qs2o4mzsw3wxjtqbewcb3i-856757906261.us-east1.run.app';
+    
+    const currentUrl = window.location.href;
+    // Se o usuário já estiver navegando pelo domínio limpo de produção e sem frames do AI Studio, pode utilizar a URL atual
+    if (currentUrl.includes('ais-pre-') && !currentUrl.includes('ai.studio') && !currentUrl.includes('aistudio')) {
+      cleanShareUrl = currentUrl;
+    }
+
+    const textToShare = `${event.title} no "Pra onde eu vou" - ${event.date} às ${event.time} em ${event.city}!\n${cleanShareUrl}`;
+    
     if (navigator.share) {
       try {
         await navigator.share({
           title: event.title,
           text: textToShare,
-          url: window.location.href,
+          url: cleanShareUrl,
         });
         return;
       } catch (err) {
@@ -128,69 +170,110 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
               <div className="absolute inset-0 bg-slate-950/60" />
             </div>
 
-            {/* Poster in Vertical Format (3:4 or 4:5) */}
-            <div className="relative z-10 flex flex-col items-center">
-              <div 
-                onClick={() => setIsZoomed(true)}
-                className="relative group cursor-pointer transition-transform duration-200 hover:scale-[1.02]"
-                title="Clique para ampliar o cartaz no formato vertical"
-              >
-                <div className="w-56 sm:w-64 md:w-72 aspect-[3/4] sm:aspect-[4/5] rounded-2xl overflow-hidden shadow-2xl border-2 border-slate-700/80 bg-slate-950 relative ring-1 ring-white/10 flex items-center justify-center">
-                  <img
-                    src={event.imageUrl}
-                    alt=""
-                    aria-hidden="true"
-                    className="absolute inset-0 w-full h-full object-cover filter blur-xl opacity-30 scale-110 pointer-events-none"
-                  />
-                  <img
-                    src={event.imageUrl}
-                    alt={event.title}
-                    className="relative z-10 w-full h-full object-contain bg-transparent"
-                    referrerPolicy="no-referrer"
-                  />
-                  <div className="absolute inset-0 bg-gradient-to-t from-slate-950/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-center p-3">
-                    <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-900/90 text-amber-300 text-xs font-semibold border border-amber-500/40 shadow-lg">
-                      <ZoomIn className="w-3.5 h-3.5" />
-                      Ampliar Cartaz Vertical
+            {/* Selector between Poster and Video if video is available */}
+            {hasVideo && (
+              <div className="relative z-20 flex items-center justify-center gap-2 mb-4">
+                <button
+                  type="button"
+                  onClick={() => setActiveMediaView('poster')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                    activeMediaView === 'poster'
+                      ? 'bg-amber-500 text-slate-950 shadow-md'
+                      : 'bg-slate-800 text-slate-300 hover:text-white border border-slate-700'
+                  }`}
+                >
+                  <ImageIcon className="w-3.5 h-3.5" />
+                  <span>Cartaz Oficial</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveMediaView('video')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                    activeMediaView === 'video'
+                      ? 'bg-amber-500 text-slate-950 shadow-md'
+                      : 'bg-slate-800 text-slate-300 hover:text-white border border-slate-700'
+                  }`}
+                >
+                  <Play className="w-3.5 h-3.5" />
+                  <span>Assistir ao Vídeo</span>
+                </button>
+              </div>
+            )}
+
+            {/* Video Player Display */}
+            {hasVideo && activeMediaView === 'video' ? (
+              <div className="relative z-10 w-full max-w-lg rounded-2xl overflow-hidden shadow-2xl animate-fadeIn">
+                <VideoPlayer
+                  videoUrl={effectiveVideoUrl}
+                  title={`Vídeo de ${event.title}`}
+                  autoPlay={false}
+                />
+              </div>
+            ) : (
+              /* Poster in Vertical Format (3:4 or 4:5) */
+              <div className="relative z-10 flex flex-col items-center">
+                <div 
+                  onClick={() => setIsZoomed(true)}
+                  className="relative group cursor-pointer transition-transform duration-200 hover:scale-[1.02]"
+                  title="Clique para ampliar o cartaz no formato vertical"
+                >
+                  <div className="w-56 sm:w-64 md:w-72 aspect-[3/4] sm:aspect-[4/5] rounded-2xl overflow-hidden shadow-2xl border-2 border-slate-700/80 bg-slate-950 relative ring-1 ring-white/10 flex items-center justify-center">
+                    <img
+                      src={event.imageUrl}
+                      alt=""
+                      aria-hidden="true"
+                      className="absolute inset-0 w-full h-full object-cover filter blur-xl opacity-30 scale-110 pointer-events-none"
+                    />
+                    <img
+                      src={event.imageUrl}
+                      alt={event.title}
+                      className="relative z-10 w-full h-full object-contain bg-transparent"
+                      referrerPolicy="no-referrer"
+                    />
+                    <div className="absolute inset-0 bg-gradient-to-t from-slate-950/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-center p-3">
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-900/90 text-amber-300 text-xs font-semibold border border-amber-500/40 shadow-lg">
+                        <ZoomIn className="w-3.5 h-3.5" />
+                        Ampliar Cartaz Vertical
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Floating Badges */}
+                  <div className="absolute top-2.5 left-2.5 flex flex-col gap-1.5 pointer-events-none">
+                    <span className="inline-block px-2.5 py-1 rounded-lg text-xs font-bold uppercase tracking-wider bg-amber-500 text-slate-950 shadow-md">
+                      {event.category}
+                    </span>
+                    <span className="inline-block px-2 py-0.5 rounded-md text-[10px] font-semibold bg-slate-950/85 text-emerald-400 border border-emerald-500/30 backdrop-blur-sm shadow">
+                      Formato Vertical
+                    </span>
+                  </div>
+
+                  <div className="absolute bottom-2.5 right-2.5 pointer-events-none">
+                    <span className={`px-2.5 py-1 rounded-lg text-xs font-bold shadow-md ${
+                      event.isFree
+                        ? 'bg-emerald-500/95 text-slate-950'
+                        : 'bg-slate-950/90 text-amber-300 border border-amber-500/30'
+                    }`}>
+                      {event.isFree
+                        ? 'Entrada Franca'
+                        : (event.price ? `R$ ${event.price.toFixed(2).replace('.', ',')}` : (event.priceDetails || 'Consulte valores'))}
                     </span>
                   </div>
                 </div>
 
-                {/* Floating Badges */}
-                <div className="absolute top-2.5 left-2.5 flex flex-col gap-1.5 pointer-events-none">
-                  <span className="inline-block px-2.5 py-1 rounded-lg text-xs font-bold uppercase tracking-wider bg-amber-500 text-slate-950 shadow-md">
-                    {event.category}
-                  </span>
-                  <span className="inline-block px-2 py-0.5 rounded-md text-[10px] font-semibold bg-slate-950/85 text-emerald-400 border border-emerald-500/30 backdrop-blur-sm shadow">
-                    Formato Vertical
-                  </span>
-                </div>
-
-                <div className="absolute bottom-2.5 right-2.5 pointer-events-none">
-                  <span className={`px-2.5 py-1 rounded-lg text-xs font-bold shadow-md ${
-                    event.isFree
-                      ? 'bg-emerald-500/95 text-slate-950'
-                      : 'bg-slate-950/90 text-amber-300 border border-amber-500/30'
-                  }`}>
-                    {event.isFree
-                      ? 'Entrada Franca'
-                      : (event.price ? `R$ ${event.price.toFixed(2).replace('.', ',')}` : (event.priceDetails || 'Consulte valores'))}
-                  </span>
+                <div className="flex items-center gap-2 mt-2.5 text-[11px] text-slate-400">
+                  <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <span>Cartaz oficial do evento no formato vertical</span>
+                  <button
+                    type="button"
+                    onClick={() => setIsZoomed(true)}
+                    className="text-amber-400 hover:text-amber-300 font-semibold underline ml-1 cursor-pointer"
+                  >
+                    Ampliar
+                  </button>
                 </div>
               </div>
-
-              <div className="flex items-center gap-2 mt-2.5 text-[11px] text-slate-400">
-                <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                <span>Cartaz oficial do evento no formato vertical</span>
-                <button
-                  type="button"
-                  onClick={() => setIsZoomed(true)}
-                  className="text-amber-400 hover:text-amber-300 font-semibold underline ml-1 cursor-pointer"
-                >
-                  Ampliar
-                </button>
-              </div>
-            </div>
+            )}
           </div>
 
           {/* Content */}

@@ -1,4 +1,5 @@
 export type EventCategory =
+  | 'Categoria'
   | 'Shows'
   | 'Samba e Pagode'
   | 'Baile e Nostalgia'
@@ -31,6 +32,16 @@ export interface EventItem {
   description: string;
   category: EventCategory;
   categoryId?: number;
+  categoryOfficialName?: string;
+  categoryDescription?: string;
+  advertiserId?: number | string;
+  advertiserName?: string;
+  advertiserEmail?: string;
+  advertiserPhone?: string;
+  advertiserVerified?: boolean;
+  estadoId?: number;
+  estadoNomeCompleto?: string;
+  regiao?: string;
   date: string; // YYYY-MM-DD
   time: string; // HH:mm
   endDate?: string;
@@ -46,11 +57,20 @@ export interface EventItem {
   price?: number;
   priceDetails?: string;
   imageUrl: string;
+  mediaType?: 'image' | 'video';
+  videoUrl?: string;
+  video_url?: string;
+  video_utl?: string;
+  url?: string;
+  Url?: string;
   organizer: string;
   contact?: string;
   tags: string[];
   featured?: boolean;
   createdAt: string;
+  isQuarantine?: boolean;
+  status?: string;
+  distanceKm?: number;
 }
 
 export interface Advertiser {
@@ -58,6 +78,8 @@ export interface Advertiser {
   email: string;
   name?: string;
   phone?: string;
+  city?: string;
+  state?: string;
   createdAt: string;
   verified: boolean;
 }
@@ -85,5 +107,33 @@ export interface CityItem {
 }
 
 export type EstadoItem = CidadeItem;
+
+export interface ImportedEventItem {
+  id: string;
+  origem?: string;
+  urlOrigem?: string;
+  title: string;
+  description: string;
+  category: string;
+  categoryId?: number;
+  date: string;
+  time: string;
+  endTime?: string;
+  locationName: string;
+  address: string;
+  city: string;
+  state: string;
+  latitude?: string;
+  longitude?: string;
+  imageUrl: string;
+  organizer: string;
+  price?: number;
+  isGratuito?: boolean;
+  ticketUrl?: string;
+  videoUrl?: string;
+  url?: string;
+  status: 'quarentena' | 'aprovado' | 'descartado';
+  createdAt?: string;
+}
 
 export type ActiveScreen = 'home' | 'events' | 'register' | 'advertiser_auth' | 'sponsor_register';

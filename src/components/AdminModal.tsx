@@ -38,17 +38,25 @@ import {
   BadgeAlert,
   Send,
   RefreshCw,
-  Ban
+  Ban,
+  Download,
+  CheckCheck,
+  AlertTriangle,
+  ShieldAlert,
+  Tag,
+  Play
 } from 'lucide-react';
-import { EventItem, Advertiser, Supervisor, CityItem, CategoryItem } from '../types';
+import { EventItem, Advertiser, Supervisor, CityItem, CategoryItem, ImportedEventItem } from '../types';
 import { SponsorItem } from '../data/sponsors';
 import { EventLiberationModal } from './EventLiberationModal';
+import { SymplaImporterView } from './SymplaImporterView';
 import {
   saveEstadoToFirestore,
   deleteEstadoFromFirestore,
   deleteAllEstadosFromFirestore,
   saveCategoriaToFirestore,
   deleteCategoriaFromFirestore,
+  saveEventToFirestore,
 } from '../lib/firestoreSync';
 
 interface AdminModalProps {
@@ -62,13 +70,15 @@ interface AdminModalProps {
   onDeleteCategory: (category: string) => void;
   onDeleteEvent: (id: string) => void;
   onToggleLiberado?: (id: string, currentLiberado: string) => void;
-  onSetLiberado?: (id: string, liberado: 'S' | 'N') => Promise<void> | void;
+  onSetLiberado?: (id: string, liberado: 'S' | 'N', updatedUrl?: string, urlType?: 'video' | 'image' | 'link') => Promise<void> | void;
   onSelectEvent: (event: EventItem) => void;
   onOpenSqlConsole: () => void;
   isMasterAdminState?: boolean;
   onMasterAuthChange?: (isMaster: boolean) => void;
   sponsors?: SponsorItem[];
   onUpdateSponsors?: (sponsors: SponsorItem[]) => void;
+  onEventsUpdated?: () => void;
+  onEventApproved?: (event: EventItem) => void;
 }
 
 const ADMIN_PIN_KEY = 'praonde_admin_pin';
@@ -76,7 +86,7 @@ const SUPERVISORS_STORAGE_KEY = 'praonde_supervisors_v1';
 const CITIES_STORAGE_KEY = 'praonde_cities_v1';
 const INITIAL_PIN = '0612';
 
-// As views principais da central de gerenciamento
+// Central managing views
 type AdminPageView = 
   | 'menu' 
   | 'passwords' 
@@ -85,7 +95,9 @@ type AdminPageView =
   | 'cities' 
   | 'sponsors'
   | 'liberar_patrocinadores'
-  | 'liberar_eventos';
+  | 'liberar_eventos'
+  | 'importar_sympla'
+  | 'filtro_sympla';
 
 const INITIAL_CITIES: CityItem[] = [
   { id: 'city-1', name: 'São Paulo', state: 'SP', region: 'Sudeste', active: true },
@@ -147,7 +159,67 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   onMasterAuthChange,
   sponsors = [],
   onUpdateSponsors,
+  onEventsUpdated,
+  onEventApproved,
 }) => {
+  // State for Sympla Quarantine
+  const [quarantineEvents, setQuarantineEvents] = useState<ImportedEventItem[]>([]);
+  const [quarantineCount, setQuarantineCount] = useState<number>(0);
+  const [isLoadingQuarantine, setIsLoadingQuarantine] = useState<boolean>(false);
+
+  // Itens da Tabela de Categorias sincronizados com o banco SQLite / Firestore
+  const [localCategoryItems, setLocalCategoryItems] = useState<CategoryItem[]>(categoryItems);
+
+  useEffect(() => {
+    if (categoryItems && categoryItems.length > 0) {
+      setLocalCategoryItems(categoryItems);
+    }
+  }, [categoryItems]);
+
+  const fetchDbCategories = async () => {
+    try {
+      const res = await fetch('/api/categories');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data) && data.length > 0) {
+          setLocalCategoryItems(data);
+        }
+      }
+    } catch (err) {
+      console.warn('Erro ao sincronizar tabela de categorias no AdminModal:', err);
+    }
+  };
+
+  useEffect(() => {
+    if (isOpen) {
+      fetchDbCategories();
+    }
+  }, [isOpen]);
+
+  const fetchQuarantineCount = async () => {
+    try {
+      setIsLoadingQuarantine(true);
+      const res = await fetch('/api/imported-events?status=quarentena');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          setQuarantineEvents(data);
+          setQuarantineCount(data.length);
+        }
+      }
+    } catch (err) {
+      console.error('Erro ao buscar registros da quarentena:', err);
+    } finally {
+      setIsLoadingQuarantine(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isOpen) {
+      fetchQuarantineCount();
+    }
+  }, [isOpen]);
+
   // State for "Patrocinadores"
   const [localSponsors, setLocalSponsors] = useState<SponsorItem[]>(sponsors);
   const [sponsorName, setSponsorName] = useState('');
@@ -220,6 +292,78 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [newCategoryName, setNewCategoryName] = useState<string>('');
   const [categoryFeedback, setCategoryFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
 
+  // State for managing ignored words (blacklist filter) (Request: Sympla Blacklist words)
+  const [ignoredWords, setIgnoredWords] = useState<{ id: number; palavra: string; criadoEm?: string }[]>([]);
+  const [newIgnoredWord, setNewIgnoredWord] = useState<string>('');
+  const [ignoredWordFeedback, setIgnoredWordFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+  const [isLoadingIgnoredWords, setIsLoadingIgnoredWords] = useState<boolean>(false);
+
+  const fetchIgnoredWords = async () => {
+    try {
+      setIsLoadingIgnoredWords(true);
+      const res = await fetch('/api/ignored-words');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          setIgnoredWords(data);
+        }
+      }
+    } catch (err) {
+      console.warn('Erro ao carregar palavras ignoradas:', err);
+    } finally {
+      setIsLoadingIgnoredWords(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isOpen && currentView === 'filtro_sympla') {
+      fetchIgnoredWords();
+    }
+  }, [isOpen, currentView]);
+
+  const handleAddIgnoredWord = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIgnoredWordFeedback(null);
+    const word = newIgnoredWord.trim().toLowerCase();
+    if (!word) {
+      setIgnoredWordFeedback({ type: 'error', msg: 'Digite uma palavra.' });
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/ignored-words', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ palavra: word }),
+      });
+      if (res.ok) {
+        setIgnoredWordFeedback({ type: 'success', msg: `Palavra "${word}" adicionada ao filtro!` });
+        setNewIgnoredWord('');
+        fetchIgnoredWords();
+      } else {
+        const errJson = await res.json();
+        setIgnoredWordFeedback({ type: 'error', msg: errJson.error || 'Erro ao adicionar.' });
+      }
+    } catch (err) {
+      setIgnoredWordFeedback({ type: 'error', msg: 'Erro ao conectar ao servidor.' });
+    }
+  };
+
+  const handleDeleteIgnoredWord = async (id: number, word: string) => {
+    if (!window.confirm(`Deseja remover a palavra "${word}" do filtro?`)) return;
+    try {
+      const res = await fetch(`/api/ignored-words/${id}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        setIgnoredWordFeedback({ type: 'success', msg: `Palavra "${word}" removida com sucesso!` });
+        fetchIgnoredWords();
+      }
+    } catch (err) {
+      setIgnoredWordFeedback({ type: 'error', msg: 'Erro ao conectar ao servidor.' });
+    }
+  };
+
   // State for "Cadastrar Supervisor" e Atualização
   const [supervisors, setSupervisors] = useState<Supervisor[]>(() => {
     try {
@@ -258,10 +402,52 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [cityFeedback, setCityFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
   const [citySearchQuery, setCitySearchQuery] = useState('');
 
-  // State for "Liberar Eventos" - por padrão exibe somente registros se o campo liberado estiver em branco
-  const [eventFilterStatus, setEventFilterStatus] = useState<'blank' | 'rejected' | 'approved' | 'all'>('blank');
+  // State for "Liberar Eventos" - por padrão exibe todos os registros (incluindo quarentena e catálogo)
+  const [localEvents, setLocalEvents] = useState<EventItem[]>(() => events || []);
+  const [isLoadingEvents, setIsLoadingEvents] = useState(false);
+  const [eventFilterStatus, setEventFilterStatus] = useState<'pending' | 'quarentena' | 'approved' | 'all'>('pending');
   const [selectedCategoryForLiberation, setSelectedCategoryForLiberation] = useState<string>('Todas');
   const [selectedEventForAnalysis, setSelectedEventForAnalysis] = useState<EventItem | null>(null);
+  const [isDeletingBatch, setIsDeletingBatch] = useState(false);
+  const [confirmDeleteScope, setConfirmDeleteScope] = useState<'pending' | 'filtered' | 'all' | null>(null);
+
+  // Sincroniza localEvents sempre que a prop events for atualizada
+  useEffect(() => {
+    if (Array.isArray(events) && events.length > 0) {
+      setLocalEvents(events);
+    }
+  }, [events]);
+
+  // Busca lista fresca e autoritativa de eventos diretamente da API SQLite
+  const fetchEventsFromApi = async () => {
+    setIsLoadingEvents(true);
+    try {
+      const res = await fetch('/api/events?order_by=criado_em');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          setLocalEvents(data);
+        }
+      }
+    } catch (err) {
+      console.warn('Erro ao atualizar eventos na moderação:', err);
+    } finally {
+      setIsLoadingEvents(false);
+    }
+  };
+
+  // Carrega eventos do banco sempre que o modal for aberto ou ao entrar na tela de liberar eventos
+  useEffect(() => {
+    if (isOpen) {
+      fetchEventsFromApi();
+    }
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (currentView === 'liberar_eventos') {
+      fetchEventsFromApi();
+    }
+  }, [currentView]);
 
   // State for "Liberar Patrocinadores" (Revisão e Moderação de Anúncios)
   const [dbSponsors, setDbSponsors] = useState<SponsorItem[]>([]);
@@ -419,41 +605,59 @@ export const AdminModal: React.FC<AdminModalProps> = ({
       setShowSupPassword(false);
       setCityFeedback(null);
       setSelectedCategoryForLiberation('Todas');
-      setEventFilterStatus('all');
+      setEventFilterStatus('pending');
+      setConfirmDeleteScope(null);
     }
   }, [isOpen]);
 
-  // Categorias disponíveis para o Grid de Liberar Eventos
+  // Listener para sincronização automática quando a quarentena for alterada ou esvaziada
+  useEffect(() => {
+    const onQuarantineSync = () => {
+      fetchQuarantineCount();
+      if (onEventsUpdated) {
+        onEventsUpdated();
+      }
+    };
+    window.addEventListener('praonde:quarantine-cleared', onQuarantineSync);
+    window.addEventListener('praonde:quarantine-updated', onQuarantineSync);
+    return () => {
+      window.removeEventListener('praonde:quarantine-cleared', onQuarantineSync);
+      window.removeEventListener('praonde:quarantine-updated', onQuarantineSync);
+    };
+  }, [onEventsUpdated]);
+
+  // Categorias disponíveis para o Grid de Liberar Eventos (EXCLUSIVAMENTE as cadastradas na tabela de categorias, com fallback se vazio)
   const allCategoriesForLiberation = useMemo(() => {
-    const list: { id?: number; name: string }[] = [];
+    const list: { id?: number; name: string; descricao?: string }[] = [];
     const added = new Set<string>();
 
-    categoryItems.forEach((ci) => {
+    // Exclusivamente itens da tabela de categorias (SQLite / Firestore)
+    localCategoryItems.forEach((ci) => {
       const trimmed = (ci.nome || '').trim();
-      if (trimmed && !added.has(trimmed.toLowerCase())) {
+      if (trimmed && trimmed.toLowerCase() !== 'categoria' && ci.ativa !== false && !added.has(trimmed.toLowerCase())) {
         added.add(trimmed.toLowerCase());
-        list.push({ id: ci.id, name: trimmed });
+        list.push({ id: ci.id, name: trimmed, descricao: (ci.descricao || '').trim() });
       }
     });
 
-    categories.forEach((cat) => {
-      const trimmed = (cat || '').trim();
-      if (trimmed && !added.has(trimmed.toLowerCase())) {
-        added.add(trimmed.toLowerCase());
-        list.push({ name: trimmed });
-      }
-    });
+    // Se estiver vazia (sem dados de banco ainda), aplica o fallback para alinhar com a tela de cadastro
+    if (list.length === 0) {
+      const fallbacks = [
+        'Shows',
+        'Samba e Pagode',
+        'Baile Nostalgia',
+        'Baile Terceira Idade',
+        'Forró',
+        'Forró Pé de Serra',
+        'Festas'
+      ];
+      fallbacks.forEach((name, index) => {
+        list.push({ id: 100 + index, name, descricao: `Categoria ${name}` });
+      });
+    }
 
-    events.forEach((evt) => {
-      const trimmed = (evt.category || '').trim();
-      if (trimmed && !added.has(trimmed.toLowerCase())) {
-        added.add(trimmed.toLowerCase());
-        list.push({ name: trimmed });
-      }
-    });
-
-    return list;
-  }, [categories, categoryItems, events]);
+    return list.sort((a, b) => a.name.localeCompare(b.name));
+  }, [localCategoryItems]);
 
   // Handle password submission (Validação da Senha Master "0612" ou senha cadastrada na tabela supervisor)
   const handlePasswordSubmit = async (e?: React.FormEvent) => {
@@ -538,6 +742,9 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const handleOpenOption = (view: AdminPageView) => {
     if (view === 'liberar_eventos') {
       setCurrentView('liberar_eventos');
+      if (onEventsUpdated) {
+        onEventsUpdated();
+      }
       return;
     }
 
@@ -932,40 +1139,258 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
   // Categorias disponíveis para o Grid de Liberar Eventos já calculadas no topo
 
-  // Counts for Event Liberation - pendentes são os eventos com campo liberar igual a "" ou "N"
-  const totalPending = events.filter((e) => !e.liberado || e.liberado === '' || e.liberado === 'N').length;
-  const totalApproved = events.filter((e) => e.liberado === 'S').length;
+  // Eventos mapeados da quarentena para a fila de liberação
+  const mappedQuarantineItems = useMemo<EventItem[]>(() => {
+    return quarantineEvents.map((imp) => ({
+      id: imp.id,
+      title: imp.title,
+      description: imp.description || '',
+      category: (imp.category || 'Shows') as any,
+      categoryId: imp.categoryId,
+      date: imp.date,
+      time: imp.time || '20:00',
+      endDate: imp.date,
+      endTime: imp.endTime,
+      locationName: imp.locationName || 'Local a confirmar',
+      address: imp.address || '',
+      city: imp.city || 'São Paulo',
+      state: imp.state || 'SP',
+      latitude: imp.latitude ? String(imp.latitude) : undefined,
+      longitude: imp.longitude ? String(imp.longitude) : undefined,
+      liberado: 'N', // Em quarentena = pendente de liberação
+      isFree: !!imp.isGratuito,
+      price: imp.price || 0,
+      priceDetails: imp.ticketUrl ? 'Ingressos Sympla' : '',
+      imageUrl: imp.imageUrl || '',
+      videoUrl: imp.videoUrl || undefined,
+      mediaType: imp.videoUrl ? 'video' : 'image',
+      organizer: imp.organizer || 'Produção',
+      contact: imp.ticketUrl || '',
+      tags: ['Quarentena', 'Sympla', imp.category || 'Shows'],
+      isQuarantine: true,
+      status: 'quarentena',
+      createdAt: imp.createdAt || new Date().toISOString(),
+    }));
+  }, [quarantineEvents]);
+
+  // Contagens para Liberar Eventos
+  const totalQuarantine = quarantineEvents.length;
+  const totalPendingCatalog = localEvents.filter((e) => !e.liberado || e.liberado === '').length;
+  const totalPending = totalQuarantine + totalPendingCatalog;
+  const totalApproved = localEvents.filter((e) => e.liberado === 'S').length;
 
   // Filtered events for "Liberar Eventos"
-  // Por padrão (eventFilterStatus === 'pending') traz apenas os eventos com o campo liberar igual "" ou "N"
-  const filteredEventsForLiberation = events.filter((evt) => {
-    const isPending = !evt.liberado || evt.liberado === '' || evt.liberado === 'N';
-    const isApproved = evt.liberado === 'S';
+  const filteredEventsForLiberation = useMemo(() => {
+    let source: EventItem[] = [];
 
-    if (eventFilterStatus === 'pending' && !isPending) return false;
-    if (eventFilterStatus === 'approved' && !isApproved) return false;
+    if (eventFilterStatus === 'quarentena') {
+      source = [...mappedQuarantineItems];
+    } else if (eventFilterStatus === 'approved') {
+      source = localEvents.filter((e) => e.liberado === 'S');
+    } else if (eventFilterStatus === 'pending') {
+      const pendingCatalog = localEvents.filter((e) => !e.liberado || e.liberado === '');
+      source = [...mappedQuarantineItems, ...pendingCatalog];
+    } else {
+      // 'all'
+      source = [...mappedQuarantineItems, ...localEvents];
+    }
 
     if (selectedCategoryForLiberation !== 'Todas') {
       const selNorm = selectedCategoryForLiberation.toLowerCase().trim();
-      const evtCatNorm = (evt.category || '').toLowerCase().trim();
-      if (selNorm !== evtCatNorm) return false;
+      source = source.filter((evt) => (evt.category || '').toLowerCase().trim() === selNorm);
     }
 
-    return true;
-  });
+    // Ordenar de forma prioritária para que os eventos mais recentemente cadastrados fiquem no topo absoluto da lista
+    source.sort((a, b) => {
+      const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      if (timeA && timeB && timeA !== timeB) return timeB - timeA;
+      const numA = parseInt((a.id || '').replace(/\D/g, ''), 10) || 0;
+      const numB = parseInt((b.id || '').replace(/\D/g, ''), 10) || 0;
+      return numB - numA;
+    });
 
-  const handleSaveLiberation = async (id: string, nextLiberado: 'S' | 'N') => {
-    if (onSetLiberado) {
-      await onSetLiberado(id, nextLiberado);
-    } else if (onToggleLiberado) {
-      const currentEvt = events.find((e) => e.id === id);
-      const current = currentEvt?.liberado || '';
-      if (current !== nextLiberado) {
-        onToggleLiberado(id, current);
+    return source;
+  }, [eventFilterStatus, mappedQuarantineItems, localEvents, selectedCategoryForLiberation]);
+
+  const handleSaveLiberation = async (
+    id: string,
+    nextLiberado: 'S' | 'N',
+    newCategory?: string,
+    updatedUrl?: string,
+    urlType?: 'video' | 'image' | 'link'
+  ) => {
+    // Atualização otimista imediata: remove o item processado da listagem ativa para limpar a tela de imediato
+    setLocalEvents((prev) => prev.filter((e) => e.id !== id));
+    setQuarantineEvents((prev) => prev.filter((q) => q.id !== id));
+    const isQuarantine = quarantineEvents.some((q) => q.id === id) || (selectedEventForAnalysis?.id === id && !!selectedEventForAnalysis?.isQuarantine);
+
+    // Se uma nova categoria foi alterada na análise, aplica a atualização
+    if (newCategory) {
+      await handleUpdateCategoryInAnalysis(id, newCategory);
+    }
+
+    // Se uma URL foi atualizada ou informada na tela de liberação, salva nas tabelas correspondentes
+    if (updatedUrl && updatedUrl.trim()) {
+      await handleUpdateUrlInAnalysis(id, updatedUrl.trim(), urlType || 'video');
+    }
+
+    if (isQuarantine) {
+      if (nextLiberado === 'S') {
+        try {
+          const res = await fetch(`/api/imported-events/${id}/approve`, { 
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ category: newCategory })
+          });
+          const json = await res.json();
+          if (json.success && json.event) {
+            saveEventToFirestore(json.event).catch(() => {});
+            if (onEventApproved) onEventApproved(json.event);
+            setQuarantineEvents((prev) => prev.filter((q) => q.id !== id));
+            setQuarantineCount((prev) => Math.max(0, prev - 1));
+            setLiberationNotice(`Evento "${json.event.title}" aprovado e liberado com sucesso no aplicativo!`);
+            setTimeout(() => setLiberationNotice(''), 4000);
+            if (onEventsUpdated) await onEventsUpdated();
+          }
+        } catch (err) {
+          console.error('Erro ao aprovar evento da quarentena:', err);
+        }
+      } else if (nextLiberado === 'N') {
+        // Ao clicar em "Não Liberar" em um item da quarentena: exclui da lista de quarentena
+        try {
+          const targetEvent = quarantineEvents.find((q) => q.id === id);
+          const targetTitle = targetEvent?.title || selectedEventForAnalysis?.title || 'Evento';
+          await fetch(`/api/imported-events/${id}?permanent=true`, { 
+            method: 'DELETE' 
+          });
+          setQuarantineEvents((prev) => prev.filter((q) => q.id !== id));
+          setQuarantineCount((prev) => Math.max(0, prev - 1));
+          setLiberationNotice(`Evento "${targetTitle}" não liberado e excluído da lista de quarentena com sucesso.`);
+          setTimeout(() => setLiberationNotice(''), 4000);
+        } catch (err) {
+          console.error('Erro ao excluir evento da quarentena ao Não Liberar:', err);
+        }
+      }
+    } else {
+      if (onSetLiberado) {
+        await onSetLiberado(id, nextLiberado, updatedUrl, urlType);
+      } else if (onToggleLiberado) {
+        const currentEvt = events.find((e) => e.id === id);
+        const current = currentEvt?.liberado || '';
+        if (current !== nextLiberado) {
+          onToggleLiberado(id, current);
+        }
       }
     }
     // Atualiza o item atualmente selecionado em análise se ainda for o mesmo
-    setSelectedEventForAnalysis((prev) => (prev && prev.id === id ? { ...prev, liberado: nextLiberado } : prev));
+    setSelectedEventForAnalysis((prev) => (prev && prev.id === id ? { ...prev, liberado: nextLiberado, ...(newCategory ? { category: newCategory } : {}) } : prev));
+    
+    // Recarrega os eventos do banco de dados para garantir que a lista/grid seja atualizada instantaneamente sem o registro liberado/alterado
+    await fetchEventsFromApi();
+    if (onEventsUpdated) {
+      await onEventsUpdated();
+    }
+  };
+
+  const handleUpdateCategoryInAnalysis = async (id: string, newCategory: string, newCategoryId?: number): Promise<boolean> => {
+    try {
+      const res = await fetch(`/api/events/${id}/category`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category: newCategory, categoryId: newCategoryId }),
+      });
+      const json = await res.json();
+      if (res.ok && json.success) {
+        setSelectedEventForAnalysis((prev) => (prev && prev.id === id ? { ...prev, category: newCategory } : prev));
+        setQuarantineEvents((prev) => prev.map((q) => (q.id === id ? { ...q, categoria: newCategory } : q)));
+        
+        // Atualiza otimistamente o estado da lista local para refletir na tela imediatamente
+        setLocalEvents((prev) =>
+          prev.map((e) => (e.id === id ? { ...e, category: newCategory } : e))
+        );
+
+        const evt = events.find((e) => e.id === id);
+        if (evt) {
+          saveEventToFirestore({ ...evt, category: newCategory }).catch(() => {});
+        }
+
+        // Recarrega e força o refresh da listagem principal
+        await fetchEventsFromApi();
+
+        if (onEventsUpdated) {
+          await onEventsUpdated();
+        }
+        setLiberationNotice(`Categoria alterada para "${newCategory}" com sucesso!`);
+        setTimeout(() => setLiberationNotice(''), 3500);
+        return true;
+      }
+    } catch (err) {
+      console.error('Erro ao atualizar categoria na análise:', err);
+    }
+    return false;
+  };
+
+  const handleUpdateUrlInAnalysis = async (id: string, newUrl: string, urlType: 'video' | 'image' | 'link' = 'video'): Promise<boolean> => {
+    try {
+      const res = await fetch(`/api/events/${id}/url`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: newUrl, urlType }),
+      });
+      const json = await res.json();
+      if (res.ok && json.success) {
+        const isVid = urlType === 'video' || (newUrl && (newUrl.includes('youtube') || newUrl.includes('fb.') || newUrl.includes('.mp4') || newUrl.startsWith('data:video/')));
+        const isImg = urlType === 'image' || (newUrl && (newUrl.startsWith('data:image/') || newUrl.includes('.jpg') || newUrl.includes('.png')));
+
+        setSelectedEventForAnalysis((prev) => {
+          if (!prev || prev.id !== id) return prev;
+          return {
+            ...prev,
+            url: newUrl,
+            ...(isVid ? { videoUrl: newUrl, mediaType: 'video' as const } : {}),
+            ...(isImg ? { imageUrl: newUrl, mediaType: 'image' as const } : {}),
+          };
+        });
+
+        if (onEventsUpdated) {
+          onEventsUpdated();
+        }
+
+        setQuarantineEvents((prev) =>
+          prev.map((q) => {
+            if (q.id !== id) return q;
+            return {
+              ...q,
+              url: newUrl,
+              ...(isVid ? { videoUrl: newUrl } : {}),
+              ...(isImg ? { imageUrl: newUrl } : {}),
+            };
+          })
+        );
+
+        const evt = events.find((e) => e.id === id);
+        if (evt) {
+          saveEventToFirestore({
+            ...evt,
+            url: newUrl,
+            ...(isVid ? { videoUrl: newUrl, mediaType: 'video' as const } : {}),
+            ...(isImg ? { imageUrl: newUrl, mediaType: 'image' as const } : {}),
+          }).catch(() => {});
+        }
+
+        if (onEventsUpdated) {
+          await onEventsUpdated();
+        }
+
+        setLiberationNotice(`Campo URL atualizado com sucesso nas tabelas correspondentes!`);
+        setTimeout(() => setLiberationNotice(''), 3500);
+        return true;
+      }
+    } catch (err) {
+      console.error('Erro ao atualizar URL na análise:', err);
+    }
+    return false;
   };
 
   const currentIndexInAnalysis = selectedEventForAnalysis 
@@ -986,23 +1411,217 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     }
   };
 
-  const handleLiberateAllPending = () => {
-    if (!onSetLiberado && !onToggleLiberado) return;
-    const pendingEvents = filteredEventsForLiberation.filter((e) => !e.liberado || e.liberado === '' || e.liberado === 'N');
-    if (pendingEvents.length === 0) return;
+  const [isLiberatingAll, setIsLiberatingAll] = useState(false);
+  const [liberationNotice, setLiberationNotice] = useState('');
 
-    const label = selectedCategoryForLiberation !== 'Todas'
-      ? `todos os ${pendingEvents.length} eventos pendentes da categoria "${selectedCategoryForLiberation}"`
-      : `todos os ${pendingEvents.length} eventos pendentes`;
+  const handleLiberateAllEvents = async (onlyCurrentCategory: boolean = false) => {
+    const targetCategory = (onlyCurrentCategory && selectedCategoryForLiberation !== 'Todas') 
+      ? selectedCategoryForLiberation 
+      : undefined;
 
-    if (window.confirm(`Deseja liberar ${label} agora?`)) {
-      pendingEvents.forEach((evt) => {
-        if (onSetLiberado) {
-          onSetLiberado(evt.id, 'S');
-        } else if (onToggleLiberado) {
-          onToggleLiberado(evt.id, evt.liberado || 'N');
+    const pendingCount = targetCategory
+      ? (
+          events.filter((e) => (e.category || '').toLowerCase().trim() === targetCategory.toLowerCase().trim() && (!e.liberado || e.liberado === '')).length +
+          quarantineEvents.filter((q) => (q.category || '').toLowerCase().trim() === targetCategory.toLowerCase().trim()).length
+        )
+      : totalPending;
+
+    const totalCount = targetCategory
+      ? (
+          events.filter((e) => (e.category || '').toLowerCase().trim() === targetCategory.toLowerCase().trim()).length +
+          quarantineEvents.filter((q) => (q.category || '').toLowerCase().trim() === targetCategory.toLowerCase().trim()).length
+        )
+      : events.length + totalQuarantine;
+
+    const label = targetCategory
+      ? `todos os ${totalCount} eventos da categoria "${targetCategory}" (${pendingCount} pendente${pendingCount !== 1 ? 's' : ''})`
+      : `TODOS os ${totalCount} eventos (${pendingCount} pendente${pendingCount !== 1 ? 's' : ''} entre Quarentena e Catálogo)`;
+
+    if (isLiberatingAll) return;
+
+    setIsLiberatingAll(true);
+    setLiberationNotice(`Liberando ${label}...`);
+
+    try {
+      // 1. Aprova eventos da Quarentena
+      if (targetCategory) {
+        const qEventsOfCategory = quarantineEvents.filter(
+          (q) => (q.category || '').toLowerCase().trim() === targetCategory.toLowerCase().trim()
+        );
+        if (qEventsOfCategory.length > 0) {
+          const qIds = qEventsOfCategory.map((q) => q.id);
+          const resQ = await fetch('/api/imported-events/batch-approve', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids: qIds }),
+          });
+          const jsonQ = await resQ.json();
+          if (jsonQ.success && Array.isArray(jsonQ.events)) {
+            jsonQ.events.forEach((evt: EventItem) => {
+              saveEventToFirestore(evt).catch(() => {});
+              if (onEventApproved) onEventApproved(evt);
+            });
+          }
+          setQuarantineEvents((prev) => prev.filter((q) => !qIds.includes(q.id)));
+          setQuarantineCount((prev) => Math.max(0, prev - qIds.length));
         }
+      } else {
+        // Aprova TODOS os eventos da Quarentena
+        if (quarantineEvents.length > 0) {
+          const resQ = await fetch('/api/imported-events/approve-all', { method: 'POST' });
+          const jsonQ = await resQ.json();
+          if (jsonQ.success && Array.isArray(jsonQ.events)) {
+            jsonQ.events.forEach((evt: EventItem) => {
+              saveEventToFirestore(evt).catch(() => {});
+              if (onEventApproved) onEventApproved(evt);
+            });
+          }
+          setQuarantineEvents([]);
+          setQuarantineCount(0);
+        }
+      }
+
+      // 2. Atualiza no SQLite os eventos do catálogo oficial através da API dedicada
+      const res = await fetch('/api/events/liberar-todos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category: targetCategory }),
       });
+
+      if (!res.ok) {
+        throw new Error('Falha ao atualizar status no servidor');
+      }
+
+      // 3. Atualiza os eventos em memória local e no Firestore
+      const targetEvts = targetCategory
+        ? events.filter((e) => (e.category || '').toLowerCase().trim() === targetCategory.toLowerCase().trim())
+        : events;
+
+      for (const evt of targetEvts) {
+        if (evt.liberado !== 'S') {
+          if (onSetLiberado) {
+            await onSetLiberado(evt.id, 'S');
+          } else if (onToggleLiberado) {
+            onToggleLiberado(evt.id, evt.liberado || 'N');
+          }
+        }
+      }
+
+      // 4. Atualiza o evento atualmente em análise se houver
+      if (selectedEventForAnalysis) {
+        setSelectedEventForAnalysis((prev) => prev ? { ...prev, liberado: 'S' } : null);
+      }
+
+      // 5. Dispara recarregamento global
+      if (onEventsUpdated) {
+        await onEventsUpdated();
+      }
+
+      window.dispatchEvent(new CustomEvent('praonde:quarantine-cleared'));
+      await fetchQuarantineCount();
+
+      setLiberationNotice(`Todos os ${totalCount} eventos foram liberados com sucesso (liberado = "S") e sincronizados no app!`);
+    } catch (err: any) {
+      console.error('Erro ao liberar todos os eventos:', err);
+      // Fallback local
+      const targetEvts = targetCategory
+        ? events.filter((e) => (e.category || '').toLowerCase().trim() === targetCategory.toLowerCase().trim())
+        : events;
+      targetEvts.forEach((evt) => {
+        if (onSetLiberado) onSetLiberado(evt.id, 'S');
+      });
+      window.dispatchEvent(new CustomEvent('praonde:quarantine-cleared'));
+      await fetchQuarantineCount().catch(() => {});
+      setLiberationNotice('Eventos liberados com sucesso!');
+    } finally {
+      setIsLiberatingAll(false);
+      setTimeout(() => {
+        setLiberationNotice('');
+      }, 5000);
+    }
+  };
+
+  const handleLiberateAllPending = () => handleLiberateAllEvents(false);
+
+  // Exclusão em lote de eventos (Pendentes, Filtrados ou Todos)
+  const handleDeleteEventsBatch = async (scope: 'pending' | 'filtered' | 'all') => {
+    if (isDeletingBatch) return;
+
+    let itemsToDelete: EventItem[] = [];
+    if (scope === 'pending') {
+      const pendingCatalog = events.filter((e) => !e.liberado || e.liberado === '');
+      itemsToDelete = [...mappedQuarantineItems, ...pendingCatalog];
+    } else if (scope === 'filtered') {
+      itemsToDelete = filteredEventsForLiberation;
+    } else if (scope === 'all') {
+      itemsToDelete = [...mappedQuarantineItems, ...events];
+    }
+
+    if (itemsToDelete.length === 0) {
+      setLiberationNotice('Nenhum evento encontrado para excluir neste filtro.');
+      setConfirmDeleteScope(null);
+      setTimeout(() => setLiberationNotice(''), 4000);
+      return;
+    }
+
+    setIsDeletingBatch(true);
+    setLiberationNotice(`Excluindo ${itemsToDelete.length} evento(s)...`);
+
+    try {
+      const quarantineItems = itemsToDelete.filter((e) => e.isQuarantine);
+      const catalogItems = itemsToDelete.filter((e) => !e.isQuarantine);
+
+      // 1. Exclui itens da quarentena
+      if (quarantineItems.length > 0) {
+        if (scope === 'pending' || scope === 'all' || quarantineItems.length === quarantineEvents.length) {
+          await fetch('/api/imported-events/clear', { method: 'POST' }).catch(() => {});
+          setQuarantineEvents([]);
+          setQuarantineCount(0);
+        } else {
+          const qIds = quarantineItems.map((q) => q.id);
+          await fetch('/api/imported-events/batch-delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids: qIds }),
+          }).catch(() => {});
+          setQuarantineEvents((prev) => prev.filter((q) => !qIds.includes(q.id)));
+          setQuarantineCount((prev) => Math.max(0, prev - qIds.length));
+        }
+        window.dispatchEvent(new CustomEvent('praonde:quarantine-cleared'));
+      }
+
+      // 2. Exclui itens do catálogo
+      if (catalogItems.length > 0) {
+        const cIds = catalogItems.map((c) => c.id);
+        await fetch('/api/events/batch-delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: cIds }),
+        });
+
+        for (const item of catalogItems) {
+          onDeleteEvent(item.id);
+        }
+      }
+
+      // 3. Atualizar eventos se callback disponível
+      if (onEventsUpdated) {
+        await onEventsUpdated();
+      }
+
+      // 4. Fechar modal de análise se o evento aberto foi excluído
+      if (selectedEventForAnalysis && itemsToDelete.some((e) => e.id === selectedEventForAnalysis.id)) {
+        setSelectedEventForAnalysis(null);
+      }
+
+      setLiberationNotice(`${itemsToDelete.length} evento(s) excluído(s) com sucesso da fila e do banco de dados!`);
+    } catch (err: any) {
+      console.error('Erro ao excluir eventos em lote:', err);
+      setLiberationNotice('Ocorreu um erro ao excluir os eventos.');
+    } finally {
+      setIsDeletingBatch(false);
+      setConfirmDeleteScope(null);
+      setTimeout(() => setLiberationNotice(''), 5000);
     }
   };
 
@@ -1226,12 +1845,18 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   4. "Cadastrar Cidades"
                   5. "Console Banco SQL" (Exclusivo senha 0612)
               */}
-              <div className={`grid grid-cols-1 sm:grid-cols-2 ${isMasterAdmin ? 'lg:grid-cols-3 xl:grid-cols-5' : 'lg:grid-cols-4'} gap-4 pt-2`}>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 pt-2">
                 
                 {/* BOTÃO 1: LIBERAR EVENTOS */}
                 <button
                   id="btn-admin-liberar-eventos"
-                  onClick={() => setCurrentView('liberar_eventos')}
+                  onClick={() => {
+                    fetchQuarantineCount();
+                    if (onEventsUpdated) {
+                      onEventsUpdated();
+                    }
+                    setCurrentView('liberar_eventos');
+                  }}
                   className="group relative flex flex-col items-center text-center p-5 rounded-2xl bg-gradient-to-b from-slate-800/80 to-slate-950 border border-slate-700/80 hover:border-emerald-500/60 hover:shadow-xl hover:shadow-emerald-500/10 transition-all duration-200 cursor-pointer"
                 >
                   <div className="w-14 h-14 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 group-hover:scale-105 group-hover:bg-emerald-500/25 transition-all mb-3 shadow-inner">
@@ -1246,6 +1871,59 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   <div className="mt-4 inline-flex items-center gap-1 text-xs font-bold text-emerald-400">
                     <span>Acessar</span>
                     <span className="group-hover:translate-x-1 transition-transform">→</span>
+                  </div>
+                </button>
+
+                {/* BOTÃO NOVO: IMPORTAR SYMPLA (QUARENTENA & CURADORIA) */}
+                <button
+                  id="btn-admin-importar-sympla"
+                  onClick={() => {
+                    fetchQuarantineCount();
+                    setCurrentView('importar_sympla');
+                  }}
+                  className="group relative flex flex-col items-center text-center p-5 rounded-2xl bg-gradient-to-b from-slate-800/80 to-slate-950 border border-amber-500/50 hover:border-amber-400 hover:shadow-xl hover:shadow-amber-500/15 transition-all duration-200 cursor-pointer"
+                >
+                  <div className="relative w-14 h-14 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-300 group-hover:scale-105 group-hover:bg-amber-500/25 transition-all mb-3 shadow-inner">
+                    <Download className="w-7 h-7" />
+                    {quarantineCount > 0 && (
+                      <span className="absolute -top-1.5 -right-1.5 px-2 py-0.5 rounded-full bg-amber-500 text-slate-950 text-[10px] font-black animate-pulse shadow-md">
+                        {quarantineCount}
+                      </span>
+                    )}
+                  </div>
+                  <h4 className="text-base font-bold text-white group-hover:text-amber-300 transition-colors mb-1.5">
+                    Importar Sympla
+                  </h4>
+                  <p className="text-xs text-slate-400 leading-relaxed flex-1">
+                    Buscar eventos por link, curadoria na quarentena e liberação no app ({quarantineCount} na quarentena).
+                  </p>
+                  <div className="mt-3 flex items-center justify-center gap-2 flex-wrap w-full">
+                    <div className="inline-flex items-center gap-1 text-xs font-bold text-amber-400">
+                      <span>Acessar Importador</span>
+                      <span className="group-hover:translate-x-1 transition-transform">→</span>
+                    </div>
+                    {quarantineCount > 0 && (
+                      <button
+                        type="button"
+                        id="btn-admin-limpar-quarentena-rapido"
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          try {
+                            await fetch('/api/imported-events/clear', { method: 'POST' });
+                            setQuarantineCount(0);
+                            window.dispatchEvent(new CustomEvent('praonde:quarantine-cleared'));
+                            setLiberationNotice('Quarentena esvaziada com sucesso!');
+                          } catch (err) {
+                            console.error('Erro ao limpar quarentena:', err);
+                          }
+                        }}
+                        className="px-2.5 py-1 rounded-lg bg-rose-600/20 hover:bg-rose-600 text-rose-300 hover:text-white border border-rose-500/40 text-[11px] font-bold flex items-center gap-1 transition-all cursor-pointer shadow-sm"
+                        title="Esvaziar todos os registros da quarentena agora"
+                      >
+                        <Trash2 className="w-3 h-3 text-rose-400" />
+                        <span>Limpar Quarentena</span>
+                      </button>
+                    )}
                   </div>
                 </button>
 
@@ -1358,6 +2036,27 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   </p>
                   <div className="mt-4 inline-flex items-center gap-1 text-xs font-bold text-amber-400">
                     <span>Liberar Anúncios</span>
+                    <span className="group-hover:translate-x-1 transition-transform">→</span>
+                  </div>
+                </button>
+
+                {/* BOTÃO NOVO: FILTRO SYMPLA (BLACKLIST) */}
+                <button
+                  id="btn-admin-filtro-sympla"
+                  onClick={() => handleOpenOption('filtro_sympla')}
+                  className="group relative flex flex-col items-center text-center p-5 rounded-2xl bg-gradient-to-b from-slate-800/80 to-slate-950 border border-slate-700/80 hover:border-rose-500/60 hover:shadow-xl hover:shadow-rose-500/10 transition-all duration-200 cursor-pointer"
+                >
+                  <div className="w-14 h-14 rounded-2xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-400 group-hover:scale-105 group-hover:bg-rose-500/25 transition-all mb-3 shadow-inner">
+                    <Ban className="w-7 h-7" />
+                  </div>
+                  <h4 className="text-base font-bold text-white group-hover:text-rose-300 transition-colors mb-1.5">
+                    Filtro de Importação
+                  </h4>
+                  <p className="text-xs text-slate-400 leading-relaxed flex-1">
+                    Defina palavras-chave ignoradas (como palestras, cursos, etc.) para bloquear no robô da Sympla.
+                  </p>
+                  <div className="mt-4 inline-flex items-center gap-1 text-xs font-bold text-rose-400">
+                    <span>Configurar Filtros</span>
                     <span className="group-hover:translate-x-1 transition-transform">→</span>
                   </div>
                 </button>
@@ -2112,15 +2811,68 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                 </div>
 
                 <div className="flex items-center gap-2 flex-wrap shrink-0">
-                  {totalPending > 0 && (onSetLiberado || onToggleLiberado) && (
+                  {/* Botão sempre visível para Liberar Todos os Eventos */}
+                  <button
+                    id="btn-liberar-todos-eventos"
+                    onClick={() => handleLiberateAllEvents(false)}
+                    disabled={isLiberatingAll || isDeletingBatch}
+                    className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white text-xs font-bold flex items-center gap-1.5 shadow-md shadow-emerald-600/30 transition-all cursor-pointer shrink-0 disabled:opacity-50"
+                    title="Liberar todos os eventos da quarentena e catálogo oficial (define campo liberado = 'S')"
+                  >
+                    {isLiberatingAll ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Liberando Todos...</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCheck className="w-4 h-4 text-emerald-200" />
+                        <span>Liberar Todos os Eventos {totalPending > 0 ? `(${totalPending} pendentes)` : `(${events.length + totalQuarantine})`}</span>
+                      </>
+                    )}
+                  </button>
+
+
+
+                  {/* Botão Limpar Todos os Eventos */}
+                  {(events.length > 0 || totalQuarantine > 0) && (
                     <button
-                      onClick={handleLiberateAllPending}
-                      className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md shadow-emerald-600/20 transition-all cursor-pointer shrink-0"
+                      id="btn-limpar-todos-eventos"
+                      type="button"
+                      onClick={() => setConfirmDeleteScope('all')}
+                      disabled={isLiberatingAll || isDeletingBatch}
+                      className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-rose-950 text-slate-400 hover:text-rose-300 border border-slate-700 hover:border-rose-500/40 text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shrink-0 disabled:opacity-50"
+                      title="Excluir todos os registros de eventos do banco de dados (limpeza total)"
                     >
-                      <Check className="w-3.5 h-3.5" />
-                      <span>Liberar Pendentes ({totalPending})</span>
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Limpar Todos ({events.length + totalQuarantine})</span>
                     </button>
                   )}
+
+                  {selectedCategoryForLiberation !== 'Todas' && (
+                    <button
+                      id="btn-liberar-categoria-atual"
+                      onClick={() => handleLiberateAllEvents(true)}
+                      disabled={isLiberatingAll || isDeletingBatch}
+                      className="px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 active:scale-95 text-slate-950 text-xs font-bold flex items-center gap-1.5 shadow-md shadow-amber-500/20 transition-all cursor-pointer shrink-0 disabled:opacity-50"
+                      title={`Liberar todos os eventos da categoria "${selectedCategoryForLiberation}"`}
+                    >
+                      <Check className="w-3.5 h-3.5 text-slate-950" />
+                      <span>Liberar Cat. "{selectedCategoryForLiberation}"</span>
+                    </button>
+                  )}
+
+                  <button
+                    id="btn-atualizar-lista-eventos"
+                    type="button"
+                    onClick={fetchEventsFromApi}
+                    disabled={isLoadingEvents}
+                    className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-xs font-semibold border border-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-sm disabled:opacity-50"
+                    title="Recarregar e atualizar todos os eventos do banco de dados SQLite"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isLoadingEvents ? 'animate-spin text-amber-400' : 'text-slate-400'}`} />
+                    <span>Atualizar Lista</span>
+                  </button>
 
                   <button
                     id="btn-liberar-back"
@@ -2133,6 +2885,58 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   </button>
                 </div>
               </div>
+
+              {/* Confirmação de Exclusão em Lote */}
+              {confirmDeleteScope && (
+                <div className="p-3.5 rounded-xl bg-rose-950/80 border border-rose-500/50 text-rose-200 text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 animate-in fade-in duration-200">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0" />
+                    <div>
+                      <p className="font-bold text-white text-sm">
+                        {confirmDeleteScope === 'pending'
+                          ? `Excluir todos os ${totalPending} eventos pendentes?`
+                          : confirmDeleteScope === 'filtered'
+                          ? `Excluir os ${filteredEventsForLiberation.length} eventos filtrados desta tabela?`
+                          : `ATENÇÃO: Deseja EXCLUIR TODOS os ${events.length} eventos do banco de dados?`}
+                      </p>
+                      <p className="text-[11px] text-rose-300/80">
+                        {confirmDeleteScope === 'pending'
+                          ? 'Os eventos não liberados serão removidos definitivamente do catálogo e do banco de dados.'
+                          : 'Esta ação não poderá ser desfeita e removerá os eventos de forma permanente.'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeleteScope(null)}
+                      className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium cursor-pointer"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteEventsBatch(confirmDeleteScope)}
+                      disabled={isDeletingBatch}
+                      className="px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 active:scale-95 text-white font-bold text-xs flex items-center gap-1.5 shadow-md shadow-rose-600/30 cursor-pointer disabled:opacity-50"
+                    >
+                      {isDeletingBatch ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                      <span>Confirmar Exclusão</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Mensagem de Feedback de Liberação */}
+              {liberationNotice && (
+                <div
+                  id="msg-liberation-feedback"
+                  className="p-3 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-semibold flex items-center gap-2 animate-in fade-in duration-200"
+                >
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>{liberationNotice}</span>
+                </div>
+              )}
 
               {/* Status Counters & Filters */}
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 bg-slate-950/50 p-3 rounded-xl border border-slate-800">
@@ -2148,7 +2952,19 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                     }`}
                   >
                     <AlertCircle className="w-3.5 h-3.5" />
-                    <span>Pendentes (liberar = "" ou "N") ({totalPending})</span>
+                    <span>Pendentes ({totalPending})</span>
+                  </button>
+
+                  <button
+                    onClick={() => setEventFilterStatus('quarentena')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5 ${
+                      eventFilterStatus === 'quarentena'
+                        ? 'bg-amber-500 text-slate-950 ring-2 ring-amber-500/40 font-bold'
+                        : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                    }`}
+                  >
+                    <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Quarentena ({totalQuarantine})</span>
                   </button>
 
                   <button
@@ -2171,7 +2987,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                         : 'text-slate-400 hover:text-white hover:bg-slate-800'
                     }`}
                   >
-                    Todos ({events.length})
+                    Todos ({events.length + totalQuarantine})
                   </button>
                 </div>
 
@@ -2228,28 +3044,23 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   {allCategoriesForLiberation.map((cat) => {
                     const isSelected = selectedCategoryForLiberation.toLowerCase().trim() === cat.name.toLowerCase().trim();
                     const catEvents = events.filter((e) => (e.category || '').toLowerCase().trim() === cat.name.toLowerCase().trim());
-                    const pendingCount = catEvents.filter((e) => !e.liberado || e.liberado === '' || e.liberado === 'N').length;
+                    const catQuarantine = quarantineEvents.filter((q) => (q.category || '').toLowerCase().trim() === cat.name.toLowerCase().trim());
+                    const pendingCount = catEvents.filter((e) => !e.liberado || e.liberado === '').length + catQuarantine.length;
 
                     return (
                       <button
                         key={cat.name}
                         type="button"
                         onClick={() => setSelectedCategoryForLiberation(isSelected ? 'Todas' : cat.name)}
-                        className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between ${
+                        className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between ${
                           isSelected
                             ? 'bg-emerald-500/15 border-emerald-500 text-white shadow-md shadow-emerald-500/10 ring-2 ring-emerald-500/40'
                             : 'bg-slate-900/80 border-slate-800 text-slate-300 hover:bg-slate-800/80 hover:border-slate-700'
                         }`}
+                        title={cat.name}
                       >
-                        <div className="flex items-center justify-between gap-1 mb-1">
-                          {cat.id ? (
-                            <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                              ID {cat.id}
-                            </span>
-                          ) : (
-                            <span className="text-[10px] text-slate-500 font-mono">CAT</span>
-                          )}
-
+                        <div className="flex items-center justify-between gap-1 mb-1.5">
+                          <Tag className={`w-3.5 h-3.5 ${isSelected ? 'text-emerald-400' : 'text-slate-400'}`} />
                           {pendingCount > 0 ? (
                             <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30" title={`${pendingCount} pendente(s)`}>
                               {pendingCount} pend.
@@ -2265,7 +3076,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                           {cat.name}
                         </div>
 
-                        <div className="text-[10px] text-slate-400 mt-1 truncate">
+                        <div className="text-[10px] text-slate-500 mt-1 truncate">
                           {pendingCount} para liberar
                         </div>
                       </button>
@@ -2287,7 +3098,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   </div>
                   {eventFilterStatus === 'pending' && (
                     <p className="text-[11px] text-slate-500">
-                      Não há eventos com campo liberar igual a "" ou "N". Todos os eventos estão liberados!
+                      Não há eventos pendentes de liberação no catálogo. Todos os eventos estão liberados!
                     </p>
                   )}
                   {selectedCategoryForLiberation !== 'Todas' && (
@@ -2306,19 +3117,33 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                       <Sparkles className="w-3.5 h-3.5 text-amber-400" />
                       <span>Dica: <strong>Clique em qualquer linha</strong> ou no botão <strong>Analisar & Liberar</strong> para inspecionar a imagem do evento e definir a liberação.</span>
                     </span>
-                    <span className="text-xs font-mono font-bold text-amber-400">
-                      {filteredEventsForLiberation.length} {filteredEventsForLiberation.length === 1 ? 'evento' : 'eventos'}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-mono font-bold text-amber-400">
+                        {filteredEventsForLiberation.length} {filteredEventsForLiberation.length === 1 ? 'evento' : 'eventos'}
+                      </span>
+                      {filteredEventsForLiberation.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteScope('filtered')}
+                          disabled={isDeletingBatch}
+                          className="px-2 py-0.5 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-[11px] font-semibold flex items-center gap-1 border border-rose-500/30 cursor-pointer transition-colors"
+                          title="Excluir todos os eventos desta listagem atual"
+                        >
+                          <Trash2 className="w-3 h-3 text-rose-400" />
+                          <span>Excluir estes</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
 
                   <table className="w-full text-left text-xs text-slate-300">
                     <thead className="bg-slate-950 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
                       <tr>
                         <th className="py-3 px-3">Imagem & Evento</th>
-                        <th className="py-3 px-3">Categoria</th>
+                        <th className="py-3 px-3">Categoria (Trazer Grid)</th>
                         <th className="py-3 px-3">Cidade/Local</th>
                         <th className="py-3 px-3">Data/Hora</th>
-                        <th className="py-3 px-3 text-center">Status Liberar</th>
+                        <th className="py-3 px-3 text-center">Liberar no App</th>
                         <th className="py-3 px-3 text-right">Análise & Ações</th>
                       </tr>
                     </thead>
@@ -2344,25 +3169,138 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                                     className="w-full h-full object-cover"
                                     referrerPolicy="no-referrer"
                                   />
+                                  {evt.videoUrl && (
+                                    <div className="absolute bottom-0 right-0 p-0.5 rounded-tl bg-slate-950/90 text-amber-400">
+                                      <Play className="w-2.5 h-2.5 fill-amber-400" />
+                                    </div>
+                                  )}
                                   <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
                                     <Eye className="w-4 h-4" />
                                   </div>
                                 </div>
                                 <div>
-                                  <div className="font-bold text-white max-w-[200px] truncate group-hover:text-amber-300 transition-colors">
-                                    {evt.title}
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="font-bold text-white max-w-[200px] truncate group-hover:text-amber-300 transition-colors">
+                                      {evt.title}
+                                    </span>
+                                    {evt.videoUrl && (
+                                      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40 shrink-0 flex items-center gap-1">
+                                        <Play className="w-2 h-2 fill-purple-300" /> Vídeo
+                                      </span>
+                                    )}
                                   </div>
-                                  <div className="text-[11px] text-slate-400 truncate max-w-[200px]">
-                                    {evt.organizer || 'Sem organizador'}
+                                  <div className="text-[11px] text-slate-400 truncate max-w-[200px] flex items-center gap-2 mt-0.5">
+                                    <span className="truncate">{evt.organizer || 'Sem organizador'}</span>
+                                    {evt.isQuarantine && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleSaveLiberation(evt.id, 'N');
+                                        }}
+                                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 hover:text-white border border-rose-500/40 transition-colors cursor-pointer shrink-0"
+                                        title="Cancelar e excluir este registro da lista de quarentena"
+                                      >
+                                        <Trash2 className="w-2.5 h-2.5 text-rose-400" />
+                                        <span>Cancelar (Excluir)</span>
+                                      </button>
+                                    )}
+                                  </div>
+
+                                  {/* Mobile-friendly action buttons placed directly below the title (Request 4 & 2) */}
+                                  <div className="flex flex-col gap-1.5 mt-2.5">
+                                    <div className="flex items-center gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleSaveLiberation(evt.id, 'S');
+                                        }}
+                                        title="Liberar Evento: atualiza o campo liberado com 'S' e publica no aplicativo"
+                                        className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer border ${
+                                          isApproved
+                                            ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm'
+                                            : 'bg-slate-900/80 text-slate-400 hover:text-emerald-400 border-slate-800 hover:border-emerald-500/30'
+                                        }`}
+                                      >
+                                        <Check className="w-3.5 h-3.5 shrink-0" />
+                                        <span>Liberar</span>
+                                      </button>
+
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleSaveLiberation(evt.id, 'N');
+                                        }}
+                                        title="Cancelar Evento: atualiza o campo liberado com 'N'"
+                                        className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer border ${
+                                          isRejected
+                                            ? 'bg-rose-600 text-white border-rose-500 shadow-sm'
+                                            : 'bg-slate-900/90 text-slate-400 hover:text-rose-400 border-slate-800 hover:border-rose-500/30'
+                                        }`}
+                                      >
+                                        <X className="w-3.5 h-3.5 shrink-0" />
+                                        <span>Cancelar</span>
+                                      </button>
+                                    </div>
+
+                                    {/* Select de Categoria (Dropbox) abaixo de Liberar e Cancelar */}
+                                    <div 
+                                      className="relative inline-flex items-center gap-1 bg-slate-900 border border-slate-700 rounded-lg px-2 py-0.5 text-[10px] font-bold text-amber-300 shadow-sm hover:bg-slate-800 transition-colors w-fit min-w-[130px]"
+                                      onClick={(e) => e.stopPropagation()} // Impede abrir o modal de análise ao clicar na área do select
+                                    >
+                                      <Tag className="w-3 h-3 text-amber-400 shrink-0" />
+                                      <select
+                                        value={evt.category || ''}
+                                        onChange={async (e) => {
+                                          const newCat = e.target.value;
+                                          if (!newCat || newCat === evt.category) return;
+                                          const catObj = allCategoriesForLiberation.find((c) => c.name.toLowerCase() === newCat.toLowerCase());
+                                          const success = await handleUpdateCategoryInAnalysis(evt.id, newCat, catObj?.id);
+                                          if (success) {
+                                            // Atualiza localmente no estado
+                                            setLocalEvents((prev) =>
+                                              prev.map((item) => item.id === evt.id ? { ...item, category: newCat } : item)
+                                            );
+                                            await fetchEventsFromApi();
+                                          }
+                                        }}
+                                        className="bg-transparent text-amber-300 font-bold focus:outline-none cursor-pointer w-full text-left py-0.5 text-[10px] pr-1"
+                                      >
+                                        <option value="" disabled className="bg-slate-900 text-slate-400">
+                                          Categoria...
+                                        </option>
+                                        {allCategoriesForLiberation.map((cat) => (
+                                          <option key={cat.name} value={cat.name} className="bg-slate-900 text-white text-[11px]">
+                                            {cat.name}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </div>
                                   </div>
                                 </div>
                               </div>
                             </td>
 
                             <td className="py-3 px-3">
-                              <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-800 text-amber-300 border border-slate-700">
-                                {evt.category}
-                              </span>
+                              <div className="flex items-center gap-2">
+                                <span className="font-bold text-white text-xs bg-slate-800 px-2.5 py-1.5 rounded-lg border border-slate-700 min-w-[70px] text-center truncate" title={evt.category}>
+                                  {evt.category}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedEventForAnalysis(evt);
+                                  }}
+                                  className="px-2 py-1.5 rounded-lg text-[11px] font-bold bg-indigo-600/20 text-indigo-300 border border-indigo-500/30 hover:bg-indigo-600 hover:text-white transition-all flex items-center gap-1 cursor-pointer shadow-sm shrink-0"
+                                  title="Grid de Categorias: clique para abrir e escolher a categoria do evento"
+                                >
+                                  <LayoutGrid className="w-3.5 h-3.5 text-indigo-400" />
+                                  <span>Grid</span>
+                                </button>
+                              </div>
                             </td>
 
                             <td className="py-3 px-3">
@@ -2376,65 +3314,45 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                             </td>
 
                             <td className="py-3 px-3 text-center">
-                              {isApproved ? (
+                              <div className="flex items-center justify-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleSaveLiberation(evt.id, 'S');
+                                  }}
+                                  title="Liberar Evento: atualiza o campo liberado com 'S' e publica no aplicativo"
+                                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-black transition-all cursor-pointer border ${
+                                    isApproved
+                                      ? 'bg-emerald-600 text-white border-emerald-500 shadow-md shadow-emerald-500/20 active:scale-95'
+                                      : 'bg-slate-900/80 text-slate-400 hover:text-emerald-400 border-slate-800 hover:border-emerald-500/40'
+                                  }`}
+                                >
+                                  <Check className="w-3.5 h-3.5 shrink-0" />
+                                  <span>Liberar Evento</span>
+                                </button>
+
                                 <button
                                   type="button"
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     handleSaveLiberation(evt.id, 'N');
                                   }}
-                                  title="Clique para desativar liberação deste evento"
-                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30 transition-colors cursor-pointer"
+                                  title="Cancelar/Recusar Evento: atualiza o campo liberado com 'N' (Não Liberado)"
+                                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-black transition-all cursor-pointer border ${
+                                    isRejected
+                                      ? 'bg-rose-600 text-white border-rose-500 shadow-md shadow-rose-500/20 active:scale-95'
+                                      : 'bg-slate-900/80 text-slate-400 hover:text-rose-400 border-slate-800 hover:border-rose-500/40'
+                                  }`}
                                 >
-                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                                  <span>Liberado ("S")</span>
+                                  <X className="w-3.5 h-3.5 shrink-0" />
+                                  <span>Cancelar Evento</span>
                                 </button>
-                              ) : isRejected ? (
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleSaveLiberation(evt.id, 'S');
-                                  }}
-                                  title="Clique para confirmar liberação (atualiza o campo liberado com 'S')"
-                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40 hover:bg-emerald-500/20 hover:text-emerald-300 hover:border-emerald-500/40 transition-colors cursor-pointer"
-                                >
-                                  <AlertCircle className="w-3.5 h-3.5 text-rose-400" />
-                                  <span>Não Liberado ("N")</span>
-                                </button>
-                              ) : (
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleSaveLiberation(evt.id, 'S');
-                                  }}
-                                  title="Clique para confirmar liberação (atualiza o campo liberado com 'S')"
-                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-emerald-500/20 hover:text-emerald-300 hover:border-emerald-500/40 transition-colors cursor-pointer"
-                                >
-                                  <Clock className="w-3.5 h-3.5 text-amber-400" />
-                                  <span>Pendente ("")</span>
-                                </button>
-                              )}
+                              </div>
                             </td>
 
                             <td className="py-3 px-3 text-right">
                               <div className="flex items-center justify-end gap-1.5">
-                                {!isApproved && (
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      handleSaveLiberation(evt.id, 'S');
-                                    }}
-                                    className="px-2 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 text-xs font-semibold flex items-center gap-1 transition-all shadow-sm cursor-pointer"
-                                    title="Confirmar Liberação rápida: atualiza campo liberado com 'S'"
-                                  >
-                                    <Check className="w-3.5 h-3.5 text-emerald-400" />
-                                    <span className="hidden sm:inline">Liberar ("S")</span>
-                                  </button>
-                                )}
-
                                 <button
                                   type="button"
                                   onClick={(e) => {
@@ -2450,14 +3368,35 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
                                 <button
                                   type="button"
-                                  onClick={(e) => {
+                                  onClick={async (e) => {
                                     e.stopPropagation();
-                                    if (window.confirm(`Deseja excluir o evento "${evt.title}"?`)) {
+                                    if (evt.isQuarantine) {
+                                      try {
+                                        await fetch(`/api/imported-events/${evt.id}`, { method: 'DELETE' });
+                                        setQuarantineEvents((prev) => prev.filter((q) => q.id !== evt.id));
+                                        setQuarantineCount((prev) => Math.max(0, prev - 1));
+                                        setLiberationNotice(`Evento da quarentena "${evt.title}" excluído.`);
+                                        setTimeout(() => setLiberationNotice(''), 3500);
+                                        await fetchEventsFromApi();
+                                        if (onEventsUpdated) onEventsUpdated();
+                                      } catch (err) {
+                                        console.error('Erro ao excluir item da quarentena:', err);
+                                      }
+                                    } else {
+                                      // Filtro otimista instantâneo na UI
+                                      setLocalEvents((prev) => prev.filter((e) => e.id !== evt.id));
                                       onDeleteEvent(evt.id);
+                                      setLiberationNotice(`Evento "${evt.title}" excluído.`);
+                                      setTimeout(() => setLiberationNotice(''), 3500);
+                                      // Sincroniza logo em seguida
+                                      setTimeout(async () => {
+                                        await fetchEventsFromApi();
+                                        if (onEventsUpdated) onEventsUpdated();
+                                      }, 300);
                                     }
                                   }}
                                   className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
-                                  title="Excluir Evento"
+                                  title="Excluir este Evento"
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
                                 </button>
@@ -3317,6 +4256,121 @@ export const AdminModal: React.FC<AdminModalProps> = ({
             </div>
           )}
 
+          {/* VIEW: IMPORTAR SYMPLA (QUARENTENA & CURADORIA) */}
+          {currentView === 'importar_sympla' && (
+            <SymplaImporterView
+              categories={categories}
+              cities={cities}
+              onBackToMenu={() => {
+                fetchQuarantineCount();
+                setCurrentView('menu');
+              }}
+              onEventApproved={(newEvent) => {
+                fetchQuarantineCount();
+                if (newEvent && onEventApproved) {
+                  onEventApproved(newEvent);
+                }
+                if (onEventsUpdated) onEventsUpdated();
+              }}
+            />
+          )}
+
+          {/* VIEW: FILTRO SYMPLA (PALAVRAS IGNORADAS) */}
+          {currentView === 'filtro_sympla' && (
+            <div className="max-w-4xl mx-auto py-2 sm:py-4 space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-200">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-slate-800/80 pb-4">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setCurrentView('menu')}
+                      className="p-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors cursor-pointer"
+                    >
+                      <ArrowLeft className="w-4 h-4" />
+                    </button>
+                    <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                      <Ban className="w-5 h-5 text-rose-500" />
+                      <span>Filtro de Importação Sympla</span>
+                    </h3>
+                  </div>
+                  <p className="text-xs text-slate-400 pl-8">
+                    Evite trazer cursos, workshops, palestras e reuniões adicionando termos que serão bloqueados ao buscar ou importar eventos da Sympla.
+                  </p>
+                </div>
+              </div>
+
+              {/* Form de Adicionar Palavra */}
+              <form onSubmit={handleAddIgnoredWord} className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-4">
+                <h4 className="text-sm font-bold text-slate-300">Bloquear Nova Palavra ou Expressão</h4>
+                
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <div className="relative flex-1">
+                    <input
+                      type="text"
+                      placeholder="Ex: curso, palestra, workshop, mentoria, conferência, webinar..."
+                      value={newIgnoredWord}
+                      onChange={(e) => setNewIgnoredWord(e.target.value)}
+                      className="w-full py-2.5 px-3.5 bg-slate-950 border border-slate-800 rounded-xl text-xs sm:text-sm text-white focus:outline-none focus:ring-2 focus:ring-rose-500/50 focus:border-rose-500"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    className="py-2.5 px-5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs sm:text-sm transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-rose-600/10 active:scale-95 shrink-0"
+                  >
+                    <Plus className="w-4 h-4 text-white" />
+                    <span>Bloquear Termo</span>
+                  </button>
+                </div>
+
+                {ignoredWordFeedback && (
+                  <div className={`p-2.5 rounded-lg text-xs font-semibold ${
+                    ignoredWordFeedback.type === 'success' 
+                      ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' 
+                      : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                  }`}>
+                    {ignoredWordFeedback.msg}
+                  </div>
+                )}
+              </form>
+
+              {/* Lista de Palavras Cadastradas */}
+              <div className="space-y-3">
+                <h4 className="text-sm font-bold text-slate-300 flex items-center justify-between">
+                  <span>Termos Bloqueados ({ignoredWords.length})</span>
+                  {isLoadingIgnoredWords && <span className="text-xs text-rose-400 animate-pulse">Atualizando...</span>}
+                </h4>
+
+                {ignoredWords.length === 0 ? (
+                  <div className="text-center py-8 rounded-2xl border border-dashed border-slate-800 bg-slate-900/20">
+                    <Ban className="w-10 h-10 text-slate-600 mx-auto mb-2" />
+                    <p className="text-xs text-slate-400">Nenhum termo bloqueado no momento.</p>
+                    <p className="text-[10px] text-slate-500 mt-1">Insira palavras acima para filtrar descrições e títulos indesejados da Sympla.</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
+                    {ignoredWords.map((item) => (
+                      <div 
+                        key={item.id} 
+                        className="flex items-center justify-between p-3 rounded-xl bg-slate-900/60 border border-slate-800 hover:border-rose-500/30 transition-all group"
+                      >
+                        <span className="font-bold text-rose-300 text-xs truncate max-w-[150px]" title={item.palavra}>
+                          {item.palavra}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteIgnoredWord(item.id, item.palavra)}
+                          className="p-1 rounded-md text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
+                          title="Remover filtro"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
         </div>
 
         {/* Modal Footer */}
@@ -3346,8 +4400,12 @@ export const AdminModal: React.FC<AdminModalProps> = ({
       <EventLiberationModal
         isOpen={!!selectedEventForAnalysis}
         event={selectedEventForAnalysis}
+        categories={categories}
+        categoryItems={localCategoryItems}
         onClose={() => setSelectedEventForAnalysis(null)}
         onSaveLiberation={handleSaveLiberation}
+        onUpdateCategory={handleUpdateCategoryInAnalysis}
+        onUpdateUrl={handleUpdateUrlInAnalysis}
         onNextEvent={handleNextAnalysis}
         onPrevEvent={handlePrevAnalysis}
         hasPrev={hasPrevAnalysis}

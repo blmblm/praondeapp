@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Database, Play, Code, Table, RefreshCw, X, Check, AlertTriangle, Layers, Info } from 'lucide-react';
+import { Database, Play, Code, Table, RefreshCw, X, Check, AlertTriangle, Layers, Info, Trash2 } from 'lucide-react';
 
 interface SqlColumn {
   cid: number;
@@ -20,7 +20,7 @@ interface SqlTableInfo {
 interface SqlConsoleModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onEventModified?: () => void;
+  onEventModified?: (deletedIds?: string[]) => void;
 }
 
 export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClose, onEventModified }) => {
@@ -45,6 +45,18 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
   const [loadingSchema, setLoadingSchema] = useState<boolean>(false);
 
   const QUICK_QUERIES = [
+    {
+      label: '⏳ Quarentena (eventos_importados)',
+      sql: "SELECT id, titulo, categoria, cidade, estado, status, criado_em FROM eventos_importados WHERE status = 'quarentena' ORDER BY criado_em DESC;",
+    },
+    {
+      label: '🔍 Verificar Total na Quarentena',
+      sql: "SELECT COUNT(*) as total_quarentena FROM eventos_importados WHERE status = 'quarentena';",
+    },
+    {
+      label: '🗑️ Descartados da Quarentena',
+      sql: "SELECT id, titulo, categoria, cidade, estado, status FROM eventos_importados WHERE status = 'descartado';",
+    },
     {
       label: '📍 Tabela de Estado (estado)',
       sql: 'SELECT id, nome, estado, regiao, ativa, criado_em FROM estado ORDER BY nome COLLATE NOCASE ASC;',
@@ -80,6 +92,18 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
     {
       label: '❤️ Tabela de Favoritos (favoritos)',
       sql: 'SELECT f.id, f.evento_id, e.titulo, f.criado_em FROM favoritos f LEFT JOIN eventos e ON f.evento_id = e.id;',
+    },
+    {
+      label: '🧹 Limpar Tabela eventos_baile_nostalgia',
+      sql: 'DELETE FROM eventos_baile_nostalgia;',
+    },
+    {
+      label: '❌ Excluir Evento por ID',
+      sql: "DELETE FROM eventos WHERE id = 'user-1789409044377';",
+    },
+    {
+      label: '🧹 Limpar Eventos da Quarentena Descartados',
+      sql: "DELETE FROM eventos_importados WHERE status = 'descartado';",
     },
   ];
 
@@ -124,8 +148,8 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
       } else {
         setExecResult(data);
         fetchSchema();
-        if (targetQuery.toUpperCase().includes('EVENTOS') && onEventModified) {
-          onEventModified();
+        if (onEventModified) {
+          onEventModified(data.deletedEventIds);
         }
       }
     } catch (e: any) {
@@ -302,16 +326,18 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
                   />
                 </div>
 
-                <div className="flex items-center justify-between mt-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between mt-3 gap-2">
                   <div className="flex items-center gap-2 text-xs text-slate-400">
-                    <Info className="w-4 h-4 text-slate-500" />
-                    <span>Os comandos afetam diretamente o arquivo <strong>praondeeu.db</strong>.</span>
+                    <Info className="w-4 h-4 text-slate-500 shrink-0" />
+                    <span>
+                      Dica: para valores de texto em <code>WHERE</code>, use sempre <strong>aspas simples</strong> (ex: <code>WHERE id = 'meu-id'</code>). Comandos <code>DELETE</code> e <code>UPDATE</code> alteram diretamente o <strong>praondeeu.db</strong>.
+                    </span>
                   </div>
 
                   <button
                     onClick={() => handleExecute()}
                     disabled={loading || !query.trim()}
-                    className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-bold text-sm shadow-md shadow-amber-500/20 disabled:opacity-50 transition-all cursor-pointer"
+                    className="shrink-0 flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-bold text-sm shadow-md shadow-amber-500/20 disabled:opacity-50 transition-all cursor-pointer"
                   >
                     <Play className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
                     <span>{loading ? 'Executando...' : 'Executar Query SQL'}</span>

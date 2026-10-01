@@ -1,0 +1,22 @@
+{
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "name": "Pra onde eu vou",
+  "short_name": "Pra onde eu",
+  "description": "Aplicativo de cadastro e consulta de eventos para descobrir shows, festivais e experiências.",
+  "display": "standalone",
+  "orientation": "portrait",
+  "lang": "pt-BR",
+  "dir": "ltr",
+  "background_color": "#0b0d17",
+  "theme_color": "#f59e0b",
+  "icons": [
+    {
+      "src": "/app-icon.jpg",
+      "sizes": "192x192 512x512",
+      "type": "image/jpeg",
+      "purpose": "any"
+    }
+  ]
+}

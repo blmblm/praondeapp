@@ -58,11 +58,14 @@ export function subscribeToEvents(callback: (events: EventItem[]) => void) {
             state: data.state || '',
             latitude: data.latitude !== undefined && data.latitude !== null ? String(data.latitude) : undefined,
             longitude: data.longitude !== undefined && data.longitude !== null ? String(data.longitude) : undefined,
-            liberado: data.liberado || 'S',
+            liberado: data.liberado !== undefined && data.liberado !== null && data.liberado !== '' ? data.liberado : 'N',
             isFree: Boolean(data.isFree),
             price: data.price !== undefined && data.price !== null ? Number(data.price) : undefined,
             priceDetails: data.priceDetails || '',
             imageUrl: data.imageUrl || '',
+            mediaType: data.mediaType || (data.videoUrl ? 'video' : 'image'),
+            videoUrl: data.videoUrl || undefined,
+            url: data.url || data.videoUrl || data.imageUrl || undefined,
             organizer: data.organizer || '',
             contact: data.contact || '',
             tags: Array.isArray(data.tags) ? data.tags : typeof data.tags === 'string' ? JSON.parse(data.tags || '[]') : [],
@@ -87,35 +90,54 @@ export async function saveEventToFirestore(event: EventItem): Promise<void> {
     if (!event || !event.id) return;
     const eventRef = doc(db, EVENTS_COLL, event.id);
 
-    // Mapeamento explícito para garantir tipos compatíveis com Firestore (sem undefined)
-    const rawData = {
-      id: event.id,
-      title: event.title || '',
-      description: event.description || '',
-      category: event.category || '',
-      categoryId: event.categoryId !== undefined ? event.categoryId : null,
-      date: event.date || '',
-      time: event.time || '',
-      endDate: event.endDate || '',
-      endTime: event.endTime || '',
-      locationName: event.locationName || '',
-      address: event.address || '',
-      city: event.city || '',
-      state: event.state || '',
-      latitude: event.latitude !== undefined && event.latitude !== null && String(event.latitude).trim() !== '' ? String(event.latitude) : null,
-      longitude: event.longitude !== undefined && event.longitude !== null && String(event.longitude).trim() !== '' ? String(event.longitude) : null,
-      liberado: event.liberado || 'S',
-      isFree: Boolean(event.isFree),
-      price: event.price !== undefined && event.price !== null ? Number(event.price) : null,
-      priceDetails: event.priceDetails || '',
-      imageUrl: event.imageUrl || '',
-      organizer: event.organizer || '',
-      contact: event.contact || '',
-      tags: Array.isArray(event.tags) ? event.tags : [],
-      featured: Boolean(event.featured),
-      createdAt: event.createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
+      // Firestore proíbe estritamente documentos maiores que 1MB.
+      // Trunca strings base64 gigantes (mantidas integralmente na base SQLite local).
+      let safeVideoUrl = event.videoUrl || null;
+      if (safeVideoUrl && safeVideoUrl.length > 500000) {
+        safeVideoUrl = '[video_local_sqlite]';
+      }
+      let safeUrl = event.url || event.videoUrl || event.imageUrl || null;
+      if (safeUrl && safeUrl.length > 500000) {
+        safeUrl = safeVideoUrl === '[video_local_sqlite]' ? '[video_local_sqlite]' : null;
+      }
+      let safeImageUrl = event.imageUrl || '';
+      if (safeImageUrl && safeImageUrl.length > 500000) {
+        safeImageUrl = '';
+      }
+
+      // Mapeamento explícito para garantir tipos compatíveis com Firestore (sem undefined)
+      const rawData = {
+        id: event.id,
+        title: event.title || '',
+        description: event.description || '',
+        category: event.category || '',
+        categoryId: event.categoryId !== undefined ? event.categoryId : null,
+        date: event.date || '',
+        time: event.time || '',
+        endDate: event.endDate || '',
+        endTime: event.endTime || '',
+        locationName: event.locationName || '',
+        address: event.address || '',
+        city: event.city || '',
+        state: event.state || '',
+        latitude: event.latitude !== undefined && event.latitude !== null && String(event.latitude).trim() !== '' ? String(event.latitude) : null,
+        longitude: event.longitude !== undefined && event.longitude !== null && String(event.longitude).trim() !== '' ? String(event.longitude) : null,
+        liberado: event.liberado !== undefined && event.liberado !== null && event.liberado !== '' ? event.liberado : 'N',
+        status: event.status || 'em_analise',
+        isFree: Boolean(event.isFree),
+        price: event.price !== undefined && event.price !== null ? Number(event.price) : null,
+        priceDetails: event.priceDetails || '',
+        imageUrl: safeImageUrl,
+        mediaType: event.mediaType || (event.videoUrl ? 'video' : 'image'),
+        videoUrl: safeVideoUrl,
+        url: safeUrl,
+        organizer: event.organizer || '',
+        contact: event.contact || '',
+        tags: Array.isArray(event.tags) ? event.tags : [],
+        featured: Boolean(event.featured),
+        createdAt: event.createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
 
     const cleanData = sanitizeForFirestore(rawData);
     await setDoc(eventRef, cleanData, { merge: true });

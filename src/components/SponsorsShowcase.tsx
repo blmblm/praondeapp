@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { 
   Sparkles, 
   MapPin, 
@@ -9,7 +9,8 @@ import {
   Navigation,
   ShieldCheck,
   CheckCircle2,
-  DollarSign
+  DollarSign,
+  Layers
 } from 'lucide-react';
 import { SponsorItem } from '../data/sponsors';
 import { useUserLocation, calculateDistanceKm } from '../context/LocationContext';
@@ -28,11 +29,12 @@ export const SponsorsShowcase: React.FC<SponsorsShowcaseProps> = ({
   // Coordenadas exatas obtidas automaticamente e silenciosamente em tempo real
   const { coords, status } = useUserLocation();
 
-  // Filtrar patrocinadores ativos e liberados pela moderação, ordenar pelos 5 mais próximos
+  // Filtrar patrocinadores ativos e liberados pela moderação
   const activeSponsors = sponsors.filter(s => s.active && s.liberado !== 'N' && s.liberado !== 'pendente');
 
+  // Ordenar puramente por proximidade (distância até as coordenadas do solicitante) e limitar em exatamente 5 patrocinadores
   const sortedSponsors = [...activeSponsors].map(sponsor => {
-    let distance = 0;
+    let distance: number | undefined = undefined;
     if (coords) {
       distance = calculateDistanceKm(coords.latitude, coords.longitude, sponsor.latitude, sponsor.longitude);
     }
@@ -41,30 +43,28 @@ export const SponsorsShowcase: React.FC<SponsorsShowcaseProps> = ({
       distanceKm: distance
     };
   }).sort((a, b) => {
-    // Se a cidade bater com o filtro do usuário, ganha prioridade
-    if (userCity && a.city.toLowerCase() === userCity.toLowerCase() && b.city.toLowerCase() !== userCity.toLowerCase()) {
-      return -1;
+    const distA = typeof a.distanceKm === 'number' ? a.distanceKm : 999999;
+    const distB = typeof b.distanceKm === 'number' ? b.distanceKm : 999999;
+    if (distA !== distB) {
+      return distA - distB;
     }
-    if (userCity && b.city.toLowerCase() === userCity.toLowerCase() && a.city.toLowerCase() !== userCity.toLowerCase()) {
-      return 1;
-    }
-    return a.distanceKm - b.distanceKm;
-  }).slice(0, 5); // Exatamente os 5 mais próximos da pessoa!
+    return (a.city || '').localeCompare(b.city || '');
+  }).slice(0, 5);
 
   return (
     <section className="w-full max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 border-t border-amber-500/20">
       {/* Header com selo e explicação de valor */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4">
         <div>
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-black bg-gradient-to-r from-amber-500/20 to-orange-500/20 text-amber-300 border border-amber-500/30 mb-2 shadow-sm">
             <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
-            <span>5 DESTAQUES POR PROXIMIDADE</span>
+            <span>OS 5 PATROCINADORES MAIS PRÓXIMOS</span>
           </div>
           <h2 className="text-xl sm:text-2xl font-black text-white flex items-center gap-2">
             <span>⭐ Parceiros Recomendados na Sua Região</span>
           </h2>
           <p className="text-xs sm:text-sm text-slate-300 mt-1 max-w-2xl">
-            Adegas, restaurantes, salões, lanches e conveniências mais perto de você para curtir antes ou depois do evento.
+            Adegas, restaurantes, salões, lanches e conveniências mais perto de você.
           </p>
         </div>
 
@@ -88,9 +88,14 @@ export const SponsorsShowcase: React.FC<SponsorsShowcaseProps> = ({
         </div>
       </div>
 
-      {/* Grid com os 5 Patrocinadores Mais Próximos */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {sortedSponsors.map((sponsor, idx) => (
+      {/* Grid com os Patrocinadores Mais Próximos */}
+      {sortedSponsors.length === 0 ? (
+        <div className="p-8 text-center rounded-2xl bg-slate-900/50 border border-dashed border-slate-800">
+          <p className="text-sm font-semibold text-slate-400">Nenhum parceiro encontrado no momento.</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {sortedSponsors.map((sponsor, idx) => (
           <div
             key={sponsor.id}
             className="group relative bg-gradient-to-b from-slate-900/90 to-slate-950 border border-amber-500/25 hover:border-amber-400 rounded-2xl p-4 shadow-lg hover:shadow-amber-500/10 transition-all duration-300 flex flex-col justify-between"
@@ -190,6 +195,7 @@ export const SponsorsShowcase: React.FC<SponsorsShowcaseProps> = ({
           </button>
         </div>
       </div>
+      )}
     </section>
   );
 };

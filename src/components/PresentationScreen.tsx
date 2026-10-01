@@ -1,6 +1,5 @@
 import React from 'react';
 import { 
-  Compass, 
   PlusCircle, 
   ShieldCheck,
   PartyPopper,
@@ -19,10 +18,13 @@ interface PresentationScreenProps {
   onSearchRedirect: (term: string) => void;
   onOpenAdmin?: () => void;
   sponsors?: SponsorItem[];
+  categories?: string[];
+  cidadesList?: any[];
+  onDiscoverySearch?: (filters: { category: string; estado: string; date: string; sortByProximity: boolean }) => void;
 }
 
 // Ordem exata solicitada pelo usuário:
-// 1. Baile Nostalgia, 2. Samba e Pagode, 3. Baile Terceira Idade, 4. Forró, 5. Forró Pé de Serra, 6. Bailes, 7. Shows
+// 1. Baile Nostalgia, 2. Samba e Pagode, 3. Baile Terceira Idade, 4. Forró, 5. Forró Pé de Serra, 6. Bailes, 7. Shows, 8. Festas
 const POPULAR_VIBES = [
   { 
     label: 'Baile Nostalgia', 
@@ -37,7 +39,7 @@ const POPULAR_VIBES = [
     color: 'from-amber-500/25 via-orange-500/20 to-amber-600/30 text-amber-200 border-amber-400/50 hover:border-amber-300 shadow-amber-500/15' 
   },
   { 
-    label: 'Baile Terceira Idade', 
+    label: 'Baile Melhor Idade', 
     categoryMatch: 'Baile Terceira Idade', 
     icon: '💃', 
     color: 'from-emerald-500/25 via-teal-500/20 to-emerald-600/30 text-emerald-200 border-emerald-400/50 hover:border-emerald-300 shadow-emerald-500/15' 
@@ -66,24 +68,34 @@ const POPULAR_VIBES = [
     icon: '🎸', 
     color: 'from-rose-500/25 via-red-500/20 to-rose-600/30 text-rose-200 border-rose-400/50 hover:border-rose-300 shadow-rose-500/15' 
   },
+  { 
+    label: 'Festas', 
+    categoryMatch: 'Festas', 
+    icon: '🎉', 
+    color: 'from-pink-500/25 via-rose-500/20 to-pink-600/30 text-pink-200 border-pink-400/50 hover:border-pink-300 shadow-pink-500/15' 
+  },
+  { 
+    label: 'Teatro', 
+    categoryMatch: 'Teatro', 
+    icon: '🎭', 
+    color: 'from-cyan-500/25 via-blue-500/20 to-cyan-600/30 text-cyan-200 border-cyan-400/50 hover:border-cyan-300 shadow-cyan-500/15' 
+  },
 ];
 
-export const PresentationScreen: React.FC<PresentationScreenProps> = ({
-  onNavigate,
-  events,
-  onSelectEvent,
-  onSearchRedirect,
-  onOpenAdmin,
-  sponsors = [],
-}) => {
+export const PresentationScreen: React.FC<PresentationScreenProps> = (props) => {
+  const {
+    onNavigate,
+    onSearchRedirect,
+    onOpenAdmin,
+    sponsors = [],
+  } = props;
+
   return (
     <div className="relative min-h-[calc(100vh-4rem)] flex flex-col justify-between overflow-hidden">
       {/* Ambient warm festive lights glow */}
       <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[700px] h-[400px] bg-gradient-to-tr from-amber-500/20 via-orange-500/15 to-rose-500/20 blur-[90px] -z-10 pointer-events-none rounded-full" />
       <div className="absolute top-1/3 left-10 w-[300px] h-[300px] bg-amber-600/10 blur-[80px] -z-10 pointer-events-none rounded-full" />
       <div className="absolute top-1/4 right-10 w-[300px] h-[300px] bg-rose-600/10 blur-[80px] -z-10 pointer-events-none rounded-full" />
-
-
 
       {/* Main Hero Container */}
       <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 pt-0 sm:pt-1 pb-6 sm:pb-8 w-full text-center flex-1 flex flex-col items-center justify-start">
@@ -149,35 +161,15 @@ export const PresentationScreen: React.FC<PresentationScreenProps> = ({
         </div>
 
         {/* Primary Action Buttons */}
-        <div className="w-full max-w-2xl grid grid-cols-1 sm:grid-cols-3 gap-2.5 sm:gap-3.5 mb-4 sm:mb-5 px-2">
-          <button
-            id="btn-hero-consultar-eventos"
-            onClick={() => onNavigate('events')}
-            className="group flex items-center justify-center gap-2.5 px-4 py-3.5 rounded-xl bg-gradient-to-r from-amber-400 via-orange-500 to-rose-500 hover:from-amber-300 hover:via-orange-400 hover:to-rose-400 text-slate-950 font-extrabold text-sm sm:text-base shadow-xl shadow-amber-500/25 hover:shadow-amber-500/40 transition-all transform hover:-translate-y-0.5 active:translate-y-0 cursor-pointer min-h-[48px]"
-          >
-            <Compass className="w-5 h-5 group-hover:rotate-45 transition-transform duration-300" />
-            <span>Bora Descobrir Eventos</span>
-          </button>
-
+        <div className="w-full max-w-xs mb-4 sm:mb-5 px-2">
           <button
             id="btn-hero-cadastrar-evento"
             onClick={() => onNavigate('register')}
-            className="group flex items-center justify-center gap-2.5 px-4 py-3.5 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-amber-300 hover:text-amber-200 font-bold text-sm sm:text-base border border-amber-500/40 hover:border-amber-400 shadow-md transition-all transform hover:-translate-y-0.5 active:translate-y-0 cursor-pointer min-h-[48px]"
+            className="group w-full flex items-center justify-center gap-2.5 px-4 py-3.5 rounded-xl bg-gradient-to-r from-amber-400 via-orange-500 to-rose-500 hover:from-amber-300 hover:via-orange-400 hover:to-rose-400 text-slate-950 font-extrabold text-sm sm:text-base shadow-xl shadow-amber-500/25 hover:shadow-amber-500/40 transition-all transform hover:-translate-y-0.5 active:translate-y-0 cursor-pointer min-h-[48px]"
           >
-            <PlusCircle className="w-5 h-5 text-amber-400 group-hover:scale-110 transition-transform duration-200" />
-            <span>Divulgar Meu Evento</span>
+            <PlusCircle className="w-5 h-5 text-slate-950 group-hover:scale-110 transition-transform duration-200" />
+            <span>Divulgar Evento</span>
           </button>
-
-          {onOpenAdmin && (
-            <button
-              id="btn-hero-administracao"
-              onClick={onOpenAdmin}
-              className="group flex items-center justify-center gap-2.5 px-4 py-3.5 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-slate-200 hover:text-white font-bold text-sm sm:text-base border border-slate-700/80 hover:border-amber-400/50 shadow-md transition-all transform hover:-translate-y-0.5 active:translate-y-0 cursor-pointer min-h-[48px]"
-            >
-              <ShieldCheck className="w-5 h-5 text-amber-400 group-hover:scale-110 transition-transform duration-200" />
-              <span>Central de Gerenciamento</span>
-            </button>
-          )}
         </div>
 
         {/* Vitrine de 5 Patrocinadores Recomendados por Proximidade */}
@@ -187,6 +179,20 @@ export const PresentationScreen: React.FC<PresentationScreenProps> = ({
             onOpenRegisterSponsor={() => onNavigate('sponsor_register')}
           />
         </div>
+
+        {/* Central de Gerenciamento (Administrative discrete button before footer) */}
+        {onOpenAdmin && (
+          <div className="mt-8 mb-1 w-full flex justify-center">
+            <button
+              id="btn-hero-administracao"
+              onClick={onOpenAdmin}
+              className="group flex items-center justify-center gap-2 px-3.5 py-1.5 rounded-xl bg-slate-900/40 hover:bg-slate-900/80 text-slate-400 hover:text-amber-400 text-[11px] font-extrabold border border-slate-800/60 hover:border-amber-500/30 transition-all cursor-pointer shadow-sm backdrop-blur-md"
+            >
+              <ShieldCheck className="w-3.5 h-3.5 text-amber-500/70 group-hover:scale-110 transition-transform duration-200" />
+              <span>Central de Gerenciamento</span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Footer */}

@@ -116,26 +116,41 @@ export const LocationProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     let watchId: number | undefined;
 
-    // Se a API de Permissions for suportada, checamos se o usuário já havia autorizado previamente
-    // Se 'granted', ativa o rastreamento em segundo plano de forma 100% silenciosa e automática (sem abrir popup)
+    // Tenta autorizar e obter a localização automaticamente em segundo plano de forma silenciosa e transparente
+    try {
+      navigator.geolocation.getCurrentPosition(
+        handleSuccess,
+        (err) => {
+          // Se não autorizado pelo usuário/navegador, mantém coordenadas padrão sem travar a navegação
+          console.debug('Localização automática: utilizando coordenadas padrão', err.message);
+          setStatus('idle');
+        },
+        {
+          enableHighAccuracy: false,
+          maximumAge: 60000,
+          timeout: 6000,
+        }
+      );
+    } catch {
+      // ignore
+    }
+
+    // Se a API de Permissions for suportada, escuta mudanças de permissão silenciosamente
     if ('permissions' in navigator && navigator.permissions?.query) {
       navigator.permissions
         .query({ name: 'geolocation' as PermissionName })
         .then((perm) => {
           if (perm.state === 'granted') {
             setStatus('tracking');
-            navigator.geolocation.getCurrentPosition(handleSuccess, handleError, {
-              enableHighAccuracy: true,
-              maximumAge: 10000,
-              timeout: 15000,
-            });
-            watchId = navigator.geolocation.watchPosition(handleSuccess, handleError, {
-              enableHighAccuracy: false,
-              maximumAge: 5000,
-              timeout: 20000,
-            });
-          } else {
-            setStatus(perm.state === 'denied' ? 'denied' : 'idle');
+            try {
+              watchId = navigator.geolocation.watchPosition(handleSuccess, handleError, {
+                enableHighAccuracy: false,
+                maximumAge: 10000,
+                timeout: 20000,
+              });
+            } catch {
+              // ignore
+            }
           }
 
           perm.onchange = () => {
@@ -148,12 +163,8 @@ export const LocationProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           };
         })
         .catch(() => {
-          // Não abre popup de permissão automaticamente no carregamento da página
           setStatus('idle');
         });
-    } else {
-      // Navegador antigo ou sem API de permissões: não interrompe a abertura do app
-      setStatus('idle');
     }
 
     return () => {

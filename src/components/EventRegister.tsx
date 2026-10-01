@@ -21,9 +21,26 @@ import {
   Loader2,
   Globe,
   ExternalLink,
-  X
+  X,
+  Video,
+  Play,
+  Film,
+  Search,
+  Music,
+  PartyPopper,
+  Theater,
+  Disc,
+  Mic,
+  Flame,
+  Smile,
+  Trophy,
+  Utensils,
+  LayoutGrid,
+  ChevronDown
 } from 'lucide-react';
 import { EventItem, EventCategory, ActiveScreen, Advertiser, CategoryItem, CidadeItem } from '../types';
+import { parseVideoUrl } from '../lib/videoUtils';
+import { VideoPlayer } from './VideoPlayer';
 
 interface EventRegisterProps {
   onAddEvent: (event: EventItem) => Promise<EventItem> | void;
@@ -37,7 +54,7 @@ interface EventRegisterProps {
 }
 
 const DEFAULT_CATEGORIES: { id: number; nome: string }[] = [
-  { id: 1, nome: 'Shows' },
+  { id: 1, nome: 'Categoria' },
   { id: 2, nome: 'Samba e Pagode' },
   { id: 3, nome: 'Baile Nostalgia' },
   { id: 4, nome: 'Baile Terceira Idade' },
@@ -54,6 +71,20 @@ const BRAZILIAN_STATES = [
   'RS', 'RO', 'RR', 'SC', 'SP', 'SE', 'TO'
 ];
 
+const getCategoryIcon = (name: string): React.ComponentType<{ className?: string }> => {
+  const norm = (name || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (norm.includes('samba') || norm.includes('pagode')) return Music;
+  if (norm.includes('forro')) return Flame;
+  if (norm.includes('baile') || norm.includes('festa')) return PartyPopper;
+  if (norm.includes('nostalgia') || norm.includes('flashback') || norm.includes('disco')) return Disc;
+  if (norm.includes('show')) return Mic;
+  if (norm.includes('teatro') || norm.includes('espetaculo')) return Theater;
+  if (norm.includes('gastronomia') || norm.includes('comida') || norm.includes('feijoada')) return Utensils;
+  if (norm.includes('esporte') || norm.includes('corrida') || norm.includes('futebol')) return Trophy;
+  if (norm.includes('infantil') || norm.includes('crianca')) return Smile;
+  return Tag;
+};
+
 export const EventRegister: React.FC<EventRegisterProps> = ({
   onAddEvent,
   onNavigate,
@@ -64,17 +95,74 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
   categoryItems,
   cidadesList: propCidadesList,
 }) => {
-  const availableCategories = useMemo(() => {
+  const [categoriesList, setCategoriesList] = useState<CategoryItem[]>(() => categoryItems || []);
+  const [isLoadingCategories, setIsLoadingCategories] = useState(false);
+  const [toastNotice, setToastNotice] = useState<string | null>(null);
+
+  // Sincroniza se categoryItems vier via props
+  useEffect(() => {
     if (categoryItems && categoryItems.length > 0) {
-      return categoryItems.map(c => ({ id: c.id, nome: c.nome }));
+      setCategoriesList(categoryItems);
     }
-    return DEFAULT_CATEGORIES;
   }, [categoryItems]);
+
+  // Busca todos os itens da tabela categorias diretamente da API para garantir dados completos no grid
+  useEffect(() => {
+    let isMounted = true;
+    const fetchAllCategories = async () => {
+      try {
+        setIsLoadingCategories(true);
+        const res = await fetch('/api/categories');
+        if (res.ok) {
+          const data = await res.json();
+          if (isMounted && Array.isArray(data) && data.length > 0) {
+            setCategoriesList(data);
+          }
+        }
+      } catch (err) {
+        console.warn('Erro ao carregar itens da tabela categoria:', err);
+      } finally {
+        if (isMounted) setIsLoadingCategories(false);
+      }
+    };
+    fetchAllCategories();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  const availableCategories = useMemo(() => {
+    let raw = categoriesList && categoriesList.length > 0
+      ? categoriesList
+      : categoryItems && categoryItems.length > 0
+      ? categoryItems
+      : DEFAULT_CATEGORIES;
+
+    // Filtra opções vazias ou 'Todas'/'Categoria' para exibir categorias reais
+    const valid = raw.filter(c => {
+      const lower = (c.nome || '').trim().toLowerCase();
+      return lower && lower !== 'todas' && lower !== 'categoria';
+    });
+
+    const source = valid.length > 0 ? valid : raw;
+    return source.map(c => ({ id: c.id, nome: c.nome, descricao: (c as any).descricao }));
+  }, [categoriesList, categoryItems]);
 
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [selectedCategoryId, setSelectedCategoryId] = useState<number>(() => availableCategories[0]?.id || 1);
-  const [category, setCategory] = useState<EventCategory>(() => (availableCategories[0]?.nome as EventCategory) || 'Shows');
+  const [selectedCategoryId, setSelectedCategoryId] = useState<number>(() => availableCategories[0]?.id || 2);
+  const [category, setCategory] = useState<EventCategory>(() => (availableCategories[0]?.nome as EventCategory) || 'Samba e Pagode');
+
+  // Garante que selectedCategoryId é válido dentro das categorias disponíveis
+  useEffect(() => {
+    if (availableCategories.length > 0) {
+      const exists = availableCategories.some(c => c.id === selectedCategoryId);
+      if (!exists) {
+        setSelectedCategoryId(availableCategories[0].id);
+        setCategory(availableCategories[0].nome as EventCategory);
+      }
+    }
+  }, [availableCategories, selectedCategoryId]);
   const [date, setDate] = useState('');
   const [time, setTime] = useState('19:00');
   const [endDate, setEndDate] = useState('');
@@ -94,8 +182,11 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
   const [isFree, setIsFree] = useState(true);
   const [price, setPrice] = useState<string>('');
   const [priceDetails, setPriceDetails] = useState('');
+  const [selectedMediaType, setSelectedMediaType] = useState<'image' | 'video'>('image');
   const [imageUrl, setImageUrl] = useState('');
+  const [videoUrl, setVideoUrl] = useState('');
   const [isDragging, setIsDragging] = useState(false);
+  const [isVideoDragging, setIsVideoDragging] = useState(false);
   const [organizer, setOrganizer] = useState(
     currentAdvertiser?.name || (currentAdvertiser?.email ? currentAdvertiser.email.split('@')[0] : '')
   );
@@ -234,6 +325,46 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
     reader.readAsDataURL(file);
   };
 
+  const handleVideoFileSelect = (file: File) => {
+    const isMp4 = file.type === 'video/mp4' || file.name.toLowerCase().endsWith('.mp4');
+    if (!isMp4) {
+      setErrorMessage('Formato não permitido. Na mídia de divulgação em vídeo, aceitamos exclusivamente arquivos no formato MP4 (.mp4).');
+      return;
+    }
+    // Suporte a arquivos de até 50MB
+    if (file.size > 50 * 1024 * 1024) {
+      setErrorMessage('O arquivo de vídeo ultrapassa 50MB. Por favor, envie um arquivo MP4 menor.');
+      return;
+    }
+    setErrorMessage(null);
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      if (typeof event.target?.result === 'string') {
+        setVideoUrl(event.target.result);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleVideoUrlChange = (url: string) => {
+    const clean = url.trim();
+    if (clean) {
+      const isMp4 = clean.toLowerCase().split('?')[0].endsWith('.mp4') || clean.startsWith('data:video/mp4');
+      if (!isMp4) {
+        setErrorMessage('Apenas vídeos no formato MP4 (.mp4) são permitidos. A URL deve terminar com .mp4');
+      } else {
+        setErrorMessage(null);
+      }
+    } else {
+      setErrorMessage(null);
+    }
+    setVideoUrl(clean);
+    const parsed = parseVideoUrl(clean);
+    if (parsed?.thumbnailUrl && (!imageUrl || imageUrl === DEFAULT_FALLBACK_IMAGE)) {
+      setImageUrl(parsed.thumbnailUrl);
+    }
+  };
+
   // Update fields if currentAdvertiser changes
   useEffect(() => {
     if (currentAdvertiser) {
@@ -271,6 +402,17 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
       setErrorMessage('Por favor, informe o nome do organizador ou produtora.');
       return;
     }
+    if (selectedMediaType === 'video') {
+      if (!videoUrl.trim()) {
+        setErrorMessage('Por favor, anexe o arquivo de vídeo no formato MP4 (.mp4) do seu evento.');
+        return;
+      }
+      const isMp4 = videoUrl.startsWith('data:video/mp4') || videoUrl.startsWith('data:video/') || videoUrl.toLowerCase().split('?')[0].endsWith('.mp4');
+      if (!isMp4) {
+        setErrorMessage('Apenas arquivos de vídeo no formato MP4 (.mp4) são permitidos na mídia de divulgação.');
+        return;
+      }
+    }
 
     setIsSubmitting(true);
 
@@ -306,11 +448,15 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
       state,
       latitude: finalLat || undefined,
       longitude: finalLon || undefined,
-      liberado: 'S',
+      liberado: 'N',
+      status: 'em_analise',
       isFree,
       price: !isFree && price && !isNaN(parseFloat(price)) ? parseFloat(price) : undefined,
       priceDetails: priceDetails.trim() || (!isFree ? (price ? `R$ ${price}` : 'Consulte valores') : 'Entrada Franca'),
-      imageUrl: imageUrl.trim() || DEFAULT_FALLBACK_IMAGE,
+      imageUrl: imageUrl.trim() || (parseVideoUrl(videoUrl)?.thumbnailUrl) || DEFAULT_FALLBACK_IMAGE,
+      mediaType: selectedMediaType,
+      videoUrl: videoUrl.trim() || undefined,
+      url: videoUrl.trim() || imageUrl.trim() || undefined,
       organizer: organizer.trim(),
       contact: contact.trim() || undefined,
       tags: [resolvedCatName],
@@ -319,15 +465,17 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
     };
 
     try {
+      setToastNotice('Registro enviado para análise, prazo 48 horas para liberação');
       const savedResult = await onAddEvent(newEvent);
       if (savedResult && savedResult.id) {
         setSubmittedEvent(savedResult);
       } else {
         setSubmittedEvent(newEvent);
       }
-    } catch (saveError) {
+    } catch (saveError: any) {
       console.error('Erro ao submeter evento:', saveError);
-      setSubmittedEvent(newEvent);
+      setErrorMessage(saveError?.message || 'Erro ao publicar o evento na tabela de eventos. Por favor, tente novamente.');
+      return;
     } finally {
       setIsSubmitting(false);
       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -337,7 +485,7 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
   const handleResetForm = () => {
     setTitle('');
     setDescription('');
-    setCategory('Shows');
+    setCategory('Categoria');
     setDate('');
     setTime('19:00');
     setEndDate('');
@@ -354,7 +502,9 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
     setIsFree(true);
     setPrice('');
     setPriceDetails('');
+    setSelectedMediaType('image');
     setImageUrl('');
+    setVideoUrl('');
     setOrganizer('');
     setContact('');
     setSubmittedEvent(null);
@@ -375,16 +525,16 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
         </div>
 
         {/* Highlighted Message Requested by User */}
-        <div className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 text-sm font-bold mb-4 shadow-sm">
-          <Clock className="w-4 h-4 text-amber-400 animate-pulse" />
-          <span>Enviado para análise e liberação até 2 dias úteis.</span>
+        <div className="inline-flex items-center gap-2.5 px-5 py-3 rounded-2xl bg-amber-500/15 border-2 border-amber-500/40 text-amber-300 text-base sm:text-lg font-bold mb-4 shadow-lg shadow-amber-500/10">
+          <Clock className="w-5 h-5 text-amber-400 animate-pulse flex-shrink-0" />
+          <span>Registro enviado para análise, prazo 48 horas para liberação</span>
         </div>
 
-        <h2 className="text-2xl sm:text-3xl font-extrabold text-white mb-3">
-          Evento Enviado com Sucesso!
+        <h2 className="text-2xl sm:text-3xl font-extrabold text-white mb-2">
+          Evento Cadastrado na Tabela de Eventos!
         </h2>
         <p className="text-slate-300 text-sm sm:text-base max-w-lg mx-auto mb-8">
-          O evento <strong className="text-amber-400">"{submittedEvent.title}"</strong> foi enviado para análise e liberação em até 2 dias úteis.
+          O evento <strong className="text-amber-400">"{submittedEvent.title}"</strong> foi gravado no cadastro de eventos e está com o status <strong className="text-amber-300">registro enviado para análise, prazo 48 horas para liberação</strong>.
         </p>
 
         {/* Card preview do evento recém-publicado */}
@@ -608,6 +758,22 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
         </div>
       )}
 
+      {toastNotice && (
+        <div className="mb-6 p-4 rounded-2xl bg-amber-500/15 border-2 border-amber-500/40 text-amber-300 text-sm font-semibold flex items-center justify-between gap-3 shadow-lg shadow-amber-500/10">
+          <div className="flex items-center gap-2.5">
+            <Clock className="w-5 h-5 text-amber-400 animate-pulse flex-shrink-0" />
+            <span>{toastNotice}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setToastNotice(null)}
+            className="text-amber-400 hover:text-white p-1 rounded-lg hover:bg-amber-500/20"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* Formulário de Cadastro Centralizado (Sem pré-visualização ao entrar na tela) */}
       <div className="max-w-3xl mx-auto">
         <form onSubmit={handleSubmit} className="space-y-6">
@@ -632,29 +798,43 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
               />
             </div>
 
+            {/* Categoria do Evento - Campo de seleção idêntico à tela de Consulta Eventos */}
             <div>
               <label className="block text-xs font-semibold text-slate-300 mb-1.5">
                 Categoria do Evento *
               </label>
-              <select
-                id="select-register-category"
-                value={selectedCategoryId}
-                onChange={(e) => {
-                  const id = Number(e.target.value);
-                  setSelectedCategoryId(id);
-                  const found = availableCategories.find((c) => c.id === id);
-                  if (found) {
-                    setCategory(found.nome as EventCategory);
-                  }
-                }}
-                className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white focus:outline-none focus:ring-2 focus:ring-amber-500/50 cursor-pointer"
-              >
-                {availableCategories.map((cat) => (
-                  <option key={cat.id} value={cat.id}>
-                    {cat.nome}
-                  </option>
-                ))}
-              </select>
+              <div className="relative">
+                <select
+                  id="select-event-category"
+                  value={category}
+                  onChange={(e) => {
+                    const chosen = e.target.value;
+                    const matched = availableCategories.find((c) => c.nome === chosen);
+                    if (matched) {
+                      setSelectedCategoryId(matched.id);
+                      setCategory(matched.nome as EventCategory);
+                    } else {
+                      setCategory(chosen as EventCategory);
+                    }
+                  }}
+                  className="w-full py-3 pl-3.5 pr-9 bg-slate-900 border border-slate-800 rounded-xl text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500/60 appearance-none cursor-pointer"
+                >
+                  {isLoadingCategories ? (
+                    <option value="" disabled className="bg-slate-900 text-white">Carregando categorias...</option>
+                  ) : availableCategories.length === 0 ? (
+                    <option value="" disabled className="bg-slate-900 text-white">Nenhuma categoria cadastrada</option>
+                  ) : (
+                    availableCategories.map((cat) => (
+                      <option key={cat.id || cat.nome} value={cat.nome} className="bg-slate-900 text-white">
+                        {cat.nome}
+                      </option>
+                    ))
+                  )}
+                </select>
+                <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3 text-slate-400">
+                  <ChevronDown className="w-4 h-4" />
+                </div>
+              </div>
             </div>
 
             <div>
@@ -957,137 +1137,310 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
             )}
           </div>
 
-          {/* Section: Image & Presets */}
+          {/* Section: Image or Video Media */}
           <div className="p-5 sm:p-6 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-4">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between flex-wrap gap-2">
               <h3 className="text-sm font-bold uppercase tracking-wider text-amber-400 flex items-center gap-2">
-                <ImageIcon className="w-4 h-4" />
-                Cartaz do Evento (Formato Vertical)
+                <Film className="w-4 h-4" />
+                Mídia de Divulgação (Imagem ou Vídeo)
               </h3>
-              <span className="text-[11px] font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded-md">
-                Proporção Vertical (3:4 / 4:5)
+              <span className="text-[11px] font-semibold text-amber-400 bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded-md">
+                Escolha o formato ideal
               </span>
             </div>
 
-            {/* File Upload Box (Drag and Drop + Click) */}
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-2">
-                Envie o cartaz do seu evento no formato vertical ou informe a URL da imagem:
-              </label>
-
-              <div
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  setIsDragging(true);
+            {/* Segmented Selector: Imagem vs Vídeo */}
+            <div className="flex rounded-xl bg-slate-950 p-1 border border-slate-800">
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedMediaType('image');
+                  setVideoUrl('');
                 }}
-                onDragLeave={() => setIsDragging(false)}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  setIsDragging(false);
-                  if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-                    handleFileSelect(e.dataTransfer.files[0]);
-                  }
-                }}
-                className={`relative border-2 border-dashed rounded-2xl p-6 text-center transition-all ${
-                  isDragging
-                    ? 'border-amber-400 bg-amber-500/10'
-                    : 'border-slate-700/80 hover:border-slate-600 bg-slate-950/60'
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-lg text-xs sm:text-sm font-semibold transition-all cursor-pointer ${
+                  selectedMediaType === 'image'
+                    ? 'bg-amber-500 text-slate-950 shadow-md font-bold'
+                    : 'text-slate-400 hover:text-white'
                 }`}
               >
-                <input
-                  id="input-file-event-image"
-                  type="file"
-                  accept="image/*"
-                  onChange={(e) => {
-                    if (e.target.files && e.target.files[0]) {
-                      handleFileSelect(e.target.files[0]);
+                <ImageIcon className="w-4 h-4" />
+                <span>Cartaz / Flyer Vertical</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedMediaType('video');
+                  setImageUrl('');
+                }}
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-lg text-xs sm:text-sm font-semibold transition-all cursor-pointer ${
+                  selectedMediaType === 'video'
+                    ? 'bg-amber-500 text-slate-950 shadow-md font-bold'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Video className="w-4 h-4" />
+                <span>Vídeo de Divulgação (MP4)</span>
+              </button>
+            </div>
+
+            {/* ABA 1: IMAGEM / CARTAZ VERTICAL */}
+            {selectedMediaType === 'image' && (
+              <div className="space-y-4 animate-fadeIn">
+                <p className="text-xs text-slate-300">
+                  Envie o cartaz do seu evento no formato vertical ou informe a URL direta de uma imagem na internet:
+                </p>
+
+                {/* File Upload Box (Drag and Drop + Click) */}
+                <div
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setIsDragging(true);
+                  }}
+                  onDragLeave={() => setIsDragging(false)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setIsDragging(false);
+                    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                      handleFileSelect(e.dataTransfer.files[0]);
                     }
                   }}
-                  className="hidden"
-                />
+                  className={`relative border-2 border-dashed rounded-2xl p-6 text-center transition-all ${
+                    isDragging
+                      ? 'border-amber-400 bg-amber-500/10'
+                      : 'border-slate-700/80 hover:border-slate-600 bg-slate-950/60'
+                  }`}
+                >
+                  <input
+                    id="input-file-event-image"
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => {
+                      if (e.target.files && e.target.files[0]) {
+                        handleFileSelect(e.target.files[0]);
+                      }
+                    }}
+                    className="hidden"
+                  />
 
-                {imageUrl ? (
-                  <div className="flex flex-col sm:flex-row items-center justify-center gap-6 p-2">
-                    {/* Visualizador Vertical do Cartaz */}
-                    <div className="relative w-40 sm:w-48 aspect-[3/4] rounded-2xl overflow-hidden border-2 border-amber-500/50 shadow-2xl bg-slate-950 flex-shrink-0 ring-1 ring-amber-500/30 group">
-                      <img
-                        src={imageUrl}
-                        alt="Cartaz vertical selecionado"
-                        className="w-full h-full object-cover sm:object-contain bg-slate-950"
-                        referrerPolicy="no-referrer"
-                      />
-                      <div className="absolute top-2 left-2 pointer-events-none">
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-950/90 text-emerald-400 border border-emerald-500/30 shadow backdrop-blur-sm">
-                          Cartaz Vertical
+                  {imageUrl && !videoUrl ? (
+                    <div className="flex flex-col sm:row items-center justify-center gap-6 p-2">
+                      {/* Visualizador Vertical do Cartaz */}
+                      <div className="relative w-40 sm:w-48 aspect-[3/4] rounded-2xl overflow-hidden border-2 border-amber-500/50 shadow-2xl bg-slate-950 flex-shrink-0 ring-1 ring-amber-500/30 group">
+                        <img
+                          src={imageUrl}
+                          alt="Cartaz vertical selecionado"
+                          className="w-full h-full object-cover sm:object-contain bg-slate-950"
+                          referrerPolicy="no-referrer"
+                        />
+                        <div className="absolute top-2 left-2 pointer-events-none">
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-950/90 text-emerald-400 border border-emerald-500/30 shadow backdrop-blur-sm">
+                            Cartaz Vertical
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex flex-col sm:items-start gap-2.5 text-center sm:text-left">
+                        <span className="text-xs font-semibold text-emerald-400 flex items-center gap-1.5 justify-center sm:justify-start">
+                          <CheckCircle2 className="w-4 h-4" />
+                          Cartaz anexado com sucesso
                         </span>
+                        <p className="text-xs text-slate-300 font-medium">
+                          Visualização vertical ativa (ideal para cartazes e folders)
+                        </p>
+                        <p className="text-[11px] text-slate-400 max-w-xs leading-relaxed">
+                          Este cartaz será apresentado verticalmente na página inicial, na busca de eventos e no modal de detalhes completos.
+                        </p>
+                        <div className="flex gap-2 pt-1">
+                          <label
+                            htmlFor="input-file-event-image"
+                            className="cursor-pointer px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg transition-colors inline-block"
+                          >
+                            Trocar foto
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => setImageUrl('')}
+                            className="px-3 py-1.5 bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            Remover
+                          </button>
+                        </div>
                       </div>
                     </div>
-                    <div className="flex flex-col sm:items-start gap-2.5 text-center sm:text-left">
-                      <span className="text-xs font-semibold text-emerald-400 flex items-center gap-1.5 justify-center sm:justify-start">
-                        <CheckCircle2 className="w-4 h-4" />
-                        Cartaz anexado com sucesso
+                  ) : (
+                    <label
+                      htmlFor="input-file-event-image"
+                      className="cursor-pointer flex flex-col items-center justify-center gap-2.5 py-4"
+                    >
+                      <div className="w-14 h-14 rounded-2xl bg-slate-800 flex items-center justify-center text-amber-400 shadow-md">
+                        <Upload className="w-7 h-7" />
+                      </div>
+                      <span className="text-sm font-semibold text-white">
+                        Clique para selecionar o cartaz ou arraste o arquivo aqui
                       </span>
-                      <p className="text-xs text-slate-300 font-medium">
-                        Visualização vertical ativa (ideal para cartazes e folders)
-                      </p>
-                      <p className="text-[11px] text-slate-400 max-w-xs leading-relaxed">
-                        Este cartaz será apresentado verticalmente na página inicial, na busca de eventos e no modal de detalhes completos.
-                      </p>
-                      <div className="flex gap-2 pt-1">
-                        <label
-                          htmlFor="input-file-event-image"
-                          className="cursor-pointer px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg transition-colors inline-block"
+                      <span className="text-xs text-amber-300/80 font-medium">
+                        Recomendado formato vertical (proporção 3:4 ou 4:5 — padrão cartaz/flyer)
+                      </span>
+                      <span className="text-[11px] text-slate-500">
+                        Formatos suportados: JPG, PNG, WEBP
+                      </span>
+                    </label>
+                  )}
+                </div>
+
+                {/* URL input alternative */}
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1.5 flex items-center gap-1.5">
+                    <Link className="w-3.5 h-3.5" />
+                    <span>Ou digite a URL da imagem da internet:</span>
+                  </label>
+                  <input
+                    id="input-url-event-image"
+                    type="url"
+                    value={imageUrl}
+                    onChange={(e) => setImageUrl(e.target.value)}
+                    placeholder="https://exemplo.com/cartaz-evento.jpg"
+                    className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* ABA 2: VÍDEO DE DIVULGAÇÃO (APENAS MP4) */}
+            {selectedMediaType === 'video' && (
+              <div className="space-y-4 animate-fadeIn">
+                {/* Dica exclusiva para formato MP4 */}
+                <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-200 flex items-start gap-2.5">
+                  <Video className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-bold text-amber-300">Vídeo de Divulgação (Apenas MP4):</span>
+                    <p className="text-slate-300 mt-1">
+                      Para garantir máxima compatibilidade e reprodução automática, a mídia em vídeo aceita <strong>exclusivamente arquivos no formato MP4 (.mp4)</strong>.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Caixa de Upload do Arquivo MP4 (Drag and Drop + Clique) */}
+                <div
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setIsVideoDragging(true);
+                  }}
+                  onDragLeave={() => setIsVideoDragging(false)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setIsVideoDragging(false);
+                    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                      handleVideoFileSelect(e.dataTransfer.files[0]);
+                    }
+                  }}
+                  className={`relative border-2 border-dashed rounded-2xl p-6 text-center transition-all ${
+                    isVideoDragging
+                      ? 'border-amber-400 bg-amber-500/10'
+                      : 'border-slate-700/80 hover:border-slate-600 bg-slate-950/60'
+                  }`}
+                >
+                  <input
+                    id="input-file-event-video"
+                    type="file"
+                    accept="video/mp4,.mp4"
+                    onChange={(e) => {
+                      if (e.target.files && e.target.files[0]) {
+                        handleVideoFileSelect(e.target.files[0]);
+                      }
+                    }}
+                    className="hidden"
+                  />
+
+                  {videoUrl ? (
+                    <div className="flex flex-col items-center justify-center gap-4 p-2">
+                      <div className="relative w-full max-w-md aspect-video rounded-2xl overflow-hidden border-2 border-amber-500/50 shadow-2xl bg-black flex-shrink-0 ring-1 ring-amber-500/30">
+                        <video
+                          key={videoUrl}
+                          src={videoUrl}
+                          poster={imageUrl || undefined}
+                          controls
+                          playsInline
+                          preload="metadata"
+                          className="w-full h-full object-contain bg-black"
                         >
-                          Trocar foto
-                        </label>
-                        <button
-                          type="button"
-                          onClick={() => setImageUrl('')}
-                          className="px-3 py-1.5 bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          Remover
-                        </button>
+                          Seu navegador não suporta reprodução de vídeo MP4.
+                        </video>
+                        <div className="absolute top-2 left-2 pointer-events-none">
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-950/90 text-amber-400 border border-amber-500/30 shadow backdrop-blur-sm">
+                            Vídeo MP4 Carregado
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col items-center gap-2 text-center">
+                        <span className="text-xs font-semibold text-emerald-400 flex items-center gap-1.5 justify-center">
+                          <CheckCircle2 className="w-4 h-4" />
+                          Vídeo MP4 anexado com sucesso
+                        </span>
+                        <p className="text-[11px] text-slate-400">
+                          Este vídeo será exibido diretamente nos detalhes do evento e nas consultas.
+                        </p>
+                        <div className="flex gap-2 pt-1">
+                          <label
+                            htmlFor="input-file-event-video"
+                            className="cursor-pointer px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg transition-colors inline-block"
+                          >
+                            Trocar vídeo MP4
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => setVideoUrl('')}
+                            className="px-3 py-1.5 bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            Remover vídeo
+                          </button>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ) : (
-                  <label
-                    htmlFor="input-file-event-image"
-                    className="cursor-pointer flex flex-col items-center justify-center gap-2.5 py-4"
-                  >
-                    <div className="w-14 h-14 rounded-2xl bg-slate-800 flex items-center justify-center text-amber-400 shadow-md">
-                      <Upload className="w-7 h-7" />
-                    </div>
-                    <span className="text-sm font-semibold text-white">
-                      Clique para selecionar o cartaz ou arraste o arquivo aqui
-                    </span>
-                    <span className="text-xs text-amber-300/80 font-medium">
-                      Recomendado formato vertical (proporção 3:4 ou 4:5 — padrão cartaz/flyer)
-                    </span>
-                    <span className="text-[11px] text-slate-500">
-                      Formatos suportados: JPG, PNG, WEBP
-                    </span>
-                  </label>
-                )}
-              </div>
-            </div>
+                  ) : (
+                    <label
+                      htmlFor="input-file-event-video"
+                      className="cursor-pointer flex flex-col items-center justify-center gap-2.5 py-5"
+                    >
+                      <div className="w-14 h-14 rounded-2xl bg-slate-800 flex items-center justify-center text-amber-400 shadow-md">
+                        <Video className="w-7 h-7" />
+                      </div>
+                      <span className="text-sm font-semibold text-white">
+                        Clique para selecionar o arquivo MP4 ou arraste aqui
+                      </span>
+                      <span className="text-xs text-amber-300/90 font-medium">
+                        Formato aceito: Exclusivamente arquivo de vídeo MP4 (.mp4)
+                      </span>
+                      <span className="text-[11px] text-slate-500">
+                        Até 50MB (ideal para vídeos gravados no celular ou reels exportados em .mp4)
+                      </span>
+                    </label>
+                  )}
+                </div>
 
-            {/* URL input alternative */}
-            <div>
-              <label className="block text-xs font-semibold text-slate-400 mb-1.5 flex items-center gap-1.5">
-                <Link className="w-3.5 h-3.5" />
-                <span>Ou digite a URL da imagem da internet:</span>
-              </label>
-              <input
-                id="input-url-event-image"
-                type="url"
-                value={imageUrl}
-                onChange={(e) => setImageUrl(e.target.value)}
-                placeholder="https://exemplo.com/cartaz-evento.jpg"
-                className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
-              />
-            </div>
+                {/* Opção alternativa: URL direta para arquivo .mp4 */}
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1.5 flex items-center gap-1.5">
+                    <Link className="w-3.5 h-3.5" />
+                    <span>Ou informe a URL direta de um arquivo .mp4 da internet:</span>
+                  </label>
+                  <input
+                    id="input-url-event-video"
+                    type="url"
+                    value={videoUrl.startsWith('data:video/') ? '' : videoUrl}
+                    onChange={(e) => handleVideoUrlChange(e.target.value)}
+                    placeholder="https://exemplo.com/meu-video.mp4"
+                    className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
+                  />
+                  <p className="text-[11px] text-slate-500 mt-1">
+                    * A URL deve apontar diretamente para um arquivo de vídeo .mp4
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Section: Organizer */}
@@ -1143,10 +1496,14 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
               ) : (
                 <>
                   <PlusCircle className="w-5 h-5" />
-                  <span>Publicar Evento no "Pra onde eu vou"</span>
+                  <span>Publicar Evento</span>
                 </>
               )}
             </button>
+            <p className="text-center text-xs text-amber-300/90 mt-3 flex items-center justify-center gap-1.5">
+              <Clock className="w-3.5 h-3.5 text-amber-400" />
+              <span>Registro enviado para análise, prazo 48 horas para liberação</span>
+            </p>
           </div>
         </form>
       </div>
