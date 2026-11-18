@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Database, Play, Code, Table, RefreshCw, X, Check, AlertTriangle, Layers, Info, Trash2 } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Database, Play, Code, Table, RefreshCw, X, Check, AlertTriangle, Layers, Info, Trash2, Download, Upload } from 'lucide-react';
 
 interface SqlColumn {
   cid: number;
@@ -43,6 +43,9 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
     tables: SqlTableInfo[];
   } | null>(null);
   const [loadingSchema, setLoadingSchema] = useState<boolean>(false);
+  const [backupBusy, setBackupBusy] = useState<'export' | 'import' | null>(null);
+  const [backupStatus, setBackupStatus] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const backupFileRef = useRef<HTMLInputElement | null>(null);
 
   const QUICK_QUERIES = [
     {
@@ -167,6 +170,63 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
     }
   };
 
+  const handleExportBackup = async () => {
+    try {
+      setBackupBusy('export');
+      setBackupStatus(null);
+      const res = await fetch('/api/admin/export-backup');
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Erro ao gerar backup.');
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `pra-onde-eu-vou-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setBackupStatus({ type: 'ok', text: 'Backup baixado com sucesso! Guarde este arquivo para restaurar no outro banco.' });
+    } catch (err: any) {
+      setBackupStatus({ type: 'err', text: err.message || 'Falha ao exportar backup.' });
+    } finally {
+      setBackupBusy(null);
+    }
+  };
+
+  const handleImportBackupFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      setBackupBusy('import');
+      setBackupStatus(null);
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      const res = await fetch('/api/admin/import-backup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(parsed),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Falha ao restaurar backup.');
+      }
+      setBackupStatus({
+        type: 'ok',
+        text: `Backup restaurado! ${data.totalInserted ?? 0} registro(s) novo(s) importado(s).`,
+      });
+      await fetchSchema();
+      if (onEventModified) onEventModified();
+    } catch (err: any) {
+      setBackupStatus({ type: 'err', text: err.message || 'Arquivo inválido ou erro ao importar backup.' });
+    } finally {
+      setBackupBusy(null);
+    }
+  };
+
   if (!isOpen) return null;
 
   return (
@@ -184,7 +244,7 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
                 <h3 className="text-lg font-bold text-white tracking-tight">Central de Gerenciamento - Console SQL</h3>
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-semibold">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  Cloud SQL (PostgreSQL)
+                  PostgreSQL (Conectado)
                 </span>
                 <span className="hidden sm:inline-block text-xs text-amber-400/90 font-medium">
                   (Acesso Master)
@@ -250,13 +310,62 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           {activeTab === 'console' ? (
             <>
+              {/* Backup & Migration Bar */}
+              <div className="p-3.5 bg-emerald-500/10 border border-emerald-500/30 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-bold text-emerald-300 uppercase tracking-wider">
+                    Backup &amp; Migração de Dados (Neon ↔ Cloud SQL)
+                  </p>
+                  <p className="text-xs text-slate-300 mt-0.5">
+                    Exporte todos os eventos, categorias, cidades, anunciantes e mídias em um arquivo <code>.json</code> e importe no novo banco com 1 clique.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <input
+                    ref={backupFileRef}
+                    type="file"
+                    accept="application/json,.json"
+                    onChange={handleImportBackupFile}
+                    className="hidden"
+                  />
+                  <button
+                    onClick={handleExportBackup}
+                    disabled={backupBusy !== null}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs transition-colors disabled:opacity-50 cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>{backupBusy === 'export' ? 'Gerando...' : 'Exportar Backup'}</span>
+                  </button>
+                  <button
+                    onClick={() => backupFileRef.current?.click()}
+                    disabled={backupBusy !== null}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/40 font-bold text-xs transition-colors disabled:opacity-50 cursor-pointer"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>{backupBusy === 'import' ? 'Importando...' : 'Restaurar Backup'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {backupStatus && (
+                <div
+                  className={`px-4 py-2.5 rounded-xl text-xs font-medium border ${
+                    backupStatus.type === 'ok'
+                      ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-200'
+                      : 'bg-rose-500/15 border-rose-500/40 text-rose-200'
+                  }`}
+                >
+                  {backupStatus.text}
+                </div>
+              )}
+
               {/* Quick Table Access Bar */}
               {schemaInfo?.tables && schemaInfo.tables.length > 0 && (
                 <div className="p-3 bg-slate-950/60 border border-slate-800 rounded-xl">
                   <div className="flex items-center justify-between mb-2">
                     <label className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
                       <Table className="w-3.5 h-3.5 text-amber-400" />
-                      Tabelas do Cloud SQL (Clique para abrir):
+                      Tabelas do Banco (Clique para abrir):
                     </label>
                     <span className="text-[11px] text-slate-400">
                       {schemaInfo.tables.length} tabelas encontradas

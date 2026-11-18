@@ -114,10 +114,13 @@ import {
 } from './src/db/sponsorsPixRepo.ts';
 import {
   executePostgresSqlQuery,
+  exportFullDatabaseBackupPg,
   getCleanupStatusPg,
   getPostgresSchemaInfo,
+  importFullDatabaseBackupPg,
   runPostgresCleanup,
 } from './src/db/adminSqlRepo.ts';
+import { ensureDatabaseSchema } from './src/db/ensureSchema.ts';
 import {
   getMediaFilePg,
   getVideoMimeType,
@@ -137,8 +140,8 @@ const ai = new GoogleGenAI({
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 app.use(securityFirewall);
 
 const geocodeRateLimiter = createRateLimiter({
@@ -3112,9 +3115,38 @@ app.all(['/api/admin/sync-from-firestore', '/api/events/reload-from-firestore'],
   }
 });
 
+app.get('/api/admin/export-backup', async (_req, res) => {
+  try {
+    const backup = await exportFullDatabaseBackupPg();
+    const dateStamp = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="pra-onde-eu-vou-backup-${dateStamp}.json"`
+    );
+    res.send(JSON.stringify(backup));
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message || 'Erro ao exportar backup.' });
+  }
+});
+
+app.post('/api/admin/import-backup', async (req, res) => {
+  try {
+    const result = await importFullDatabaseBackupPg(req.body);
+    res.json(result);
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message || 'Erro ao importar backup.' });
+  }
+});
+
 // ==================== VITE MIDDLEWARE & SERVER START ====================
 
 async function startServer() {
+  try {
+    await ensureDatabaseSchema();
+  } catch (schemaErr) {
+    console.error('[Pra onde eu vou] Aviso na verificação inicial do banco PostgreSQL:', schemaErr);
+  }
   const runningCompiledDist =
     (typeof __filename !== 'undefined' && __filename.includes(`${path.sep}dist${path.sep}`)) ||
     (process.argv[1] && process.argv[1].includes(`${path.sep}dist${path.sep}`));

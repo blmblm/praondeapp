@@ -2,6 +2,7 @@ import { desc, eq, inArray, lt, sql } from 'drizzle-orm';
 import { db, pool } from './index.ts';
 import { eventos, eventosImportados, favoritos, historicoLimpezas } from './schema.ts';
 import { cleanupOrphanedMediaFilesPg } from './mediaRepo.ts';
+import { ensureDatabaseSchema } from './ensureSchema.ts';
 
 export interface SqlColumnInfo {
   cid: number;
@@ -90,7 +91,7 @@ export async function getPostgresSchemaInfo(): Promise<SqlTableInfo[]> {
     return result;
   } catch (error) {
     console.error('Database query failed in getPostgresSchemaInfo:', error);
-    throw new Error('Falha ao consultar schema do Cloud SQL PostgreSQL.', { cause: error });
+    throw new Error('Falha ao consultar schema do PostgreSQL.', { cause: error });
   }
 }
 
@@ -110,7 +111,7 @@ export async function executePostgresSqlQuery(rawQuery: string) {
     return {
       type: 'COMMAND',
       changes: 0,
-      message: 'Comando executado no Cloud SQL PostgreSQL.',
+      message: 'Comando executado no PostgreSQL.',
     };
   }
 
@@ -291,3 +292,152 @@ export async function getCleanupStatusPg() {
     throw new Error('Falha ao consultar histórico de limpezas.', { cause: error });
   }
 }
+
+const BACKUP_TABLE_ORDER = [
+  'estado',
+  'categorias',
+  'cidades',
+  'supervisor',
+  'anunciantes',
+  'users',
+  'palavras_ignoradas',
+  'configuracoes_pix',
+  'patrocinadores',
+  'pagamentos_pix',
+  'eventos',
+  'eventos_importados',
+  'favoritos',
+  'estatisticas_consultas',
+  'historico_limpezas',
+  'registro_eventos_deletados',
+  'sync_metadata',
+  'media_files',
+] as const;
+
+const SERIAL_ID_TABLES = new Set<string>([
+  'estado',
+  'categorias',
+  'cidades',
+  'supervisor',
+  'users',
+  'palavras_ignoradas',
+  'favoritos',
+  'estatisticas_consultas',
+  'historico_limpezas',
+]);
+
+export async function exportFullDatabaseBackupPg() {
+  await ensureDatabaseSchema();
+  const tablesData: Record<string, any[]> = {};
+  const counts: Record<string, number> = {};
+
+  for (const tableName of BACKUP_TABLE_ORDER) {
+    try {
+      const res = await pool.query(`SELECT * FROM "${tableName}";`);
+      const rows = res.rows.map((row) => {
+        if (tableName === 'media_files' && row.data && Buffer.isBuffer(row.data)) {
+          const { data, ...rest } = row;
+          return {
+            ...rest,
+            data_base64: data.toString('base64'),
+          };
+        }
+        return row;
+      });
+      tablesData[tableName] = rows;
+      counts[tableName] = rows.length;
+    } catch (err) {
+      console.warn(`[Backup Export] Aviso ao ler tabela ${tableName}:`, err);
+      tablesData[tableName] = [];
+      counts[tableName] = 0;
+    }
+  }
+
+  return {
+    version: 1,
+    app: 'pra-onde-eu-vou',
+    engine: 'postgresql',
+    exportedAt: new Date().toISOString(),
+    counts,
+    tables: tablesData,
+  };
+}
+
+export async function importFullDatabaseBackupPg(payload: any) {
+  await ensureDatabaseSchema();
+  const tablesObj = payload?.tables && typeof payload.tables === 'object' ? payload.tables : null;
+  if (!tablesObj) {
+    throw new Error('Arquivo de backup inválido: campo "tables" não encontrado.');
+  }
+
+  const insertedCounts: Record<string, number> = {};
+  let totalInserted = 0;
+  const client = await pool.connect();
+
+  try {
+    for (const tableName of BACKUP_TABLE_ORDER) {
+      const rawRows = Array.isArray(tablesObj[tableName]) ? tablesObj[tableName] : [];
+      insertedCounts[tableName] = 0;
+      if (rawRows.length === 0) continue;
+
+      const colsRes = await client.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1;`,
+        [tableName]
+      );
+      const validCols = new Set(colsRes.rows.map((r) => r.column_name));
+
+      for (const rawRow of rawRows) {
+        if (!rawRow || typeof rawRow !== 'object') continue;
+
+        const row: Record<string, any> = { ...rawRow };
+        if (tableName === 'media_files' && typeof row.data_base64 === 'string') {
+          row.data = Buffer.from(row.data_base64, 'base64');
+          delete row.data_base64;
+        }
+
+        const colNames = Object.keys(row).filter((col) => validCols.has(col));
+        if (colNames.length === 0) continue;
+
+        const quotedCols = colNames.map((c) => `"${c}"`).join(', ');
+        const placeholders = colNames.map((_, i) => `$${i + 1}`).join(', ');
+        const values = colNames.map((c) => row[c]);
+
+        try {
+          const insertRes = await client.query(
+            `INSERT INTO "${tableName}" (${quotedCols}) VALUES (${placeholders}) ON CONFLICT DO NOTHING;`,
+            values
+          );
+          const added = insertRes.rowCount ?? 0;
+          insertedCounts[tableName] += added;
+          totalInserted += added;
+        } catch (rowErr) {
+          console.warn(`[Backup Import] Registro ignorado em ${tableName}:`, rowErr);
+        }
+      }
+
+      if (SERIAL_ID_TABLES.has(tableName)) {
+        try {
+          await client.query(`
+            SELECT setval(
+              pg_get_serial_sequence($1, 'id'),
+              COALESCE((SELECT MAX(id) FROM "${tableName}"), 1),
+              (SELECT COUNT(*) > 0 FROM "${tableName}")
+            );
+          `, [tableName]);
+        } catch (seqErr) {
+          console.warn(`[Backup Import] Aviso ao ajustar sequência em ${tableName}:`, seqErr);
+        }
+      }
+    }
+  } finally {
+    client.release();
+  }
+
+  return {
+    success: true,
+    totalInserted,
+    insertedCounts,
+    importedAt: new Date().toISOString(),
+  };
+}
+
