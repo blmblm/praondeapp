@@ -441,3 +441,27 @@ export async function importFullDatabaseBackupPg(payload: any) {
   };
 }
 
+export async function saveRestoredMediaFilePg(params: {
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  data: Buffer;
+  createdAt?: string | null;
+}) {
+  await ensureDatabaseSchema();
+  const res = await pool.query(
+    `INSERT INTO media_files (filename, mime_type, size_bytes, data, created_at)
+     VALUES ($1, $2, $3, $4, COALESCE($5::timestamp, NOW()))
+     ON CONFLICT (filename) DO NOTHING;`,
+    [
+      params.filename,
+      params.mimeType || 'video/mp4',
+      params.sizeBytes || params.data.length,
+      params.data,
+      params.createdAt || null,
+    ]
+  );
+  return (res.rowCount ?? 0) > 0;
+}
+
+

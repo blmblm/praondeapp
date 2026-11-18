@@ -119,6 +119,7 @@ import {
   getPostgresSchemaInfo,
   importFullDatabaseBackupPg,
   runPostgresCleanup,
+  saveRestoredMediaFilePg,
 } from './src/db/adminSqlRepo.ts';
 import { ensureDatabaseSchema } from './src/db/ensureSchema.ts';
 import {
@@ -3018,10 +3019,11 @@ app.post('/api/admin/verify-password', async (req, res) => {
 
 app.get('/api/sql/schema', async (_req, res) => {
   try {
+    await ensureDatabaseSchema();
     const tables = await getPostgresSchemaInfo();
     res.json({
-      databaseName: process.env.SQL_DB_NAME || 'Cloud SQL PostgreSQL',
-      engine: 'Cloud SQL PostgreSQL (Drizzle ORM)',
+      databaseName: process.env.SQL_DB_NAME || (process.env.DATABASE_URL ? 'Neon PostgreSQL' : 'PostgreSQL'),
+      engine: 'PostgreSQL (Drizzle ORM)',
       tables,
     });
   } catch (error: any) {
@@ -3156,6 +3158,54 @@ app.post('/api/admin/import-backup', async (req, res) => {
     res.json(result);
   } catch (err: any) {
     res.status(400).json({ success: false, error: err.message || 'Erro ao importar backup.' });
+  }
+});
+
+app.post('/api/admin/import-media-chunk', async (req, res) => {
+  try {
+    const {
+      uploadId,
+      filename,
+      mimeType,
+      sizeBytes,
+      createdAt,
+      chunkIndex,
+      isLast,
+      chunkBase64,
+    } = req.body || {};
+
+    if (!uploadId || !filename || typeof chunkBase64 !== 'string') {
+      return res.status(400).json({ success: false, error: 'Dados do bloco de mídia inválidos.' });
+    }
+
+    const safeUploadId = String(uploadId).replace(/[^a-zA-Z0-9_-]/g, '');
+    const tmpPath = path.join('/tmp', `praonde_restore_${safeUploadId}.bin`);
+    const chunkBuf = Buffer.from(chunkBase64, 'base64');
+
+    if (Number(chunkIndex) === 0) {
+      fs.writeFileSync(tmpPath, chunkBuf);
+    } else {
+      fs.appendFileSync(tmpPath, chunkBuf);
+    }
+
+    if (isLast) {
+      const fullData = fs.readFileSync(tmpPath);
+      try {
+        fs.unlinkSync(tmpPath);
+      } catch {}
+      const inserted = await saveRestoredMediaFilePg({
+        filename: String(filename),
+        mimeType: String(mimeType || 'video/mp4'),
+        sizeBytes: Number(sizeBytes) || fullData.length,
+        data: fullData,
+        createdAt: createdAt ? String(createdAt) : null,
+      });
+      return res.json({ success: true, done: true, inserted });
+    }
+
+    return res.json({ success: true, done: false });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Erro ao salvar bloco de mídia.' });
   }
 });
 

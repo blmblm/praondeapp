@@ -43,8 +43,9 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
     tables: SqlTableInfo[];
   } | null>(null);
   const [loadingSchema, setLoadingSchema] = useState<boolean>(false);
+  const [schemaError, setSchemaError] = useState<string | null>(null);
   const [backupBusy, setBackupBusy] = useState<'export' | 'import' | null>(null);
-  const [backupStatus, setBackupStatus] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [backupStatus, setBackupStatus] = useState<{ type: 'ok' | 'err' | 'info'; text: string } | null>(null);
   const backupFileRef = useRef<HTMLInputElement | null>(null);
 
   const QUICK_QUERIES = [
@@ -121,13 +122,18 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
   const fetchSchema = async () => {
     try {
       setLoadingSchema(true);
+      setSchemaError(null);
       const res = await fetch('/api/sql/schema');
       if (res.ok) {
         const data = await res.json();
         setSchemaInfo(data);
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        setSchemaError(errData.error || `Erro ao carregar tabelas do banco (HTTP ${res.status}).`);
       }
-    } catch (e) {
-      console.error('Erro ao carregar schema do SQLite:', e);
+    } catch (e: any) {
+      console.error('Erro ao carregar schema do banco:', e);
+      setSchemaError(e?.message || 'Falha de conexão com o servidor ao ler o banco de dados.');
     } finally {
       setLoadingSchema(false);
     }
@@ -202,21 +208,137 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
     if (!file) return;
     try {
       setBackupBusy('import');
-      setBackupStatus(null);
+      setBackupStatus({ type: 'info', text: `Lendo arquivo ${file.name} (${(file.size / (1024 * 1024)).toFixed(1)} MB)...` });
+
       const text = await file.text();
       const parsed = JSON.parse(text);
-      const res = await fetch('/api/admin/import-backup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(parsed),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || 'Falha ao restaurar backup.');
+      const tablesObj = parsed?.tables && typeof parsed.tables === 'object' ? parsed.tables : null;
+      if (!tablesObj) {
+        throw new Error('Arquivo de backup inválido: campo "tables" não encontrado.');
       }
+
+      const TABLE_ORDER = [
+        'estado',
+        'categorias',
+        'cidades',
+        'supervisor',
+        'anunciantes',
+        'users',
+        'palavras_ignoradas',
+        'configuracoes_pix',
+        'patrocinadores',
+        'pagamentos_pix',
+        'eventos',
+        'eventos_importados',
+        'favoritos',
+        'estatisticas_consultas',
+        'historico_limpezas',
+        'registro_eventos_deletados',
+        'sync_metadata',
+      ];
+
+      let totalInserted = 0;
+      const MAX_BATCH_BYTES = 1_500_000;
+
+      for (const tableName of TABLE_ORDER) {
+        const rows = Array.isArray(tablesObj[tableName]) ? tablesObj[tableName] : [];
+        if (rows.length === 0) continue;
+
+        let batch: any[] = [];
+        let batchBytes = 0;
+        let processed = 0;
+
+        const flushBatch = async () => {
+          if (batch.length === 0) return;
+          setBackupStatus({
+            type: 'info',
+            text: `Importando tabela "${tableName}" (${processed}/${rows.length})...`,
+          });
+          const res = await fetch('/api/admin/import-backup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tables: { [tableName]: batch } }),
+          });
+          const rawBody = await res.text();
+          let data: any = {};
+          try {
+            data = JSON.parse(rawBody);
+          } catch {
+            throw new Error(`Erro no servidor ao importar "${tableName}" (HTTP ${res.status}).`);
+          }
+          if (!res.ok || !data.success) {
+            throw new Error(data.error || `Falha ao importar tabela "${tableName}" (HTTP ${res.status}).`);
+          }
+          totalInserted += Number(data.totalInserted || 0);
+          batch = [];
+          batchBytes = 0;
+        };
+
+        for (const row of rows) {
+          const rowSize = JSON.stringify(row).length;
+          if (batch.length > 0 && batchBytes + rowSize > MAX_BATCH_BYTES) {
+            await flushBatch();
+          }
+          batch.push(row);
+          batchBytes += rowSize;
+          processed += 1;
+        }
+        await flushBatch();
+      }
+
+      // Envia vídeos da tabela media_files em blocos pequenos (~1.5 MB por requisição) para respeitar o limite do Cloud Run
+      const mediaRows = Array.isArray(tablesObj.media_files) ? tablesObj.media_files : [];
+      const CHUNK_CHARS = 2_000_000; // múltiplo exato de 4 para Base64
+      for (let mIdx = 0; mIdx < mediaRows.length; mIdx++) {
+        const mRow = mediaRows[mIdx];
+        if (!mRow || !mRow.filename || typeof mRow.data_base64 !== 'string') continue;
+
+        const b64: string = mRow.data_base64;
+        const totalChunks = Math.max(1, Math.ceil(b64.length / CHUNK_CHARS));
+        const uploadId = `${Date.now()}_${mIdx}_${Math.random().toString(36).slice(2, 8)}`;
+
+        for (let c = 0; c < totalChunks; c++) {
+          const start = c * CHUNK_CHARS;
+          const chunkBase64 = b64.slice(start, start + CHUNK_CHARS);
+          const pct = Math.round(((c + 1) / totalChunks) * 100);
+          setBackupStatus({
+            type: 'info',
+            text: `Importando vídeo ${mIdx + 1} de ${mediaRows.length} (${pct}%)...`,
+          });
+
+          const res = await fetch('/api/admin/import-media-chunk', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              uploadId,
+              filename: mRow.filename,
+              mimeType: mRow.mime_type || 'video/mp4',
+              sizeBytes: mRow.size_bytes || 0,
+              createdAt: mRow.created_at || null,
+              chunkIndex: c,
+              isLast: c === totalChunks - 1,
+              chunkBase64,
+            }),
+          });
+          const rawBody = await res.text();
+          let data: any = {};
+          try {
+            data = JSON.parse(rawBody);
+          } catch {
+            throw new Error(`Erro no servidor ao importar vídeo ${mIdx + 1} (HTTP ${res.status}).`);
+          }
+          if (!res.ok || !data.success) {
+            throw new Error(data.error || `Falha ao importar vídeo ${mIdx + 1}.`);
+          }
+          if (data.done && data.inserted) {
+            totalInserted += 1;
+          }
+        }
+      }
+
       setBackupStatus({
         type: 'ok',
-        text: `Backup restaurado! ${data.totalInserted ?? 0} registro(s) novo(s) importado(s).`,
+        text: `Backup restaurado com sucesso! ${totalInserted} registro(s) novo(s) importado(s) no banco de dados.`,
       });
       await fetchSchema();
       if (onEventModified) onEventModified();
@@ -339,7 +461,7 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
                   <button
                     onClick={() => backupFileRef.current?.click()}
                     disabled={backupBusy !== null}
-                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/40 font-bold text-xs transition-colors disabled:opacity-50 cursor-pointer"
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition-colors disabled:opacity-50 cursor-pointer"
                   >
                     <Upload className="w-3.5 h-3.5" />
                     <span>{backupBusy === 'import' ? 'Importando...' : 'Restaurar Backup'}</span>
@@ -352,10 +474,19 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
                   className={`px-4 py-2.5 rounded-xl text-xs font-medium border ${
                     backupStatus.type === 'ok'
                       ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-200'
-                      : 'bg-rose-500/15 border-rose-500/40 text-rose-200'
+                      : backupStatus.type === 'info'
+                        ? 'bg-amber-500/15 border-amber-500/40 text-amber-200'
+                        : 'bg-rose-500/15 border-rose-500/40 text-rose-200'
                   }`}
                 >
                   {backupStatus.text}
+                </div>
+              )}
+
+              {schemaError && (
+                <div className="px-4 py-2.5 rounded-xl text-xs font-medium border bg-rose-500/15 border-rose-500/40 text-rose-200 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                  <span>Erro ao conectar no banco de dados: {schemaError}</span>
                 </div>
               )}
 
