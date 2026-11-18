@@ -27,7 +27,7 @@ export const SponsorsShowcase: React.FC<SponsorsShowcaseProps> = ({
   onOpenRegisterSponsor
 }) => {
   // Coordenadas exatas obtidas automaticamente e silenciosamente em tempo real
-  const { coords, status } = useUserLocation();
+  const { coords, userCoords, status, requestLocation } = useUserLocation();
 
   // Filtrar patrocinadores ativos e liberados pela moderação
   const activeSponsors = sponsors.filter(s => s.active && s.liberado !== 'N' && s.liberado !== 'pendente');
@@ -35,8 +35,9 @@ export const SponsorsShowcase: React.FC<SponsorsShowcaseProps> = ({
   // Ordenar puramente por proximidade (distância até as coordenadas do solicitante) e limitar em exatamente 5 patrocinadores
   const sortedSponsors = [...activeSponsors].map(sponsor => {
     let distance: number | undefined = undefined;
-    if (coords) {
-      distance = calculateDistanceKm(coords.latitude, coords.longitude, sponsor.latitude, sponsor.longitude);
+    const ref = coords || userCoords;
+    if (ref) {
+      distance = calculateDistanceKm(ref.latitude, ref.longitude, sponsor.latitude, sponsor.longitude);
     }
     return {
       ...sponsor,
@@ -70,9 +71,11 @@ export const SponsorsShowcase: React.FC<SponsorsShowcaseProps> = ({
 
         {/* Indicador silencioso e automático de GPS */}
         <div className="flex items-center gap-2">
-          <div
-            className="flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 shadow-sm"
-            title={`Latitude: ${coords?.latitude ?? '---'}, Longitude: ${coords?.longitude ?? '---'}`}
+          <button
+            type="button"
+            onClick={requestLocation}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 shadow-sm transition-all cursor-pointer active:scale-95"
+            title={status === 'granted' && coords ? `Latitude: ${coords.latitude.toFixed(4)}, Longitude: ${coords.longitude.toFixed(4)}. Clique para atualizar.` : 'Utilizando coordenadas de São Paulo - SP. Clique para ativar GPS real.'}
           >
             <span className="relative flex h-2 w-2">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
@@ -80,11 +83,11 @@ export const SponsorsShowcase: React.FC<SponsorsShowcaseProps> = ({
             </span>
             <Navigation className="w-3.5 h-3.5 text-emerald-400" />
             <span>
-              {coords
+              {status === 'granted' && coords
                 ? `GPS: ${coords.latitude.toFixed(4)}, ${coords.longitude.toFixed(4)}`
-                : 'GPS ativo em tempo real'}
+                : 'Ativar GPS Real ⚡'}
             </span>
-          </div>
+          </button>
         </div>
       </div>
 

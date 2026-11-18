@@ -4,6 +4,7 @@ export type VideoPlatform =
   | 'instagram'
   | 'tiktok'
   | 'vimeo'
+  | 'googledrive'
   | 'direct'
   | 'unknown';
 
@@ -19,24 +20,51 @@ export interface VideoInfo {
   isGroupPost?: boolean;
 }
 
+export function isImageFileUrl(url: string | undefined | null): boolean {
+  if (!url || typeof url !== 'string') return false;
+  const t = url.trim().toLowerCase();
+  if (!t || t === 'null' || t === 'undefined') return false;
+  return (
+    t.startsWith('data:image/') ||
+    t.startsWith('/api/event-poster/') ||
+    t.startsWith('/api/video-thumbnail') ||
+    t.startsWith('/uploads/images/') ||
+    t.startsWith('./uploads/images/') ||
+    t.startsWith('/assets/images/') ||
+    t.startsWith('./assets/images/') ||
+    /\.(jpe?g|png|webp|gif|svg|avif|bmp|jfif|heic|heif|tiff?|ico)($|\?|#)/i.test(t)
+  );
+}
+
 export function isVideoFormatUrl(url: string | undefined | null): boolean {
   if (!url || typeof url !== 'string') return false;
   const t = url.trim();
   if (!t) return false;
+
+  // Imagens nunca devem ser tratadas como vídeo
+  if (isImageFileUrl(t)) {
+    return false;
+  }
+
   if (
     t.startsWith('data:video/') ||
     t.startsWith('data:application/octet-stream') ||
     t.startsWith('blob:') ||
-    /\.(mp4|webm|ogg|mov|m4v)($|\?|#)/i.test(t) ||
+    t.startsWith('/uploads/videos/') ||
+    t.startsWith('./uploads/videos/') ||
+    t.startsWith('/api/video/') ||
+    /\.(mp4|webm|ogg|mov|m4v|mkv|3gp)($|\?|#)/i.test(t) ||
     /video\/mp4/i.test(t) ||
     t.includes('youtube.com') ||
     t.includes('youtu.be') ||
     t.includes('facebook.com') ||
     t.includes('fb.watch') ||
     t.includes('fb.') ||
-    t.includes('instagram.com/reel') ||
+    t.includes('fbcdn.net') ||
+    t.includes('instagram.com') ||
     t.includes('tiktok.com') ||
-    t.includes('vimeo.com')
+    t.includes('vimeo.com') ||
+    t.includes('drive.google.com')
   ) {
     return true;
   }
@@ -46,15 +74,28 @@ export function isVideoFormatUrl(url: string | undefined | null): boolean {
 
 export function parseVideoUrl(url: string | undefined | null): VideoInfo | null {
   if (!url || typeof url !== 'string') return null;
-  const trimmed = url.trim();
+  let trimmed = url.trim();
   if (!trimmed) return null;
 
-  // 1. Direct video file or data URL (MP4, WEBM, OGG, MOV, blob, data URL)
+  // Imagens nunca são vídeo
+  if (isImageFileUrl(trimmed)) {
+    return null;
+  }
+
+  // Auto-normalize links missing protocol
+  if (/^(www\.|youtube\.com|youtu\.be|facebook\.com|fb\.watch|instagram\.com|tiktok\.com|vimeo\.com|drive\.google\.com)/i.test(trimmed)) {
+    trimmed = `https://${trimmed}`;
+  }
+
+  // 1. Direct video file or data URL (MP4, WEBM, OGG, MOV, blob, data URL, /uploads/videos/)
   if (
     trimmed.startsWith('data:video/') ||
     trimmed.startsWith('data:application/octet-stream') ||
     trimmed.startsWith('blob:') ||
-    /\.(mp4|webm|ogg|mov|m4v)($|\?|#)/i.test(trimmed) ||
+    trimmed.startsWith('/uploads/videos/') ||
+    trimmed.startsWith('./uploads/videos/') ||
+    trimmed.startsWith('/api/video/') ||
+    /\.(mp4|webm|ogg|mov|m4v|mkv|3gp)($|\?|#)/i.test(trimmed) ||
     /video\/mp4/i.test(trimmed)
   ) {
     return {
@@ -216,6 +257,21 @@ export function parseVideoUrl(url: string | undefined | null): VideoInfo | null 
       originalUrl: trimmed,
       isDirectVideo: false,
       platformName: 'Vimeo',
+    };
+  }
+
+  // 6b. Google Drive matchers
+  // drive.google.com/file/d/ID/view or drive.google.com/open?id=ID
+  const gdriveMatch = trimmed.match(/drive\.google\.com\/(?:file\/d\/([a-zA-Z0-9_-]+)|open\?id=([a-zA-Z0-9_-]+))/i);
+  if (gdriveMatch && (gdriveMatch[1] || gdriveMatch[2])) {
+    const fileId = gdriveMatch[1] || gdriveMatch[2];
+    return {
+      type: 'googledrive',
+      videoId: fileId,
+      embedUrl: `https://drive.google.com/file/d/${fileId}/preview`,
+      originalUrl: trimmed,
+      isDirectVideo: false,
+      platformName: 'Google Drive',
     };
   }
 

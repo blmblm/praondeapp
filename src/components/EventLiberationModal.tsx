@@ -38,6 +38,7 @@ import {
   FileVideo
 } from 'lucide-react';
 import { EventItem, CategoryItem } from '../types';
+import { uploadVideoFileToServer } from '../lib/videoUpload';
 import { VideoPlayer } from './VideoPlayer';
 
 interface EventLiberationModalProps {
@@ -85,18 +86,33 @@ export const EventLiberationModal: React.FC<EventLiberationModalProps> = ({
   const isVideoFormatUrl = (u?: string | null): boolean => {
     if (!u) return false;
     const t = u.trim().toLowerCase();
+    // Se for imagem, NUNCA é vídeo
+    if (
+      t.startsWith('data:image/') ||
+      t.startsWith('/uploads/images/') ||
+      t.startsWith('./uploads/images/') ||
+      t.startsWith('/assets/images/') ||
+      /\.(jpe?g|png|webp|gif|svg|avif|bmp|jfif|heic|heif|tiff?|ico)($|\?|#)/i.test(t)
+    ) {
+      return false;
+    }
     return (
       t.startsWith('data:video/') ||
       t.startsWith('data:application/octet-stream') ||
       t.startsWith('blob:') ||
+      t.startsWith('/uploads/videos/') ||
+      t.startsWith('./uploads/videos/') ||
       t.includes('youtube.com') ||
       t.includes('youtu.be') ||
       t.includes('facebook.com') ||
       t.includes('fb.watch') ||
+      t.includes('fb.') ||
+      t.includes('fbcdn.net') ||
       t.includes('instagram.com') ||
       t.includes('tiktok.com') ||
       t.includes('vimeo.com') ||
-      /\.(mp4|webm|ogg|mov|m4v)($|\?|#)/i.test(t) ||
+      t.includes('drive.google.com') ||
+      /\.(mp4|webm|ogg|mov|m4v|mkv|3gp)($|\?|#)/i.test(t) ||
       /video\/mp4/i.test(t)
     );
   };
@@ -110,7 +126,10 @@ export const EventLiberationModal: React.FC<EventLiberationModalProps> = ({
   const [urlErrorNotice, setUrlErrorNotice] = useState<string | null>(null);
   const [updatedTablesList, setUpdatedTablesList] = useState<string[]>([]);
   const [isUploadingVideo, setIsUploadingVideo] = useState(false);
+  const [videoUploadProgress, setVideoUploadProgress] = useState<number>(0);
+  const [videoUploadStatus, setVideoUploadStatus] = useState<string>('');
   const videoFileInputRef = useRef<HTMLInputElement | null>(null);
+  const imageFileInputRef = useRef<HTMLInputElement | null>(null);
   const urlInputRef = useRef<HTMLInputElement | null>(null);
   const urlSectionRef = useRef<HTMLDivElement | null>(null);
 
@@ -174,7 +193,7 @@ export const EventLiberationModal: React.FC<EventLiberationModalProps> = ({
 
   useEffect(() => {
     if (!event) return;
-    const initialUrl = event.videoUrl || event.url || event.imageUrl || '';
+    const initialUrl = event.videoUrl || (event.url && !event.url.startsWith('data:image/') ? event.url : '') || event.imageUrl || '';
     setCurrentUrl(initialUrl);
 
     const isVid = Boolean(
@@ -189,11 +208,18 @@ export const EventLiberationModal: React.FC<EventLiberationModalProps> = ({
     );
     const isImg = !isVid && Boolean(
       event.imageUrl ||
+      (event as any).imagem_url ||
       initialUrl.startsWith('data:image/') ||
+      initialUrl.startsWith('/uploads/images/') ||
+      /\.(jpe?g|png|webp|gif|svg|avif|bmp|jfif|heic|heif|tiff?|ico)($|\?|#)/i.test(initialUrl) ||
       initialUrl.includes('.jpg') ||
       initialUrl.includes('.jpeg') ||
       initialUrl.includes('.png') ||
-      initialUrl.includes('.webp')
+      initialUrl.includes('.webp') ||
+      initialUrl.includes('.gif') ||
+      initialUrl.includes('.avif') ||
+      initialUrl.includes('.bmp') ||
+      initialUrl.includes('.svg')
     );
 
     setUrlType(isVid ? 'video' : isImg ? 'image' : 'link');
@@ -434,7 +460,11 @@ export const EventLiberationModal: React.FC<EventLiberationModalProps> = ({
         const res = await fetch(`/api/events/${event.id}/url`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: clean, urlType }),
+          body: JSON.stringify({ 
+            url: clean, 
+            urlType, 
+            imageUrl: urlType === 'image' || clean.startsWith('data:image/') ? clean : undefined 
+          }),
         });
         const data = await res.json();
         if (!res.ok || !data.success) {
@@ -471,36 +501,83 @@ export const EventLiberationModal: React.FC<EventLiberationModalProps> = ({
     }
   };
 
-  const handleVideoFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleVideoFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (!file.type.startsWith('video/') && !file.name.toLowerCase().endsWith('.mp4')) {
+    const fName = (file.name || '').toLowerCase();
+    const isVideo =
+      file.type.startsWith('video/') ||
+      file.type === 'application/mp4' ||
+      file.type === 'application/octet-stream' ||
+      fName.endsWith('.mp4') ||
+      fName.endsWith('.webm') ||
+      fName.endsWith('.mov') ||
+      fName.endsWith('.m4v') ||
+      fName.endsWith('.3gp') ||
+      fName.includes('whatsapp');
+
+    if (!isVideo) {
       setUrlErrorNotice('Por favor selecione um arquivo de vídeo válido (.mp4, .mov, etc.)');
       return;
     }
 
-    if (file.size > 45 * 1024 * 1024) {
-      setUrlErrorNotice('O vídeo é muito grande (máximo 45MB). Recomendamos compactar antes de enviar.');
+    if (file.size > 80 * 1024 * 1024) {
+      setUrlErrorNotice('O vídeo ultrapassa 80MB. Por favor envie um vídeo menor.');
       return;
     }
 
     setIsUploadingVideo(true);
+    setVideoUploadProgress(0);
+    setVideoUploadStatus('Iniciando envio do vídeo...');
     setUrlErrorNotice(null);
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      const base64Video = reader.result as string;
-      setCurrentUrl(base64Video);
+    try {
+      const data = await uploadVideoFileToServer(file, (pct, msg) => {
+        setVideoUploadProgress(pct);
+        if (msg) setVideoUploadStatus(msg);
+      });
+      setCurrentUrl(data.videoUrl);
+      if (data.imageUrl && event) {
+        event.imageUrl = data.imageUrl;
+      }
       setUrlType('video');
       setIsUrlActive(true);
       setMediaTab('video');
       setIsUploadingVideo(false);
-      setUrlSaveNotice(`Arquivo "${file.name}" carregado! Clique no botão "Atualizar URL nas Tabelas" para gravar no banco.`);
+      setVideoUploadStatus('');
+      setUrlSaveNotice(`Arquivo "${file.name}" salvo de forma permanente! Clique em "Atualizar URL nas Tabelas" para vincular ao evento.`);
+    } catch (err: any) {
+      setIsUploadingVideo(false);
+      setVideoUploadProgress(0);
+      setVideoUploadStatus('');
+      setUrlErrorNotice(err?.message || 'Erro ao enviar arquivo de vídeo para o servidor.');
+    }
+  };
+
+  const handleImageFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setUrlErrorNotice('Por favor selecione um arquivo de imagem válido (PNG, JPG, JPEG, WEBP).');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64Img = reader.result as string;
+      setCurrentUrl(base64Img);
+      setUrlType('image');
+      setIsUrlActive(true);
+      setMediaTab('image');
+      if (event) {
+        event.imageUrl = base64Img;
+        event.url = base64Img;
+        event.mediaType = 'image';
+      }
+      setUrlSaveNotice(`Cartaz "${file.name}" selecionado! Clique no botão "Atualizar URL nas Tabelas" para salvar de forma permanente.`);
     };
     reader.onerror = () => {
-      setIsUploadingVideo(false);
-      setUrlErrorNotice('Erro ao ler arquivo de vídeo.');
+      setUrlErrorNotice('Erro ao ler o arquivo de imagem.');
     };
     reader.readAsDataURL(file);
   };
@@ -526,22 +603,34 @@ export const EventLiberationModal: React.FC<EventLiberationModalProps> = ({
 
       if (isVideo && effectiveVideoUrl) {
         try {
+          const effectiveImg = activeImageUrl || event.imageUrl || '';
           if (onUpdateUrl) {
             await onUpdateUrl(event.id, effectiveVideoUrl, 'video');
           } else {
             await fetch(`/api/events/${event.id}/url`, {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ url: effectiveVideoUrl, urlType: 'video' }),
+              body: JSON.stringify({
+                url: effectiveVideoUrl,
+                urlType: 'video',
+                imageUrl: effectiveImg || undefined
+              }),
             });
           }
           event.videoUrl = effectiveVideoUrl;
           event.url = effectiveVideoUrl;
           event.mediaType = 'video';
+          if (effectiveImg) {
+            event.imageUrl = effectiveImg;
+          }
         } catch (uErr) {
           console.warn('Erro ao gravar campo URL de vídeo na liberação:', uErr);
         }
-      } else if (cleanUrl !== '' && cleanUrl !== (event.url || event.imageUrl || '')) {
+      } else if (
+        cleanUrl !== '' &&
+        !cleanUrl.startsWith('/api/event-poster/') &&
+        cleanUrl !== (event.url || event.imageUrl || '')
+      ) {
         try {
           if (onUpdateUrl) {
             await onUpdateUrl(event.id, cleanUrl, urlType);
@@ -562,7 +651,8 @@ export const EventLiberationModal: React.FC<EventLiberationModalProps> = ({
         }
       }
 
-      const finalUrlToSave = isVideo ? (effectiveVideoUrl || cleanUrl) : cleanUrl;
+      const safeCleanUrl = cleanUrl;
+      const finalUrlToSave = isVideo ? (effectiveVideoUrl || safeCleanUrl) : safeCleanUrl;
       const finalUrlType = isVideo ? 'video' : urlType;
 
       // 3. Timeout de segurança de 2.5s para impedir que qualquer lentidão externa trave o botão
@@ -574,9 +664,7 @@ export const EventLiberationModal: React.FC<EventLiberationModalProps> = ({
         type: 'success',
         msg: statusToSave === 'S' 
           ? `Evento liberado com sucesso! Categoria: "${selectedCategory}". O campo liberado foi atualizado com "S".`
-          : event.isQuarantine
-            ? 'Evento não liberado: registro excluído da lista de quarentena com sucesso.'
-            : 'Status salvo: O campo liberado do cadastro foi atualizado com "N" (Não Liberado).',
+          : 'Evento cancelado e excluído com sucesso da lista de liberação.',
       });
 
       setTimeout(() => {
@@ -1196,9 +1284,17 @@ export const EventLiberationModal: React.FC<EventLiberationModalProps> = ({
                           const val = e.target.value;
                           setCurrentUrl(val);
                           setIsUrlActive(true);
-                          if (val.includes('youtube') || val.includes('youtu.be') || val.includes('facebook') || val.includes('.mp4') || val.startsWith('data:video/')) {
+                          if (isVideoFormatUrl(val)) {
                             setUrlType('video');
-                          } else if (val.startsWith('data:image/') || val.includes('.jpg') || val.includes('.png')) {
+                          } else if (
+                            val.startsWith('data:image/') ||
+                            val.startsWith('/uploads/images/') ||
+                            /\.(jpe?g|png|webp|gif|svg|avif|bmp|jfif|heic|heif|tiff?|ico)($|\?|#)/i.test(val) ||
+                            val.includes('.jpg') ||
+                            val.includes('.jpeg') ||
+                            val.includes('.png') ||
+                            val.includes('.webp')
+                          ) {
                             setUrlType('image');
                           }
                         }}
@@ -1252,6 +1348,24 @@ export const EventLiberationModal: React.FC<EventLiberationModalProps> = ({
                         )}
                       </button>
 
+                      {/* Botão de Enviar Cartaz / Imagem Direto do Celular ou PC */}
+                      <button
+                        type="button"
+                        onClick={() => imageFileInputRef.current?.click()}
+                        className="px-2.5 py-2 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/35 border border-emerald-500/40 text-emerald-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                        title="Selecionar foto ou cartaz do evento no seu dispositivo (PNG, JPG, WebP)"
+                      >
+                        <ImageIcon className="w-3.5 h-3.5 text-emerald-400" />
+                        <span className="hidden sm:inline">Carregar Cartaz</span>
+                      </button>
+                      <input
+                        ref={imageFileInputRef}
+                        type="file"
+                        accept="image/*"
+                        onChange={handleImageFileSelect}
+                        className="hidden"
+                      />
+
                       {/* Botão de Enviar MP4 Direto */}
                       <button
                         type="button"
@@ -1261,7 +1375,11 @@ export const EventLiberationModal: React.FC<EventLiberationModalProps> = ({
                         title="Selecionar arquivo de vídeo MP4 do seu dispositivo"
                       >
                         <FileVideo className="w-3.5 h-3.5 text-purple-400" />
-                        <span className="hidden sm:inline">Enviar MP4</span>
+                        <span className="hidden sm:inline">
+                          {isUploadingVideo
+                            ? `Enviando${videoUploadProgress > 0 ? ` ${videoUploadProgress}%` : '...'}`
+                            : 'Enviar MP4'}
+                        </span>
                       </button>
                       <input
                         ref={videoFileInputRef}
@@ -1285,6 +1403,23 @@ export const EventLiberationModal: React.FC<EventLiberationModalProps> = ({
                       )}
                     </div>
                   </div>
+
+                  {isUploadingVideo && (
+                    <div className="mt-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 space-y-2">
+                      <div className="flex items-center justify-between text-xs font-bold text-amber-300">
+                        <span>{videoUploadStatus || 'Enviando vídeo para o servidor...'}</span>
+                        <span>{videoUploadProgress}%</span>
+                      </div>
+                      <progress
+                        value={videoUploadProgress}
+                        max={100}
+                        className="w-full h-2 rounded-full overflow-hidden bg-slate-800 [&::-webkit-progress-bar]:bg-slate-800 [&::-webkit-progress-value]:bg-amber-500 [&::-webkit-progress-value]:transition-all [&::-webkit-progress-value]:duration-300 [&::-moz-progress-bar]:bg-amber-500"
+                      />
+                      <p className="text-[11px] text-slate-300">
+                        Aguarde o término do carregamento (em 80%–99% o servidor está finalizando e gravando o vídeo com segurança). Não feche esta janela.
+                      </p>
+                    </div>
+                  )}
 
                   {/* Feedback Messages */}
                   {urlSaveNotice && (
@@ -1584,8 +1719,71 @@ export const EventLiberationModal: React.FC<EventLiberationModalProps> = ({
                     </span>
                   </label>
                   <p className="text-[11px] text-slate-400 mb-3">
-                    Ao confirmar a liberação, o sistema grava <span className="font-bold text-emerald-400">"S"</span> no campo liberado e salva a categoria conferida.
+                    Ao confirmar a liberação, o sistema grava <span className="font-bold text-emerald-400">"S"</span> no campo liberado e salva a categoria selecionada abaixo.
                   </p>
+                </div>
+
+                {/* Seletor de Categoria Proeminente e de Fácil Acesso */}
+                <div className="p-3 bg-slate-900 rounded-xl border border-slate-850 shadow-inner">
+                  <label className="block text-xs font-bold text-amber-300 mb-1.5 flex items-center gap-1.5">
+                    <Tag className="w-3.5 h-3.5" />
+                    <span>Selecione a Categoria de Lançamento:</span>
+                  </label>
+                  <div className="relative">
+                    <select
+                      value={selectedCategory}
+                      onChange={async (e) => {
+                        const newCat = e.target.value;
+                        if (!newCat) return;
+                        setSelectedCategory(newCat);
+                        setIsCategoryActive(true);
+                        const catObj = availableCategoryList.find((c) => c.nome.toLowerCase() === newCat.toLowerCase());
+                        
+                        try {
+                          setIsSavingCategory(true);
+                          setCategorySaveNotice(null);
+                          let success = false;
+                          if (onUpdateCategory) {
+                            const res = await onUpdateCategory(event.id, newCat, catObj?.id);
+                            success = res !== false;
+                          } else {
+                            const res = await fetch(`/api/events/${event.id}/category`, {
+                              method: 'PATCH',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ category: newCat, categoryId: catObj?.id }),
+                            });
+                            const json = await res.json();
+                            success = res.ok && json.success;
+                          }
+                          if (success) {
+                            setCategorySaveNotice(`Categoria alterada para "${newCat}" com sucesso!`);
+                            setTimeout(() => setCategorySaveNotice(null), 3500);
+                          }
+                        } catch (err) {
+                          console.error('Erro ao salvar categoria:', err);
+                        } finally {
+                          setIsSavingCategory(false);
+                        }
+                      }}
+                      className="w-full bg-slate-950 border border-slate-750 hover:border-amber-400 focus:border-amber-400 rounded-xl px-3 py-2.5 text-xs text-white font-bold focus:outline-none focus:ring-1 focus:ring-amber-400 cursor-pointer"
+                    >
+                      {!isEventCatInTable && event.category && (
+                        <option value={event.category} className="bg-slate-900 text-rose-300 py-1" disabled>
+                          ⚠️ {event.category} (Não cadastrada na tabela — selecione uma válida)
+                        </option>
+                      )}
+                      {availableCategoryList.map((cat) => (
+                        <option key={cat.nome} value={cat.nome} className="bg-slate-900 text-white font-semibold py-1.5">
+                          {cat.nome}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {categorySaveNotice && (
+                    <p className="text-[11px] text-emerald-400 font-bold mt-1.5 flex items-center gap-1 animate-fadeIn">
+                      <Check className="w-3.5 h-3.5" /> {categorySaveNotice}
+                    </p>
+                  )}
                 </div>
 
                 {/* Seleção do Valor do Campo 'liberado' */}
@@ -1658,11 +1856,11 @@ export const EventLiberationModal: React.FC<EventLiberationModalProps> = ({
                     id="btn-nao-liberar"
                     onClick={() => handleConfirmLiberation('N')}
                     disabled={isSaving}
-                    className="px-3.5 py-2.5 rounded-xl text-xs font-semibold transition-all border border-rose-500/40 bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 hover:text-white flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 animate-pulse"
-                    title={event.isQuarantine ? "Excluir este evento da lista de quarentena" : "Salvar status como Não Liberado (liberado = 'N')"}
+                    className="px-3.5 py-2.5 rounded-xl text-xs font-semibold transition-all border border-rose-500/40 bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 hover:text-white flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                    title="Cancelar e excluir este evento da lista de liberação"
                   >
                     <X className="w-3.5 h-3.5 text-rose-400" />
-                    <span>{event.isQuarantine ? 'Cancelar Evento (Excluir da Quarentena)' : 'Cancelar Evento ("N")'}</span>
+                    <span>Cancelar Evento</span>
                   </button>
 
                   <button

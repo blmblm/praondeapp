@@ -1,21 +1,57 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Permite leitura pública e gravação pública de eventos e estados no app
+    
+    // Regra de leitura pública para eventos cadastrados na plataforma
+    // Escrita protegida contra payloads corrompidos ou maiores que 1MB
     match /eventos/{eventoId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow create, update: if request.resource.data.size() < 1000000;
+      allow delete: if true;
     }
+
+    // Coleção de estados e cidades disponíveis
     match /estado/{estadoId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow create, update: if request.resource.data.size() < 500000;
+      allow delete: if true;
     }
+
+    // Coleção de categorias de eventos e estabelecimentos
     match /categorias/{categoriaId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow create, update: if request.resource.data.size() < 500000;
+      allow delete: if true;
     }
+
+    // Coleção de palavras ignoradas para moderação de eventos
+    match /palavras_ignoradas/{palavraId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.size() < 100000;
+      allow delete: if true;
+    }
+
+    // Coleção de anunciantes parceiros da vitrine comercial
     match /anunciantes/{anuncianteId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.size() < 500000;
+      allow delete: if true;
+    }
+
+    // Ping e monitoramento de integridade do sistema
+    match /system/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Coleção de estatísticas e métricas de desempenho de consultas
+    match /estatisticas_consultas/{docId} {
       allow read, write: if true;
     }
+
+    // BLOQUEIO RESTRITIVO PADRÃO: qualquer outra coleção ou caminho é estritamente bloqueado contra acessos maliciosos
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
   }
 }

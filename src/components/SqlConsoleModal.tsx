@@ -59,7 +59,7 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
     },
     {
       label: '📍 Tabela de Estado (estado)',
-      sql: 'SELECT id, nome, estado, regiao, ativa, criado_em FROM estado ORDER BY nome COLLATE NOCASE ASC;',
+      sql: 'SELECT id, nome, estado, regiao, ativa, criado_em FROM estado ORDER BY nome ASC;',
     },
     {
       label: '🎭 Todos os Eventos (eventos)',
@@ -94,16 +94,24 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
       sql: 'SELECT f.id, f.evento_id, e.titulo, f.criado_em FROM favoritos f LEFT JOIN eventos e ON f.evento_id = e.id;',
     },
     {
-      label: '🧹 Limpar Tabela eventos_baile_nostalgia',
-      sql: 'DELETE FROM eventos_baile_nostalgia;',
-    },
-    {
       label: '❌ Excluir Evento por ID',
       sql: "DELETE FROM eventos WHERE id = 'user-1789409044377';",
     },
     {
       label: '🧹 Limpar Eventos da Quarentena Descartados',
       sql: "DELETE FROM eventos_importados WHERE status = 'descartado';",
+    },
+    {
+      label: '📅 Histórico de Limpezas & Reorganizações',
+      sql: 'SELECT id, executado_em, tipo, data_corte, total_excluidos, reorganizado, duracao_ms FROM historico_limpezas ORDER BY id DESC LIMIT 10;',
+    },
+    {
+      label: '🔍 Eventos Anteriores à Data de Hoje (Expirados)',
+      sql: 'SELECT id, titulo, data_evento, cidade FROM eventos WHERE data_evento < CURRENT_DATE::text ORDER BY data_evento ASC LIMIT 30;',
+    },
+    {
+      label: '⚡ Analisar Estatísticas do Banco (ANALYZE)',
+      sql: 'ANALYZE;',
     },
   ];
 
@@ -176,7 +184,7 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
                 <h3 className="text-lg font-bold text-white tracking-tight">Central de Gerenciamento - Console SQL</h3>
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-semibold">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  praondeeu.db
+                  Cloud SQL (PostgreSQL)
                 </span>
                 <span className="hidden sm:inline-block text-xs text-amber-400/90 font-medium">
                   (Acesso Master)
@@ -248,7 +256,7 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
                   <div className="flex items-center justify-between mb-2">
                     <label className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
                       <Table className="w-3.5 h-3.5 text-amber-400" />
-                      Tabelas do Banco SQLite (Clique para abrir):
+                      Tabelas do Cloud SQL (Clique para abrir):
                     </label>
                     <span className="text-[11px] text-slate-400">
                       {schemaInfo.tables.length} tabelas encontradas
@@ -313,7 +321,7 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
                     <Code className="w-4 h-4 text-amber-400" />
                     Digite seu comando SQL (SELECT, INSERT, UPDATE, etc.):
                   </label>
-                  <span className="text-xs text-slate-500 font-mono">SQLite 3</span>
+                  <span className="text-xs text-slate-500 font-mono">PostgreSQL (Cloud SQL)</span>
                 </div>
 
                 <div className="relative">
@@ -330,7 +338,7 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
                   <div className="flex items-center gap-2 text-xs text-slate-400">
                     <Info className="w-4 h-4 text-slate-500 shrink-0" />
                     <span>
-                      Dica: para valores de texto em <code>WHERE</code>, use sempre <strong>aspas simples</strong> (ex: <code>WHERE id = 'meu-id'</code>). Comandos <code>DELETE</code> e <code>UPDATE</code> alteram diretamente o <strong>praondeeu.db</strong>.
+                      Dica: para valores de texto em <code>WHERE</code>, use sempre <strong>aspas simples</strong> (ex: <code>WHERE id = 'meu-id'</code>). Comandos <code>DELETE</code> e <code>UPDATE</code> alteram diretamente o banco <strong>Cloud SQL</strong>.
                     </span>
                   </div>
 
@@ -426,7 +434,7 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
               <div className="p-4 rounded-xl bg-slate-800/40 border border-slate-700/60 flex items-center justify-between">
                 <div>
                   <h4 className="text-sm font-bold text-white mb-1">
-                    Estrutura do Banco SQLite ({schemaInfo?.databaseName || 'praondeeu.db'})
+                    Estrutura do Banco Cloud SQL ({schemaInfo?.databaseName || 'PostgreSQL'})
                   </h4>
                   <p className="text-xs text-slate-400">
                     Todas as tabelas foram criadas com suporte a chaves primárias, estrangeiras e constraints relacionais.
@@ -509,7 +517,7 @@ export const SqlConsoleModal: React.FC<SqlConsoleModalProps> = ({ isOpen, onClos
         <div className="flex items-center justify-between px-6 py-3 border-t border-slate-800 bg-slate-900/90 text-xs text-slate-400">
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-emerald-400" />
-            <span>SQLite 3 (Arquivo local <strong>praondeeu.db</strong> conectado via backend Node.js)</span>
+            <span>PostgreSQL (Cloud SQL conectado via backend Node.js)</span>
           </div>
           <button
             onClick={onClose}

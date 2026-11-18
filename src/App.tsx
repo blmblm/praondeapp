@@ -11,22 +11,26 @@ import { EventDetailModal } from './components/EventDetailModal';
 import { AdvertiserAuth } from './components/AdvertiserAuth';
 import { SqlConsoleModal } from './components/SqlConsoleModal';
 import { AdminModal } from './components/AdminModal';
+import { EventLiberationModal } from './components/EventLiberationModal';
+import { MasterPasswordModal } from './components/MasterPasswordModal';
 import { SponsorRegistrationScreen } from './components/SponsorRegistrationScreen';
+import { PWAInstallModal } from './components/PWAInstallModal';
+import { OfflineIndicator } from './components/OfflineIndicator';
+import { usePWAInstall } from './hooks/usePWAInstall';
 import {
-  subscribeToEvents,
   saveEventToFirestore,
   deleteEventFromFirestore,
   updateEventLiberadoInFirestore,
-  subscribeToEstados,
-  saveEstadoToFirestore,
-  deleteEstadoFromFirestore,
-  subscribeToCategorias,
   saveCategoriaToFirestore,
   deleteCategoriaFromFirestore,
+  saveAdvertiserToFirestore,
 } from './lib/firestoreSync';
-import { testFirestoreConnection } from './lib/firebase';
 
-const STORAGE_KEY = 'praonde_events_data_v2';
+try {
+  localStorage.removeItem('praonde_events_data_v11');
+  localStorage.removeItem('praonde_events_data_v10');
+  localStorage.removeItem('praonde_events_data_v9');
+} catch {}
 const ADVERTISERS_STORAGE_KEY = 'praonde_advertisers_v1';
 const CURRENT_ADVERTISER_KEY = 'praonde_current_advertiser_v1';
 const CATEGORIES_STORAGE_KEY = 'praonde_categories_v1';
@@ -39,10 +43,27 @@ const INITIAL_CATEGORIES: string[] = [
   'Forró',
   'Forró Pé de Serra',
   'Festas',
+  'Bailes',
+  'Teatro',
+  'Sertanejo',
 ];
 
 export default function App() {
   const [currentScreen, setCurrentScreen] = useState<ActiveScreen>('home');
+
+  // PWA Install Hook
+  const {
+    isInstallable,
+    hasNativePrompt,
+    isInstalled,
+    isIOS,
+    isAndroid,
+    isModalOpen,
+    showTipOnOpen,
+    openInstallModal,
+    closeInstallModal,
+    promptInstall,
+  } = usePWAInstall();
 
   // Categories State & Persistence
   const [categories, setCategories] = useState<string[]>(() => {
@@ -51,7 +72,9 @@ export default function App() {
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
+          // Garante que novas categorias essenciais (Sertanejo, Teatro, Bailes) sejam inseridas mesmo com cache de sessões antigas
+          const merged = Array.from(new Set([...parsed, ...INITIAL_CATEGORIES]));
+          return merged;
         }
       }
     } catch (e) {
@@ -82,23 +105,13 @@ export default function App() {
 
   const [currentAdvertiser, setCurrentAdvertiser] = useState<Advertiser | null>(null);
 
-  // Events State & Persistence
-  const [events, setEvents] = useState<EventItem[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
-        }
-      }
-    } catch (e) {
-      console.error('Error loading events from storage', e);
-    }
-    return INITIAL_EVENTS;
-  });
+  // Events State (fonte oficial: servidor /api/events, sem cache localStorage truncado)
+  const [events, setEvents] = useState<EventItem[]>([]);
 
   const [selectedEvent, setSelectedEvent] = useState<EventItem | null>(null);
+  const [editingEvent, setEditingEvent] = useState<EventItem | null>(null);
+  const [isMasterPasswordModalOpen, setIsMasterPasswordModalOpen] = useState<boolean>(false);
+  const [pendingEditEvent, setPendingEditEvent] = useState<EventItem | null>(null);
   const [catalogInitialQuery, setCatalogInitialQuery] = useState<string>('');
   const [catalogInitialCategory, setCatalogInitialCategory] = useState<string>('');
   const [catalogInitialEstado, setCatalogInitialEstado] = useState<string>('');
@@ -106,6 +119,7 @@ export default function App() {
   const [catalogInitialSortByProximity, setCatalogInitialSortByProximity] = useState<boolean>(true);
   const [isSqlConsoleOpen, setIsSqlConsoleOpen] = useState<boolean>(false);
   const [isAdminOpen, setIsAdminOpen] = useState<boolean>(false);
+  const [isHomeMenuOpen, setIsHomeMenuOpen] = useState<boolean>(false);
   const [sponsors, setSponsors] = useState<SponsorItem[]>(() => {
     try {
       const saved = localStorage.getItem('praonde_sponsors_v1');
@@ -129,23 +143,68 @@ export default function App() {
     }
   });
 
-  // Sync with backend SQLite database e espelha no Firestore
-  const loadEventsFromApi = async () => {
+  const hasRealMedia = (e: any): boolean => {
+    if (!e) return false;
+    const img = String(e.imageUrl || e.imagem_url || '').trim();
+    const vid = String(e.videoUrl || e.video_url || '').trim();
+    const url = String(e.url || '').trim();
+
+    if (img.includes('images.unsplash.com') || url.includes('images.unsplash.com')) return false;
+
+    const hasImg = Boolean(
+      img.startsWith('data:image/') ||
+      img.startsWith('/api/event-poster/') ||
+      img.startsWith('http://') ||
+      img.startsWith('https://') ||
+      img.startsWith('/uploads/images/') ||
+      img.startsWith('/assets/') ||
+      img.startsWith('./uploads/images/')
+    );
+
+    const hasVid = Boolean(
+      vid.startsWith('data:video/') ||
+      vid.startsWith('http://') ||
+      vid.startsWith('https://') ||
+      vid.startsWith('/uploads/videos/') ||
+      url.startsWith('data:video/') ||
+      url.includes('.mp4') ||
+      url.includes('facebook') ||
+      url.includes('youtube') ||
+      url.includes('instagram') ||
+      url.includes('tiktok')
+    );
+
+    return hasImg || hasVid;
+  };
+
+  // Sync with backend PostgreSQL database apenas sob demanda (Admin / edições)
+  const loadEventsFromApi = async (options?: { admin?: boolean }) => {
     try {
-      const res = await fetch('/api/events');
+      const url = options?.admin ? '/api/events?admin=true&limit=5000' : '/api/events?limit=5000';
+      const [res, delRes] = await Promise.all([
+        fetch(url, { cache: 'no-store' }),
+        fetch('/api/events/deleted-ids', { cache: 'no-store' }).catch(() => null),
+      ]);
+
+      let delSet = new Set<string>();
+      if (delRes && delRes.ok) {
+        try {
+          const delData = await delRes.json();
+          if (Array.isArray(delData?.deletedIds)) {
+            delSet = new Set(delData.deletedIds);
+          }
+        } catch {}
+      }
+
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data)) {
-          setEvents(data);
-          try {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-          } catch {
-            // ignore
-          }
+          const cleaned = data.filter((e) => !delSet.has(e.id) && (options?.admin || hasRealMedia(e)));
+          setEvents(cleaned);
         }
       }
     } catch (e) {
-      console.warn('Usando armazenamento local de eventos:', e);
+      console.warn('Erro ao carregar eventos do servidor:', e);
     }
   };
 
@@ -158,11 +217,6 @@ export default function App() {
           setCategoryItems(data);
           const names = data.map((c) => c.nome);
           setCategories(names);
-
-          const festasObj = data.find((c) => (c.nome || '').trim().toLowerCase() === 'festas');
-          if (festasObj) {
-            saveCategoriaToFirestore(festasObj).catch(() => {});
-          }
         }
       }
     } catch (e) {
@@ -224,108 +278,49 @@ export default function App() {
   };
 
   useEffect(() => {
-    testFirestoreConnection();
+    // Limpa caches antigos de eventos (v1 a v8) para evitar ressurreição de dados de abas antigas
+    try {
+      localStorage.removeItem('praonde_events_data_v9');
+      localStorage.removeItem('praonde_events_data_v8');
+      localStorage.removeItem('praonde_events_data_v7');
+      localStorage.removeItem('praonde_events_data_v6');
+      localStorage.removeItem('praonde_events_data_v5');
+      localStorage.removeItem('praonde_events_data_v4');
+      localStorage.removeItem('praonde_events_data_v3');
+      localStorage.removeItem('praonde_events_data_v2');
+      localStorage.removeItem('praonde_events_data_v1');
+    } catch {}
 
-    // 1. Ouvir eventos do Firestore em tempo real (compartilhado entre PC e Celular)
-    const unsubEvents = subscribeToEvents((firestoreEvents) => {
-      if (Array.isArray(firestoreEvents) && firestoreEvents.length > 0) {
-        setEvents((prev) => {
-          const map = new Map<string, EventItem>();
-          // Mantém os eventos que já estão no estado (incluindo recém cadastrados no SQLite)
-          prev.forEach((p) => map.set(p.id, p));
-          firestoreEvents.forEach((fe) => {
-            const existing = map.get(fe.id);
-            if (existing && existing.videoUrl?.startsWith('data:video/') && fe.videoUrl === '[video_local_sqlite]') {
-              map.set(fe.id, { ...fe, videoUrl: existing.videoUrl, url: existing.url || existing.videoUrl });
-            } else {
-              map.set(fe.id, { ...(existing || {}), ...fe });
-            }
-          });
-          const merged = Array.from(map.values());
-          try {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
-          } catch {
-            // ignore
-          }
-
-          // Sincroniza em lote com o banco SQLite enviando a lista mesclada com vídeos preservados
-          fetch('/api/events/sync-batch', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ events: merged }),
-          }).catch((err) => {
-            console.warn('[Sync] Erro ao sincronizar lote com SQLite:', err);
-          });
-
-          return merged;
-        });
-      }
-    });
-
-    // 2. Ouvir estados/cidades do Firestore em tempo real
-    const unsubEstados = subscribeToEstados((firestoreEstados) => {
-      if (Array.isArray(firestoreEstados) && firestoreEstados.length > 0) {
-        setCidadesList(firestoreEstados);
-      }
-    });
-
-    // 3. Ouvir categorias do Firestore em tempo real
-    const unsubCategorias = subscribeToCategorias((firestoreCategorias) => {
-      if (Array.isArray(firestoreCategorias) && firestoreCategorias.length > 0) {
-        setCategoryItems(firestoreCategorias);
-        const names = firestoreCategorias.map((c) => c.nome);
-        setCategories(names);
-
-        const hasFestas = firestoreCategorias.some(
-          (c) => (c.nome || '').trim().toLowerCase() === 'festas'
-        );
-        if (!hasFestas) {
-          saveCategoriaToFirestore({
-            id: 1003,
-            nome: 'Festas',
-            descricao: 'Festas, comemorações e confraternizações',
-            ativa: true,
-            criadoEm: new Date().toISOString(),
-          }).catch(() => {});
-        }
-      }
-    });
-
-    // Carga inicial das APIs REST locais como fallback complementar
-    loadEventsFromApi();
+    // Carga inicial leve: carrega apenas dados auxiliares necessários na Home (sem baixar todos os eventos/cartazes)
     loadCategoriesFromApi();
     loadCidadesFromApi();
     loadSponsorsFromApi();
-    loadAdvertisersFromApi();
 
     const handleQuarantineCleared = () => {
-      loadEventsFromApi();
+      if (isAdminOpen) {
+        loadEventsFromApi({ admin: true });
+      }
     };
     window.addEventListener('praonde:quarantine-cleared', handleQuarantineCleared);
 
     return () => {
-      unsubEvents();
-      unsubEstados();
-      unsubCategorias();
       window.removeEventListener('praonde:quarantine-cleared', handleQuarantineCleared);
     };
   }, []);
 
-  // Sempre que a central administrativa for aberta, recarrega a lista completa e atualizada de eventos da API
+  // Carrega todos os eventos e anunciantes somente quando a central administrativa ou o cadastro de anunciante é aberto
   useEffect(() => {
     if (isAdminOpen) {
-      loadEventsFromApi();
+      loadEventsFromApi({ admin: true });
+      loadAdvertisersFromApi();
     }
   }, [isAdminOpen]);
 
-  // Persist events whenever modified
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(events));
-    } catch (e) {
-      console.error('Error saving events to storage', e);
+    if (currentScreen === 'advertiser_auth' || currentScreen === 'register') {
+      loadAdvertisersFromApi();
     }
-  }, [events]);
+  }, [currentScreen]);
 
   // Persist advertisers list
   useEffect(() => {
@@ -470,8 +465,9 @@ export default function App() {
 
   const handleToggleLiberado = async (id: string, currentLiberado: string) => {
     const nextLiberado = currentLiberado === 'S' ? 'N' : 'S';
+    const nextStatus = nextLiberado === 'S' ? 'aprovado' : 'em_analise';
     setEvents((prev) =>
-      prev.map((evt) => (evt.id === id ? { ...evt, liberado: nextLiberado } : evt))
+      prev.map((evt) => (evt.id === id ? { ...evt, liberado: nextLiberado, status: nextStatus } : evt))
     );
 
     // Sincronizar no Firestore em background (não bloqueia a interface)
@@ -479,23 +475,21 @@ export default function App() {
       console.warn('[Firestore] Erro ao atualizar liberado no Firestore:', fireErr);
     });
 
-    // Atualizar no localStorage imediatamente
+    // Sincronizar na API Cloud SQL
     try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        const parsed: EventItem[] = JSON.parse(stored);
-        const updated = parsed.map((evt) => (evt.id === id ? { ...evt, liberado: nextLiberado } : evt));
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-      }
-    } catch {}
-
-    // Sincronizar na API local
-    try {
-      await fetch(`/api/events/${id}`, {
+      const putRes = await fetch(`/api/events/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ liberado: nextLiberado }),
+        body: JSON.stringify({ liberado: nextLiberado, status: nextStatus }),
       });
+      if (putRes.ok && nextLiberado === 'S') {
+        const putJson = await putRes.json().catch(() => null);
+        if (putJson?.event) {
+          saveEventToFirestore(putJson.event).catch((fireErr) => {
+            console.warn('[Firestore] Erro ao sincronizar evento liberado no Firestore:', fireErr);
+          });
+        }
+      }
     } catch (e) {
       console.warn('Erro ao atualizar status liberado no SQLite:', e);
     }
@@ -507,13 +501,26 @@ export default function App() {
     updatedUrl?: string,
     urlType?: 'video' | 'image' | 'link'
   ) => {
-    const isVid = urlType === 'video' || (updatedUrl && (updatedUrl.startsWith('data:video/') || updatedUrl.includes('youtube') || updatedUrl.includes('fb.') || updatedUrl.includes('.mp4')));
+    const isVid = urlType === 'video' || (updatedUrl && (
+      updatedUrl.startsWith('data:video/') ||
+      updatedUrl.startsWith('/uploads/videos/') ||
+      updatedUrl.startsWith('./uploads/videos/') ||
+      updatedUrl.includes('youtube') ||
+      updatedUrl.includes('youtu.be') ||
+      updatedUrl.includes('fb.') ||
+      updatedUrl.includes('facebook.com') ||
+      updatedUrl.includes('.mp4') ||
+      updatedUrl.includes('.webm') ||
+      updatedUrl.includes('.mov')
+    ));
+    const nextStatus = nextLiberado === 'S' ? 'aprovado' : 'em_analise';
 
     // 1. Atualização de estado imediata na interface
     setEvents((prev) =>
       prev.map((evt) => (evt.id === id ? {
         ...evt,
         liberado: nextLiberado,
+        status: nextStatus,
         ...(updatedUrl ? { url: updatedUrl } : {}),
         ...(isVid ? { videoUrl: updatedUrl, mediaType: 'video' as const } : {}),
       } : evt))
@@ -524,36 +531,31 @@ export default function App() {
       console.warn('[Firestore] Erro ao atualizar liberado no Firestore:', fireErr);
     });
 
-    // 3. Atualizar no localStorage imediatamente
+    // 3. Sincronizar na API Cloud SQL (grava no arquivo de lançamento quando for vídeo)
     try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        const parsed: EventItem[] = JSON.parse(stored);
-        const updated = parsed.map((evt) => (evt.id === id ? {
-          ...evt,
-          liberado: nextLiberado,
-          ...(updatedUrl ? { url: updatedUrl } : {}),
-          ...(isVid ? { videoUrl: updatedUrl, mediaType: 'video' as const } : {}),
-        } : evt));
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-      }
-    } catch {}
-
-    // 4. Sincronizar na API local SQLite (grava no arquivo de lançamento quando for vídeo)
-    try {
-      await fetch(`/api/events/${id}`, {
+      const putRes = await fetch(`/api/events/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           liberado: nextLiberado,
+          status: nextStatus,
           url: updatedUrl,
           urlType,
           videoUrl: isVid ? updatedUrl : undefined,
         }),
       });
+      if (putRes.ok && nextLiberado === 'S') {
+        const putJson = await putRes.json().catch(() => null);
+        if (putJson?.event) {
+          saveEventToFirestore(putJson.event).catch((fireErr) => {
+            console.warn('[Firestore] Erro ao sincronizar evento liberado no Firestore:', fireErr);
+          });
+        }
+      }
     } catch (e) {
       console.warn('Erro ao atualizar status liberado no SQLite:', e);
     }
+    loadEventsFromApi();
   };
 
   // Inclusão instantânea de evento liberado da quarentena na tabela de eventos
@@ -568,15 +570,36 @@ export default function App() {
 
     // 2. Persistência imediata
     saveEventToFirestore(newEvent).catch(() => {});
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      const arr: EventItem[] = stored ? JSON.parse(stored) : [];
-      const updated = [newEvent, ...arr.filter((e) => e.id !== newEvent.id)];
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-    } catch {}
-
-    // 3. Sincronização em background com o SQLite
+    if (newEvent?.category) {
+      setCatalogInitialCategory(newEvent.category);
+    }
+    if (newEvent?.date) {
+      setCatalogInitialDate(newEvent.date);
+    }
+    // 2. Sincronização imediata com o Cloud SQL
     loadEventsFromApi();
+  };
+
+  // Solicitação de Edição de Cartaz protegida por Senha Master
+  const handleRequestEditEvent = (evt: EventItem) => {
+    setPendingEditEvent(evt);
+    setIsMasterPasswordModalOpen(true);
+  };
+
+  const handleMasterPasswordSuccess = () => {
+    if (pendingEditEvent) {
+      if (selectedEvent?.id === pendingEditEvent.id) {
+        setSelectedEvent(null);
+      }
+      setEditingEvent(pendingEditEvent);
+      setPendingEditEvent(null);
+    }
+    setIsMasterPasswordModalOpen(false);
+  };
+
+  const handleMasterPasswordClose = () => {
+    setIsMasterPasswordModalOpen(false);
+    setPendingEditEvent(null);
   };
 
   const handleSearchRedirect = (term: string) => {
@@ -591,12 +614,20 @@ export default function App() {
     setCurrentAdvertiser(null);
     setIsSqlConsoleOpen(false);
     setIsAdminOpen(false);
+    setIsHomeMenuOpen(false);
     setCurrentScreen('home');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleNavigate = (screen: ActiveScreen) => {
+    setIsHomeMenuOpen(false);
     setCatalogInitialQuery('');
+    if (screen === 'events') {
+      setCatalogInitialCategory('');
+      setCatalogInitialEstado('');
+      setCatalogInitialDate('');
+      setCatalogInitialSortByProximity(true);
+    }
 
     // Ao clicar em Divulgar Evento, direciona SEMPRE para a tela de verificação de e-mail (se existe ou não)
     if (screen === 'register' || screen === 'advertiser_auth') {
@@ -634,6 +665,13 @@ export default function App() {
         isMasterAdmin={isMasterAdmin}
         onOpenSqlConsole={() => setIsSqlConsoleOpen(true)}
         onOpenAdmin={() => setIsAdminOpen(true)}
+        onOpenInstall={openInstallModal}
+        onPromptInstall={promptInstall}
+        hasNativePrompt={hasNativePrompt}
+        isAppInstalled={isInstalled}
+        isHomeMenuOpen={isHomeMenuOpen}
+        onToggleHomeMenu={() => setIsHomeMenuOpen((prev) => !prev)}
+        onCloseHomeMenu={() => setIsHomeMenuOpen(false)}
       />
 
       {/* Main Content Router */}
@@ -648,13 +686,20 @@ export default function App() {
             sponsors={sponsors}
             categories={categories}
             cidadesList={cidadesList}
+            onOpenInstall={openInstallModal}
+            onPromptInstall={promptInstall}
+            hasNativePrompt={hasNativePrompt}
+            isAppInstalled={isInstalled}
+            isHomeMenuOpen={isHomeMenuOpen}
+            onToggleHomeMenu={() => setIsHomeMenuOpen((prev) => !prev)}
             onDiscoverySearch={({ category, estado, date, sortByProximity }) => {
               setCatalogInitialCategory(category);
               setCatalogInitialEstado(estado);
               setCatalogInitialDate(date);
               setCatalogInitialSortByProximity(sortByProximity);
               setCatalogInitialQuery('');
-              handleNavigate('events');
+              setCurrentScreen('events');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
             }}
           />
         )}
@@ -670,6 +715,7 @@ export default function App() {
             initialDate={catalogInitialDate}
             initialSortByProximity={catalogInitialSortByProximity}
             onDeleteEvent={handleDeleteEvent}
+            onEditEvent={handleRequestEditEvent}
             estadosList={cidadesList}
             onRefreshEvents={loadEventsFromApi}
             categoriesList={categories}
@@ -684,6 +730,7 @@ export default function App() {
             currentAdvertiser={currentAdvertiser}
             onRegisterAdvertiser={(newAdv) => {
               setAdvertisers((prev) => [newAdv, ...prev.filter((a) => a.id !== newAdv.id)]);
+              saveAdvertiserToFirestore(newAdv).catch(() => {});
               loadAdvertisersFromApi();
             }}
           />
@@ -695,6 +742,12 @@ export default function App() {
             onNavigate={handleNavigate}
             onSelectEvent={(evt) => {
               setSelectedEvent(evt);
+              if (evt?.category) {
+                setCatalogInitialCategory(evt.category);
+              }
+              if (evt?.date) {
+                setCatalogInitialDate(evt.date);
+              }
               handleNavigate('events');
             }}
             currentAdvertiser={currentAdvertiser}
@@ -707,6 +760,7 @@ export default function App() {
         {currentScreen === 'sponsor_register' && (
           <SponsorRegistrationScreen
             onBack={() => handleNavigate('home')}
+            cidadesList={cidadesList}
             onSponsorCreated={(newSponsor) => {
               const updated = [newSponsor, ...sponsors];
               setSponsors(updated);
@@ -723,7 +777,85 @@ export default function App() {
         <EventDetailModal
           event={selectedEvent}
           onClose={() => setSelectedEvent(null)}
-          onDelete={handleDeleteEvent}
+          onDelete={isMasterAdmin ? handleDeleteEvent : undefined}
+          onEdit={(evt) => handleRequestEditEvent(evt)}
+        />
+      )}
+
+      {/* Modal de Senha Master para Editar / Trocar Cartaz */}
+      <MasterPasswordModal
+        isOpen={isMasterPasswordModalOpen}
+        eventTitle={pendingEditEvent?.title}
+        onSuccess={handleMasterPasswordSuccess}
+        onClose={handleMasterPasswordClose}
+      />
+
+      {/* Modal de Análise e Edição Direta do Evento */}
+      {editingEvent && (
+        <EventLiberationModal
+          isOpen={Boolean(editingEvent)}
+          event={editingEvent}
+          categories={categories}
+          categoryItems={categoryItems}
+          onClose={() => setEditingEvent(null)}
+          onSaveLiberation={async (id, liberado, newCategory, updatedUrl, urlType) => {
+            if (liberado === 'N') {
+              await handleDeleteEvent(id);
+              setEditingEvent(null);
+              return;
+            }
+            await handleSetLiberado(id, 'S', updatedUrl, urlType);
+            if (newCategory) {
+              try {
+                await fetch(`/api/events/${id}/category`, {
+                  method: 'PATCH',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ category: newCategory }),
+                });
+              } catch (catErr) {
+                console.warn('Erro ao atualizar categoria na edição direta:', catErr);
+              }
+            }
+            if (updatedUrl && updatedUrl.trim()) {
+              try {
+                await fetch(`/api/events/${id}/url`, {
+                  method: 'PATCH',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ url: updatedUrl.trim(), mediaType: urlType || (updatedUrl.startsWith('data:image/') ? 'image' : 'video') }),
+                });
+              } catch (urlErr) {
+                console.warn('Erro ao atualizar URL/imagem na edição direta:', urlErr);
+              }
+            }
+            loadEventsFromApi();
+            setEditingEvent(null);
+          }}
+          onUpdateCategory={async (id, newCategory, newCatId) => {
+            try {
+              const res = await fetch(`/api/events/${id}/category`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ category: newCategory, categoryId: newCatId }),
+              });
+              loadEventsFromApi();
+              return res.ok;
+            } catch {
+              return false;
+            }
+          }}
+          onUpdateUrl={async (id, newUrl, urlType) => {
+            try {
+              const res = await fetch(`/api/events/${id}/url`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: newUrl, mediaType: urlType }),
+              });
+              loadEventsFromApi();
+              return res.ok;
+            } catch {
+              return false;
+            }
+          }}
         />
       )}
 
@@ -766,6 +898,21 @@ export default function App() {
         onEventsUpdated={loadEventsFromApi}
         onEventApproved={handleEventApproved}
       />
+
+      {/* PWA Install Modal */}
+      <PWAInstallModal
+        isOpen={isModalOpen}
+        onClose={closeInstallModal}
+        isIOS={isIOS}
+        isAndroid={isAndroid}
+        isInstalled={isInstalled}
+        hasNativePrompt={hasNativePrompt}
+        initialShowTip={showTipOnOpen}
+        onPromptInstall={promptInstall}
+      />
+
+      {/* Offline Connectivity Indicator */}
+      <OfflineIndicator />
     </div>
   );
 }

@@ -38,8 +38,9 @@ import {
   LayoutGrid,
   ChevronDown
 } from 'lucide-react';
-import { EventItem, EventCategory, ActiveScreen, Advertiser, CategoryItem, CidadeItem } from '../types';
-import { parseVideoUrl } from '../lib/videoUtils';
+import { EventItem, EventCategory, ActiveScreen, Advertiser, CategoryItem, CidadeItem, DEFAULT_CIDADES } from '../types';
+import { parseVideoUrl, isVideoFormatUrl } from '../lib/videoUtils';
+import { uploadVideoFileToServer } from '../lib/videoUpload';
 import { VideoPlayer } from './VideoPlayer';
 
 interface EventRegisterProps {
@@ -169,11 +170,13 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
   const [endTime, setEndTime] = useState('');
   const [locationName, setLocationName] = useState('');
   const [address, setAddress] = useState('');
-  const [cidadesList, setCidadesList] = useState<CidadeItem[]>(() => propCidadesList || []);
+  const [cidadesList, setCidadesList] = useState<CidadeItem[]>(() => 
+    propCidadesList && propCidadesList.length > 0 ? propCidadesList : DEFAULT_CIDADES
+  );
   const [isLoadingCidades, setIsLoadingCidades] = useState(false);
-  const [selectedCidadeId, setSelectedCidadeId] = useState<number | ''>(() => propCidadesList?.[0]?.id || '');
-  const [city, setCity] = useState<string>(() => propCidadesList?.[0]?.nome || '');
-  const [state, setState] = useState<string>(() => propCidadesList?.[0]?.estado || 'SP');
+  const [selectedCidadeId, setSelectedCidadeId] = useState<number | ''>('');
+  const [city, setCity] = useState<string>('');
+  const [state, setState] = useState<string>('');
   const [latitude, setLatitude] = useState('');
   const [longitude, setLongitude] = useState('');
   const [isGeocoding, setIsGeocoding] = useState(false);
@@ -187,6 +190,9 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
   const [videoUrl, setVideoUrl] = useState('');
   const [isDragging, setIsDragging] = useState(false);
   const [isVideoDragging, setIsVideoDragging] = useState(false);
+  const [isReadingVideo, setIsReadingVideo] = useState(false);
+  const [videoUploadProgress, setVideoUploadProgress] = useState<number>(0);
+  const [videoUploadStatus, setVideoUploadStatus] = useState<string>('');
   const [organizer, setOrganizer] = useState(
     currentAdvertiser?.name || (currentAdvertiser?.email ? currentAdvertiser.email.split('@')[0] : '')
   );
@@ -198,12 +204,6 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
   useEffect(() => {
     if (propCidadesList && propCidadesList.length > 0) {
       setCidadesList(propCidadesList);
-      const found = propCidadesList.find((c) => c.nome.toLowerCase() === city.toLowerCase()) || propCidadesList[0];
-      if (found) {
-        setSelectedCidadeId(found.id);
-        setCity(found.nome);
-        setState(found.estado);
-      }
     }
   }, [propCidadesList]);
 
@@ -212,23 +212,18 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
     const fetchCidades = async () => {
       setIsLoadingCidades(true);
       try {
-        const res = await fetch('/api/estado');
+        let res = await fetch('/api/cidades');
+        if (!res.ok) {
+          res = await fetch('/api/estado');
+        }
         if (res.ok) {
           const data = await res.json();
-          if (Array.isArray(data)) {
+          if (Array.isArray(data) && data.length > 0) {
             setCidadesList(data);
-            if (data.length > 0) {
-              const matched = data.find((c: CidadeItem) => c.nome.toLowerCase() === city.toLowerCase()) || data[0];
-              if (matched) {
-                setSelectedCidadeId(matched.id);
-                setCity(matched.nome);
-                setState(matched.estado);
-              }
-            }
           }
         }
       } catch (err) {
-        console.warn('Erro ao carregar registros da tabela estado:', err);
+        console.warn('Erro ao carregar registros de cidades:', err);
       } finally {
         setIsLoadingCidades(false);
       }
@@ -240,14 +235,12 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
   const fetchCoordinates = async (
     customAddr = address,
     customCity = city,
-    customState = state,
-    customLocName = locationName
+    customState = state
   ): Promise<{ latitude: string; longitude: string } | null> => {
     const targetAddr = (customAddr || '').trim();
     const targetCity = (customCity || '').trim();
-    const targetLocName = (customLocName || '').trim();
 
-    if (!targetAddr && !targetCity && !targetLocName) {
+    if (!targetAddr && !targetCity) {
       setLatitude('');
       setLongitude('');
       setGeocodeInfo(null);
@@ -262,7 +255,6 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
         address: targetAddr,
         city: targetCity,
         state: customState,
-        locationName: targetLocName,
       });
 
       const response = await fetch(`/api/geocode?${params.toString()}`);
@@ -273,15 +265,29 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
           const lonStr = String(data.longitude);
           setLatitude(latStr);
           setLongitude(lonStr);
-          const detail = data.displayName ? ` (${data.displayName.split(',').slice(0, 3).join(',')})` : '';
-          setGeocodeInfo(`Coordenadas do endereço confirmadas: Lat ${Number(latStr).toFixed(4)}, Lon ${Number(lonStr).toFixed(4)}${detail}`);
+
+          if (data.addressResolved === false) {
+            setGeocodeInfo(`⚠️ Endereço aproximado: Não localizamos o número exato no mapa (preenchido com centro/bairro). Se necessário, digite ou cole as coordenadas corretas nos campos abaixo.`);
+          } else {
+            const detail = data.displayName ? ` (${data.displayName.split(',').slice(0, 3).join(',')})` : '';
+            setGeocodeInfo(`Coordenadas do endereço confirmadas: Lat ${Number(latStr).toFixed(4)}, Lon ${Number(lonStr).toFixed(4)}${detail}`);
+          }
           return { latitude: latStr, longitude: lonStr };
+        } else {
+          setLatitude('');
+          setLongitude('');
+          setGeocodeInfo(null);
         }
       } else {
-        setGeocodeInfo('Coordenadas em processamento: serão calculadas pelo endereço ao salvar.');
+        setLatitude('');
+        setLongitude('');
+        setGeocodeInfo(null);
       }
     } catch (err) {
       console.warn('Erro ao consultar serviço de geolocalização do endereço:', err);
+      setLatitude('');
+      setLongitude('');
+      setGeocodeInfo(null);
     } finally {
       setIsGeocoding(false);
     }
@@ -289,14 +295,13 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
     return null;
   };
 
-  // Efeito automático: Sempre que o endereço, cidade, estado ou local do evento forem alterados,
+  // Efeito automático: Sempre que o endereço, cidade ou estado do evento forem alterados,
   // atualiza automaticamente as coordenadas com base no endereço do evento
   useEffect(() => {
     const cleanAddr = address.trim();
     const cleanCity = city.trim();
-    const cleanLoc = locationName.trim();
 
-    if (!cleanAddr && !cleanCity && !cleanLoc) {
+    if (!cleanAddr && !cleanCity) {
       setLatitude('');
       setLongitude('');
       setGeocodeInfo(null);
@@ -305,53 +310,130 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
 
     // Debounce de 700ms para aguardar término da digitação
     const timer = setTimeout(() => {
-      fetchCoordinates(cleanAddr, cleanCity, state, cleanLoc);
+      fetchCoordinates(cleanAddr, cleanCity, state);
     }, 700);
 
     return () => clearTimeout(timer);
-  }, [address, city, state, locationName]);
+  }, [address, city, state]);
 
   const handleFileSelect = (file: File) => {
-    if (!file.type.startsWith('image/')) {
-      setErrorMessage('Por favor, envie um arquivo de imagem válido (JPG, PNG, WEBP).');
+    const isImage =
+      (file.type && file.type.startsWith('image/')) ||
+      /\.(jpe?g|png|webp|gif|avif|bmp|svg|jfif|heic|heif|tiff?|ico)$/i.test(file.name || '');
+
+    if (!isImage) {
+      setErrorMessage('Por favor, envie um arquivo de imagem válido (PNG, JPEG, JPG, WEBP, GIF, AVIF, BMP, etc.).');
       return;
     }
     const reader = new FileReader();
-    reader.onload = (event) => {
-      if (typeof event.target?.result === 'string') {
-        setImageUrl(event.target.result);
-      }
+    reader.onload = (readerEvent) => {
+      const img = new Image();
+      img.onload = () => {
+        // Redimensiona mantendo a proporção (largura máxima ou altura máxima de 800px)
+        const maxDimension = 800;
+        let width = img.width;
+        let height = img.height;
+        if (width > height) {
+          if (width > maxDimension) {
+            height = Math.round((height * maxDimension) / width);
+            width = maxDimension;
+          }
+        } else {
+          if (height > maxDimension) {
+            width = Math.round((width * maxDimension) / height);
+            height = maxDimension;
+          }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          // Preenchimento de segurança para transparência (PNG/WebP/SVG com fundo alfa)
+          ctx.fillStyle = '#0f172a';
+          ctx.fillRect(0, 0, width, height);
+          ctx.drawImage(img, 0, 0, width, height);
+          // CONVERSÃO AUTOMÁTICA UNIVERSAL: converte qualquer formato de imagem para JPEG otimizado
+          const compressedBase64 = canvas.toDataURL('image/jpeg', 0.85);
+          setImageUrl(compressedBase64);
+        } else {
+          if (typeof readerEvent.target?.result === 'string') {
+            setImageUrl(readerEvent.target.result);
+          }
+        }
+      };
+      img.onerror = () => {
+        // Fallback robusto se o navegador não renderizar diretamente via Image()
+        if (typeof readerEvent.target?.result === 'string') {
+          setImageUrl(readerEvent.target.result);
+        }
+      };
+      img.src = readerEvent.target?.result as string;
     };
     reader.readAsDataURL(file);
   };
 
-  const handleVideoFileSelect = (file: File) => {
-    const isMp4 = file.type === 'video/mp4' || file.name.toLowerCase().endsWith('.mp4');
-    if (!isMp4) {
-      setErrorMessage('Formato não permitido. Na mídia de divulgação em vídeo, aceitamos exclusivamente arquivos no formato MP4 (.mp4).');
+  const handleVideoFileSelect = async (file: File) => {
+    const fName = (file.name || '').toLowerCase();
+    const isVideo =
+      file.type.startsWith('video/') ||
+      file.type === 'application/mp4' ||
+      file.type === 'application/octet-stream' ||
+      fName.endsWith('.mp4') ||
+      fName.endsWith('.webm') ||
+      fName.endsWith('.mov') ||
+      fName.endsWith('.m4v') ||
+      fName.endsWith('.3gp') ||
+      fName.includes('whatsapp');
+
+    if (!isVideo) {
+      setErrorMessage('Formato não permitido. Na mídia de divulgação em vídeo, aceitamos arquivos de vídeo (MP4, WEBM, MOV, M4V).');
       return;
     }
-    // Suporte a arquivos de até 50MB
-    if (file.size > 50 * 1024 * 1024) {
-      setErrorMessage('O arquivo de vídeo ultrapassa 50MB. Por favor, envie um arquivo MP4 menor.');
+    // Suporte a arquivos de até 80MB
+    if (file.size > 80 * 1024 * 1024) {
+      setErrorMessage('O arquivo de vídeo ultrapassa 80MB. Por favor, envie um arquivo menor.');
       return;
     }
     setErrorMessage(null);
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      if (typeof event.target?.result === 'string') {
-        setVideoUrl(event.target.result);
+    setIsReadingVideo(true);
+    setVideoUploadProgress(0);
+    setVideoUploadStatus('Iniciando envio do vídeo...');
+
+    try {
+      const result = await uploadVideoFileToServer(file, (pct, msg) => {
+        setVideoUploadProgress(pct);
+        if (msg) setVideoUploadStatus(msg);
+      });
+      setVideoUrl(result.videoUrl);
+      if (result.imageUrl && !imageUrl) {
+        setImageUrl(result.imageUrl);
       }
-    };
-    reader.readAsDataURL(file);
+      setIsReadingVideo(false);
+      setVideoUploadStatus('');
+    } catch (uploadErr: any) {
+      console.error('Erro no envio de vídeo:', uploadErr);
+      setIsReadingVideo(false);
+      setVideoUploadProgress(0);
+      setVideoUploadStatus('');
+      setErrorMessage(
+        uploadErr?.message ||
+          'Erro ao enviar o arquivo de vídeo para o servidor. Verifique sua conexão e tente novamente.'
+      );
+    }
   };
 
   const handleVideoUrlChange = (url: string) => {
-    const clean = url.trim();
+    let clean = url.trim();
     if (clean) {
-      const isMp4 = clean.toLowerCase().split('?')[0].endsWith('.mp4') || clean.startsWith('data:video/mp4');
-      if (!isMp4) {
-        setErrorMessage('Apenas vídeos no formato MP4 (.mp4) são permitidos. A URL deve terminar com .mp4');
+      if (/^(www\.|youtube\.com|youtu\.be|facebook\.com|fb\.watch|instagram\.com|tiktok\.com|vimeo\.com|drive\.google\.com)/i.test(clean)) {
+        clean = `https://${clean}`;
+      }
+      const isMp4 = clean.toLowerCase().split('?')[0].endsWith('.mp4') || clean.startsWith('data:video/') || clean.startsWith('/uploads/') || clean.startsWith('/assets/');
+      const isRecognized = clean.includes('youtube.com') || clean.includes('youtu.be') || clean.includes('facebook.com') || clean.includes('fb.watch') || clean.includes('instagram.com') || clean.includes('tiktok.com') || clean.includes('vimeo.com') || clean.includes('drive.google.com') || isMp4 || isVideoFormatUrl(clean);
+      if (!isRecognized && !clean.startsWith('http://') && !clean.startsWith('https://') && !clean.startsWith('/')) {
+        setErrorMessage('Informe uma URL de vídeo válida (.mp4, YouTube, Facebook, Instagram, Google Drive ou Vimeo).');
       } else {
         setErrorMessage(null);
       }
@@ -381,6 +463,13 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
   const [submittedEvent, setSubmittedEvent] = useState<EventItem | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // Rola a página para o topo de forma suave sempre que uma mensagem de erro for exibida
+  useEffect(() => {
+    if (errorMessage) {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, [errorMessage]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
@@ -394,8 +483,12 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
       setErrorMessage('Por favor, selecione a data de realização do evento.');
       return;
     }
-    if (!locationName.trim() || !city.trim()) {
-      setErrorMessage('Por favor, informe o local e a cidade do evento.');
+    if (!locationName.trim()) {
+      setErrorMessage('Por favor, informe o local do evento.');
+      return;
+    }
+    if (!selectedCidadeId || !city.trim()) {
+      setErrorMessage('Por favor, selecione a Cidade do evento.');
       return;
     }
     if (!organizer.trim()) {
@@ -404,12 +497,16 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
     }
     if (selectedMediaType === 'video') {
       if (!videoUrl.trim()) {
-        setErrorMessage('Por favor, anexe o arquivo de vídeo no formato MP4 (.mp4) do seu evento.');
+        setErrorMessage('Por favor, informe o link do vídeo (Facebook, YouTube, Instagram, Google Drive, Vimeo) ou anexe um arquivo MP4.');
         return;
       }
-      const isMp4 = videoUrl.startsWith('data:video/mp4') || videoUrl.startsWith('data:video/') || videoUrl.toLowerCase().split('?')[0].endsWith('.mp4');
-      if (!isMp4) {
-        setErrorMessage('Apenas arquivos de vídeo no formato MP4 (.mp4) são permitidos na mídia de divulgação.');
+      if (!isVideoFormatUrl(videoUrl)) {
+        setErrorMessage('Informe uma URL de vídeo válida (Facebook, YouTube, Instagram, Google Drive, Vimeo) ou envie um arquivo MP4.');
+        return;
+      }
+    } else {
+      if (!imageUrl.trim()) {
+        setErrorMessage('Por favor, anexe o cartaz oficial do evento (formato vertical) ou digite a URL da imagem da internet.');
         return;
       }
     }
@@ -421,19 +518,48 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
     let finalLon = longitude.trim();
 
     if (!finalLat || !finalLon) {
-      const detected = await fetchCoordinates(address, city, state, locationName);
+      const detected = await fetchCoordinates(address, city, state);
       if (detected) {
         finalLat = detected.latitude;
         finalLon = detected.longitude;
       }
     }
 
+    if (!finalLat || !finalLon) {
+      setIsSubmitting(false);
+      setErrorMessage("Erro no endereço: Não foi possível obter as coordenadas de geolocalização (latitude/longitude) para este endereço. Por favor, verifique se o Endereço e Cidade do evento estão corretos para que possamos localizá-lo com precisão no mapa.");
+      return;
+    }
+
     const currentCat = availableCategories.find((c) => c.id === selectedCategoryId);
     const resolvedCatName = (currentCat ? currentCat.nome : category) as EventCategory;
     const resolvedCatId = currentCat ? currentCat.id : selectedCategoryId;
 
+    const eventUniqueId = `user-${Date.now()}`;
+    let finalVideoUrlToSubmit = videoUrl.trim() || undefined;
+
+    // Se o vídeo for grande (> ~400KB em arquivo), envia fisicamente ao servidor antes de publicar;
+    // vídeos pequenos (<= 560KB em Base64) seguem direto em Base64 para persistir no SQLite e atravessar o Firestore.
+    if (selectedMediaType === 'video' && finalVideoUrlToSubmit && finalVideoUrlToSubmit.startsWith('data:video/') && finalVideoUrlToSubmit.length > 560000) {
+      try {
+        const upRes = await fetch('/api/upload/video', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ data: finalVideoUrlToSubmit, eventId: eventUniqueId }),
+        });
+        if (upRes.ok) {
+          const upJson = await upRes.json();
+          if (upJson.videoUrl) {
+            finalVideoUrlToSubmit = upJson.videoUrl;
+          }
+        }
+      } catch (upErr) {
+        console.warn('Erro ao pré-salvar vídeo em disco:', upErr);
+      }
+    }
+
     const newEvent: EventItem = {
-      id: `user-${Date.now()}`,
+      id: eventUniqueId,
       title: title.trim(),
       description: description.trim(),
       category: resolvedCatName,
@@ -453,19 +579,21 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
       isFree,
       price: !isFree && price && !isNaN(parseFloat(price)) ? parseFloat(price) : undefined,
       priceDetails: priceDetails.trim() || (!isFree ? (price ? `R$ ${price}` : 'Consulte valores') : 'Entrada Franca'),
-      imageUrl: imageUrl.trim() || (parseVideoUrl(videoUrl)?.thumbnailUrl) || DEFAULT_FALLBACK_IMAGE,
+      imageUrl: imageUrl.trim() || '',
       mediaType: selectedMediaType,
-      videoUrl: videoUrl.trim() || undefined,
-      url: videoUrl.trim() || imageUrl.trim() || undefined,
+      videoUrl: finalVideoUrlToSubmit,
+      url: finalVideoUrlToSubmit || imageUrl.trim() || undefined,
       organizer: organizer.trim(),
       contact: contact.trim() || undefined,
       tags: [resolvedCatName],
       featured: false,
+      estadoId: selectedCidadeId ? Number(selectedCidadeId) : undefined,
+      estado_id: selectedCidadeId ? Number(selectedCidadeId) : undefined,
       createdAt: new Date().toISOString(),
     };
 
     try {
-      setToastNotice('Registro enviado para análise, prazo 48 horas para liberação');
+      setToastNotice('Evento cadastrado com sucesso! Já disponível para consulta.');
       const savedResult = await onAddEvent(newEvent);
       if (savedResult && savedResult.id) {
         setSubmittedEvent(savedResult);
@@ -589,7 +717,7 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                     ? 'bg-emerald-500 text-slate-950 font-extrabold'
                     : 'bg-slate-950/90 text-amber-300 border border-amber-500/30 backdrop-blur-sm'
                 }`}>
-                  {submittedEvent.isFree ? 'Gratuito' : (submittedEvent.price ? `R$ ${submittedEvent.price.toFixed(2).replace('.', ',')}` : (submittedEvent.priceDetails || 'Consulte'))}
+                  {submittedEvent.isFree ? 'Gratuito' : (submittedEvent.price ? `A partir de R$ ${submittedEvent.price.toFixed(2).replace('.', ',')}` : (submittedEvent.priceDetails || 'Consulte'))}
                 </span>
               </div>
             </div>
@@ -709,6 +837,9 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
           <h1 className="text-xl sm:text-2xl font-extrabold text-white">
             Cadastrar Novo Evento
           </h1>
+          <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
+            Estado de São Paulo (SP)
+          </span>
         </div>
 
         <button
@@ -736,8 +867,11 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                   <CheckCircle2 className="w-3 h-3" /> Anunciante Verificado
                 </span>
               </div>
-              <p className="text-xs text-slate-400">
-                Logado como: <span className="text-slate-300 font-medium">{currentAdvertiser.email}</span>
+              <p className="text-xs text-slate-400 flex items-center gap-2 flex-wrap mt-0.5">
+                <span>Logado como: <span className="text-slate-300 font-medium">{currentAdvertiser.email}</span></span>
+                {currentAdvertiser.phone && (
+                  <span>• Tel/WhatsApp: <span className="text-slate-300 font-mono">{currentAdvertiser.phone}</span></span>
+                )}
               </p>
             </div>
           </div>
@@ -773,6 +907,19 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
           </button>
         </div>
       )}
+
+      {/* Banner de Plataforma Exclusiva Estado de São Paulo */}
+      <div className="mb-6 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center gap-3">
+        <span className="text-2xl shrink-0">📍</span>
+        <div>
+          <h4 className="text-xs sm:text-sm font-bold text-amber-300">
+            Plataforma Exclusiva para o Estado de São Paulo (SP)
+          </h4>
+          <p className="text-xs text-slate-300 mt-0.5">
+            Cadastre eventos, shows, bailes e apresentações que acontecem nos municípios do Estado de São Paulo.
+          </p>
+        </div>
+      </div>
 
       {/* Formulário de Cadastro Centralizado (Sem pré-visualização ao entrar na tela) */}
       <div className="max-w-3xl mx-auto">
@@ -926,12 +1073,7 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                 type="text"
                 value={locationName}
                 onChange={(e) => setLocationName(e.target.value)}
-                onBlur={() => {
-                  if (locationName.trim() || address.trim() || city.trim()) {
-                    fetchCoordinates(address, city, state, locationName);
-                  }
-                }}
-                placeholder="Ex: Parque Ibirapuera, Circo Voador, Galeria de Arte..."
+                placeholder="Ex: Espaço Unimed, Audio Club, Tokio Marine Hall, Clube Juventus..."
                 required
                 className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
               />
@@ -946,11 +1088,11 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                 value={address}
                 onChange={(e) => setAddress(e.target.value)}
                 onBlur={() => {
-                  if (address.trim() || city.trim() || locationName.trim()) {
-                    fetchCoordinates(address, city, state, locationName);
+                  if (address.trim() || city.trim()) {
+                    fetchCoordinates(address, city, state);
                   }
                 }}
-                placeholder="Ex: Av. Paulista, 1000 - Bela Vista"
+                placeholder="Ex: Av. Francisco Matarazzo, 694 - Água Branca"
                 className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
               />
             </div>
@@ -958,39 +1100,77 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
             <div className="grid grid-cols-3 gap-3">
               <div className="col-span-2">
                 <label className="block text-xs font-semibold text-slate-300 mb-1.5 flex items-center justify-between">
-                  <span>Cidade do Evento *</span>
+                  <span>Cidade do Evento (Estado de São Paulo) *</span>
                   <span className="text-[10px] text-amber-400 font-normal">
-                    {isLoadingCidades ? 'Carregando registros...' : `${cidadesList.length} cadastradas na tabela estado`}
+                    {cidadesList.length} cidades em SP
                   </span>
                 </label>
-                <select
-                  id="select-register-city"
-                  value={selectedCidadeId}
-                  disabled={isLoadingCidades && cidadesList.length === 0}
-                  onChange={(e) => {
-                    const id = Number(e.target.value);
-                    setSelectedCidadeId(id);
-                    const found = cidadesList.find((c) => c.id === id);
-                    if (found) {
-                      setCity(found.nome);
-                      setState(found.estado);
-                      fetchCoordinates(address, found.nome, found.estado, locationName);
-                    }
-                  }}
-                  className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white focus:outline-none focus:ring-2 focus:ring-amber-500/50 cursor-pointer disabled:opacity-50"
-                >
-                  {isLoadingCidades && cidadesList.length === 0 && (
-                    <option value="">Carregando da tabela estado...</option>
-                  )}
-                  {!isLoadingCidades && cidadesList.length === 0 && (
-                    <option value="">Nenhum registro cadastrado na tabela estado</option>
-                  )}
-                  {cidadesList.map((cid) => (
-                    <option key={cid.id} value={cid.id}>
-                      {cid.nome} - {cid.estado}
+
+                {/* Quick chips para selecionar com 1 toque */}
+                <div className="flex flex-wrap gap-1 mb-2">
+                  {['Praia Grande', 'Santos', 'São Paulo', 'Santo André'].map((qName) => {
+                    const found = cidadesList.find((c) => c.nome.toLowerCase() === qName.toLowerCase());
+                    const isSelected = found && selectedCidadeId === found.id;
+                    return (
+                      <button
+                        key={`event-quick-${qName}`}
+                        type="button"
+                        onClick={() => {
+                          if (found) {
+                            setSelectedCidadeId(found.id);
+                            setCity(found.nome);
+                            setState(found.estado);
+                            fetchCoordinates(address, found.nome, found.estado);
+                          }
+                        }}
+                        className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold transition-all cursor-pointer ${
+                          isSelected
+                            ? 'bg-amber-500 text-slate-950 font-black shadow-sm'
+                            : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+                        }`}
+                      >
+                        {qName}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="relative">
+                  <select
+                    id="select-register-city"
+                    value={selectedCidadeId}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val === '') {
+                        setSelectedCidadeId('');
+                        setCity('');
+                        setState('');
+                        return;
+                      }
+                      const id = Number(val);
+                      setSelectedCidadeId(id);
+                      const found = cidadesList.find((c) => c.id === id);
+                      if (found) {
+                        setCity(found.nome);
+                        setState(found.estado);
+                        fetchCoordinates(address, found.nome, found.estado);
+                      }
+                    }}
+                    className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-sm text-white focus:outline-none focus:ring-2 focus:ring-amber-500/50 cursor-pointer appearance-none pr-9"
+                  >
+                    <option value="" className="bg-slate-900 text-slate-400">
+                      Selecione a Cidade do Evento...
                     </option>
-                  ))}
-                </select>
+                    {cidadesList.map((cid) => (
+                      <option key={cid.id} value={cid.id} className="bg-slate-900 text-white">
+                        {cid.nome} - {cid.estado}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3 text-slate-400">
+                    <ChevronDown className="w-4 h-4" />
+                  </div>
+                </div>
               </div>
 
               <div>
@@ -1020,8 +1200,8 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
 
                 <button
                   type="button"
-                  onClick={() => fetchCoordinates(address, city, state, locationName)}
-                  disabled={isGeocoding || (!address.trim() && !city.trim() && !locationName.trim())}
+                  onClick={() => fetchCoordinates(address, city, state)}
+                  disabled={isGeocoding || (!address.trim() && !city.trim())}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 transition-colors disabled:opacity-50 cursor-pointer w-fit"
                   title="Consultar coordenadas com base no endereço digitado"
                 >
@@ -1039,15 +1219,42 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                 </button>
               </div>
 
-              {/* Status Banner */}
-              {latitude && longitude ? (
-                <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300 flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                    <span>
-                      <strong>Coordenadas do endereço do evento:</strong> Lat <code className="text-white font-mono bg-emerald-950/60 px-1 py-0.5 rounded">{latitude}</code>, Long <code className="text-white font-mono bg-emerald-950/60 px-1 py-0.5 rounded">{longitude}</code>
-                    </span>
-                  </div>
+              {/* Status Banner com Formulário de Edição Manual */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-3">
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                    Latitude (Auto-gerada ou digite manualmente)
+                  </label>
+                  <input
+                    type="text"
+                    value={latitude}
+                    onChange={(e) => {
+                      setLatitude(e.target.value);
+                      setGeocodeInfo('Coordenadas editadas manualmente pelo usuário.');
+                    }}
+                    placeholder="Ex: -23.5356"
+                    className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:ring-2 focus:ring-amber-500/50"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                    Longitude (Auto-gerada ou digite manualmente)
+                  </label>
+                  <input
+                    type="text"
+                    value={longitude}
+                    onChange={(e) => {
+                      setLongitude(e.target.value);
+                      setGeocodeInfo('Coordenadas editadas manualmente pelo usuário.');
+                    }}
+                    placeholder="Ex: -46.6269"
+                    className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:ring-2 focus:ring-amber-500/50"
+                  />
+                </div>
+              </div>
+
+              {latitude && longitude && (
+                <div className="mt-3 flex items-center justify-end">
                   <a
                     href={`https://www.google.com/maps/search/?api=1&query=${latitude},${longitude}`}
                     target="_blank"
@@ -1055,19 +1262,19 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                     className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-300 hover:underline"
                   >
                     <span>Conferir Endereço no Mapa</span>
-                    <ExternalLink className="w-3 h-3" />
+                    <ExternalLink className="w-3.5 h-3.5" />
                   </a>
                 </div>
-              ) : (
-                <p className="text-[11px] text-slate-400 leading-relaxed">
-                  📍 O sistema calcula a <strong>latitude</strong> e <strong>longitude</strong> automaticamente com base no <strong>endereço</strong>, <strong>local</strong> e <strong>cidade</strong> do evento informados acima.
-                </p>
               )}
 
-              {geocodeInfo && (
-                <p className="text-xs text-amber-300/90 mt-1.5 flex items-center gap-1.5">
+              {geocodeInfo ? (
+                <p className="text-xs text-amber-300/90 mt-2 flex items-center gap-1.5">
                   <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 inline shrink-0" />
                   <span>{geocodeInfo}</span>
+                </p>
+              ) : (
+                <p className="text-[11px] text-slate-400 leading-relaxed mt-2">
+                  📍 O sistema calcula a <strong>latitude</strong> e <strong>longitude</strong> automaticamente com base no seu <strong>endereço</strong>. Se preferir, você pode digitar ou colar as coordenadas de sua preferência nos campos acima.
                 </p>
               )}
             </div>
@@ -1214,7 +1421,7 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                   <input
                     id="input-file-event-image"
                     type="file"
-                    accept="image/*"
+                    accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.avif,.bmp,.svg,.jfif,.heic,.heif,.tiff"
                     onChange={(e) => {
                       if (e.target.files && e.target.files[0]) {
                         handleFileSelect(e.target.files[0]);
@@ -1297,10 +1504,23 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                   </label>
                   <input
                     id="input-url-event-image"
-                    type="url"
-                    value={imageUrl}
-                    onChange={(e) => setImageUrl(e.target.value)}
-                    placeholder="https://exemplo.com/cartaz-evento.jpg"
+                    type="text"
+                    value={imageUrl.startsWith('data:') ? '' : imageUrl}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setImageUrl(val);
+                      const clean = val.trim();
+                      const lower = clean.toLowerCase();
+                      if (lower.includes('youtube.com') || lower.includes('youtu.be') || lower.includes('facebook.com') || lower.includes('fb.watch') || lower.includes('instagram.com') || lower.includes('drive.google.com') || lower.includes('vimeo.com') || lower.endsWith('.mp4') || lower.includes('.mp4?') || lower.startsWith('/uploads/') || lower.startsWith('/assets/') || lower.startsWith('data:video/')) {
+                        setSelectedMediaType('video');
+                        setVideoUrl(clean);
+                        const parsed = parseVideoUrl(clean);
+                        if (parsed?.thumbnailUrl) {
+                          setImageUrl(parsed.thumbnailUrl);
+                        }
+                      }
+                    }}
+                    placeholder="https://exemplo.com/cartaz-evento.jpg (PNG, JPG, WebP, GIF, etc.)"
                     className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
                   />
                 </div>
@@ -1314,9 +1534,9 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                 <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-200 flex items-start gap-2.5">
                   <Video className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
                   <div>
-                    <span className="font-bold text-amber-300">Vídeo de Divulgação (Apenas MP4):</span>
+                    <span className="font-bold text-amber-300">Vídeo de Divulgação (MP4, WEBM, MOV ou Redes Sociais):</span>
                     <p className="text-slate-300 mt-1">
-                      Para garantir máxima compatibilidade e reprodução automática, a mídia em vídeo aceita <strong>exclusivamente arquivos no formato MP4 (.mp4)</strong>.
+                      Envie o arquivo do seu vídeo (gravado no celular ou reels) ou informe o link do YouTube, Facebook ou Instagram.
                     </p>
                   </div>
                 </div>
@@ -1344,7 +1564,7 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                   <input
                     id="input-file-event-video"
                     type="file"
-                    accept="video/mp4,.mp4"
+                    accept="video/*,.mp4,.mov,.webm,.m4v"
                     onChange={(e) => {
                       if (e.target.files && e.target.files[0]) {
                         handleVideoFileSelect(e.target.files[0]);
@@ -1353,23 +1573,38 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                     className="hidden"
                   />
 
-                  {videoUrl ? (
+                  {isReadingVideo ? (
+                    <div className="flex flex-col items-center justify-center gap-3 py-6 px-4 max-w-md mx-auto">
+                      <div className="w-8 h-8 border-3 border-amber-400 border-t-transparent rounded-full animate-spin" />
+                      <span className="text-sm font-bold text-amber-300">
+                        Enviando e salvando vídeo{videoUploadProgress > 0 ? ` (${videoUploadProgress}%)` : '...'}
+                      </span>
+                      <progress
+                        value={videoUploadProgress}
+                        max={100}
+                        className="w-full h-2.5 rounded-full overflow-hidden bg-slate-800 [&::-webkit-progress-bar]:bg-slate-800 [&::-webkit-progress-value]:bg-amber-500 [&::-webkit-progress-value]:transition-all [&::-webkit-progress-value]:duration-300 [&::-moz-progress-bar]:bg-amber-500"
+                      />
+                      <div className="rounded-xl bg-amber-500/10 border border-amber-500/30 px-3.5 py-2.5 text-center space-y-1">
+                        <p className="text-xs font-bold text-amber-200">
+                          {videoUploadStatus || 'Aguarde o término do carregamento...'}
+                        </p>
+                        <p className="text-[11px] text-slate-300 leading-relaxed">
+                          Não feche nem atualize esta página. Nos últimos passos (80%–99%), o sistema está gravando o vídeo com segurança no servidor e pode levar alguns segundos.
+                        </p>
+                      </div>
+                    </div>
+                  ) : videoUrl ? (
                     <div className="flex flex-col items-center justify-center gap-4 p-2">
-                      <div className="relative w-full max-w-md aspect-video rounded-2xl overflow-hidden border-2 border-amber-500/50 shadow-2xl bg-black flex-shrink-0 ring-1 ring-amber-500/30">
-                        <video
-                          key={videoUrl}
-                          src={videoUrl}
-                          poster={imageUrl || undefined}
-                          controls
-                          playsInline
-                          preload="metadata"
-                          className="w-full h-full object-contain bg-black"
-                        >
-                          Seu navegador não suporta reprodução de vídeo MP4.
-                        </video>
-                        <div className="absolute top-2 left-2 pointer-events-none">
+                      <div className="relative w-full max-w-md rounded-2xl overflow-hidden border-2 border-amber-500/50 shadow-2xl bg-black flex-shrink-0 ring-1 ring-amber-500/30">
+                        <VideoPlayer
+                          videoUrl={videoUrl}
+                          title={title || 'Pré-visualização do Vídeo'}
+                          autoPlay={false}
+                          className="w-full aspect-video"
+                        />
+                        <div className="absolute top-2 left-2 z-20 pointer-events-none">
                           <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-950/90 text-amber-400 border border-amber-500/30 shadow backdrop-blur-sm">
-                            Vídeo MP4 Carregado
+                            Vídeo Carregado
                           </span>
                         </div>
                       </div>
@@ -1377,7 +1612,7 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                       <div className="flex flex-col items-center gap-2 text-center">
                         <span className="text-xs font-semibold text-emerald-400 flex items-center gap-1.5 justify-center">
                           <CheckCircle2 className="w-4 h-4" />
-                          Vídeo MP4 anexado com sucesso
+                          Vídeo anexado com sucesso
                         </span>
                         <p className="text-[11px] text-slate-400">
                           Este vídeo será exibido diretamente nos detalhes do evento e nas consultas.
@@ -1387,7 +1622,7 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                             htmlFor="input-file-event-video"
                             className="cursor-pointer px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg transition-colors inline-block"
                           >
-                            Trocar vídeo MP4
+                            Trocar vídeo
                           </label>
                           <button
                             type="button"
@@ -1409,34 +1644,34 @@ export const EventRegister: React.FC<EventRegisterProps> = ({
                         <Video className="w-7 h-7" />
                       </div>
                       <span className="text-sm font-semibold text-white">
-                        Clique para selecionar o arquivo MP4 ou arraste aqui
+                        Clique para selecionar o arquivo de vídeo ou arraste aqui
                       </span>
                       <span className="text-xs text-amber-300/90 font-medium">
-                        Formato aceito: Exclusivamente arquivo de vídeo MP4 (.mp4)
+                        Formatos aceitos: MP4, WEBM, MOV (gravados no celular ou reels)
                       </span>
                       <span className="text-[11px] text-slate-500">
-                        Até 50MB (ideal para vídeos gravados no celular ou reels exportados em .mp4)
+                        Até 50MB
                       </span>
                     </label>
                   )}
                 </div>
 
-                {/* Opção alternativa: URL direta para arquivo .mp4 */}
+                {/* Opção alternativa: Link de vídeo ou URL direta */}
                 <div>
                   <label className="block text-xs font-semibold text-slate-400 mb-1.5 flex items-center gap-1.5">
                     <Link className="w-3.5 h-3.5" />
-                    <span>Ou informe a URL direta de um arquivo .mp4 da internet:</span>
+                    <span>Ou informe o link do vídeo (Facebook, YouTube, Instagram, Google Drive, Vimeo ou MP4):</span>
                   </label>
                   <input
                     id="input-url-event-video"
-                    type="url"
+                    type="text"
                     value={videoUrl.startsWith('data:video/') ? '' : videoUrl}
                     onChange={(e) => handleVideoUrlChange(e.target.value)}
-                    placeholder="https://exemplo.com/meu-video.mp4"
+                    placeholder="Cole o link do Facebook, YouTube, Instagram, Google Drive..."
                     className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
                   />
                   <p className="text-[11px] text-slate-500 mt-1">
-                    * A URL deve apontar diretamente para um arquivo de vídeo .mp4
+                    * Aceitamos links de vídeos do Facebook, YouTube, Instagram, Google Drive, Vimeo ou arquivos diretos .mp4
                   </p>
                 </div>
               </div>

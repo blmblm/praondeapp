@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Pra onde eu vou</title>
+  
+  <!-- SEO & Redes Sociais -->
+  <meta name="description" content="Aplicativo de cadastro e consulta de eventos para descobrir shows, festivais e experiências." />
+  <meta property="og:title" content="Pra onde eu vou" />
+  <meta property="og:description" content="Descubra shows, festivais, gastronomia e os melhores eventos da sua região." />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://praondeeuvou.ia.br" />
+  <meta property="og:image" content="https://ais-pre-qs2o4mzsw3wxjtqbewcb3i-856757906261.us-east1.run.app/app-icon.jpg" />
+
+  <!-- Recursos PWA e Mobile Nativo -->
+  <meta name="theme-color" content="#0b0d17" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Pra onde eu vou" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="application-name" content="Pra onde eu vou" />
+
+  <!-- Ícones -->
+  <link rel="icon" type="image/jpeg" href="https://ais-pre-qs2o4mzsw3wxjtqbewcb3i-856757906261.us-east1.run.app/app-icon.jpg" />
+  <link rel="apple-touch-icon" href="https://ais-pre-qs2o4mzsw3wxjtqbewcb3i-856757906261.us-east1.run.app/app-icon.jpg" />
+
+  <!-- Manifesto PWA embutido diretamente (sem precisar de arquivos extras) -->
+  <link rel="manifest" href="data:application/manifest+json,%7B%22name%22%3A%22Pra%20onde%20eu%20vou%22%2C%22short_name%22%3A%22Pra%20onde%20eu%22%2C%22description%22%3A%22Aplicativo%20de%20eventos%20e%20experi%C3%AAncias%22%2C%22start_url%22%3A%22%2F%22%2C%22display%22%3A%22standalone%22%2C%22orientation%22%3A%22portrait%22%2C%22background_color%22%3A%22%230b0d17%22%2C%22theme_color%22%3A%22%23f59e0b%22%2C%22icons%22%3A%5B%7B%22src%22%3A%22https%3A%2F%2Fais-pre-qs2o4mzsw3wxjtqbewcb3i-856757906261.us-east1.run.app%2Fapp-icon.jpg%22%2C%22sizes%22%3A%22512x512%22%2C%22type%22%3A%22image%2Fjpeg%22%2C%22purpose%22%3A%22any%20maskable%22%7D%5D%7D" />
+
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #0b0d17;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      color: #f8fafc;
+    }
+
+    /* Container do App PWA */
+    #app-container {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      border: none;
+      display: block;
+      z-index: 1;
+    }
+
+    /* Tela de Splash / Carregamento Nativa */
+    #splash-screen {
+      position: fixed;
+      inset: 0;
+      background: linear-gradient(180deg, #0b0d17 0%, #0f172a 100%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+      text-align: center;
+      padding: 24px;
+      transition: opacity 0.4s ease-out, visibility 0.4s ease-out;
+    }
+
+    #splash-screen.fade-out {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+
+    .logo-box {
+      width: 90px;
+      height: 90px;
+      border-radius: 24px;
+      overflow: hidden;
+      border: 2px solid rgba(245, 158, 11, 0.7);
+      box-shadow: 0 16px 36px -8px rgba(245, 158, 11, 0.4), 0 0 25px rgba(245, 158, 11, 0.25);
+      background-color: #0f172a;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 24px;
+      animation: pulse-logo 2.5s ease-in-out infinite;
+    }
+
+    .logo-box img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .app-title {
+      font-size: 28px;
+      font-weight: 800;
+      margin-bottom: 6px;
+      letter-spacing: -0.5px;
+      color: #ffffff;
+    }
+
+    .app-title span {
+      color: #f59e0b;
+      text-shadow: 0 0 20px rgba(245, 158, 11, 0.5);
+    }
+
+    .app-slogan {
+      font-size: 14px;
+      font-weight: 500;
+      color: #fde68a;
+      margin-bottom: 30px;
+      max-width: 300px;
+      line-height: 1.5;
+    }
+
+    .loader-box {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+      max-width: 280px;
+      width: 100%;
+    }
+
+    .spinner {
+      width: 24px;
+      height: 24px;
+      border: 3px solid rgba(245, 158, 11, 0.2);
+      border-top-color: #f59e0b;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    .loader-text {
+      color: #f59e0b;
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+    }
+
+    .progress-bar-bg {
+      width: 200px;
+      height: 4px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 9999px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .progress-bar-fill {
+      position: absolute;
+      top: 0;
+      left: 0;
+      height: 100%;
+      width: 45%;
+      background: linear-gradient(90deg, #f59e0b, #ea580c);
+      border-radius: 9999px;
+      animation: progress-pulse 1.4s ease-in-out infinite;
+    }
+
+    /* Botão de fallback caso queira abrir direto */
+    .direct-link {
+      margin-top: 24px;
+      color: #94a3b8;
+      font-size: 13px;
+      text-decoration: underline;
+      cursor: pointer;
+      opacity: 0.8;
+      transition: opacity 0.2s;
+    }
+    .direct-link:hover {
+      opacity: 1;
+      color: #fde68a;
+    }
+
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+
+    @keyframes pulse-logo {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.03); }
+    }
+
+    @keyframes progress-pulse {
+      0% { left: -45%; width: 45%; }
+      50% { width: 70%; }
+      100% { left: 100%; width: 45%; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Tela de Abertura / PWA Splash -->
+  <div id="splash-screen">
+    <div class="logo-box">
+      <img src="https://ais-pre-qs2o4mzsw3wxjtqbewcb3i-856757906261.us-east1.run.app/app-icon.jpg" alt="Pra onde eu vou" />
+    </div>
+
+    <h1 class="app-title">Pra onde eu <span>vou</span>?</h1>
+    <p class="app-slogan">A vida é feita de momentos que aquecem o coração</p>
+
+    <div class="loader-box">
+      <div class="spinner"></div>
+      <div class="loader-text" id="status-text">Conectando ao aplicativo...</div>
+      <div class="progress-bar-bg">
+        <div class="progress-bar-fill"></div>
+      </div>
+    </div>
+
+    <a id="btn-direct" class="direct-link" href="https://ais-pre-qs2o4mzsw3wxjtqbewcb3i-856757906261.us-east1.run.app">
+      Clique aqui se demorar para carregar
+    </a>
+  </div>
+
+  <!-- Iframe em Tela Cheia do Aplicativo -->
+  <iframe
+    id="app-container"
+    src="https://ais-pre-qs2o4mzsw3wxjtqbewcb3i-856757906261.us-east1.run.app"
+    allow="geolocation; camera; microphone; clipboard-write; fullscreen; web-share"
+    title="Pra onde eu vou"
+    loading="eager"
+  ></iframe>
+
+  <script>
+    (function () {
+      var targetUrl = 'https://ais-pre-qs2o4mzsw3wxjtqbewcb3i-856757906261.us-east1.run.app';
+      var ua = navigator.userAgent || '';
+      var isIOS = /iPhone|iPad|iPod/i.test(ua);
+      var isSafari = /^((?!chrome|android).)*safari/i.test(ua);
+      var isInApp = /Instagram|FBAN|FBAV|FB_IAB/i.test(ua);
+      if (isIOS || isSafari || isInApp) {
+        window.top.location.replace(targetUrl);
+        return;
+      }
+    })();
+
+    const iframe = document.getElementById('app-container');
+    const splash = document.getElementById('splash-screen');
+    const statusText = document.getElementById('status-text');
+
+    // Ao carregar o iframe, remove suavemente a tela de splash
+    iframe.onload = function() {
+      setTimeout(() => {
+        splash.classList.add('fade-out');
+      }, 350);
+    };
+
+    // Caso o carregamento demore mais que 3.5 segundos, remove a tela de splash automaticamente
+    setTimeout(() => {
+      splash.classList.add('fade-out');
+    }, 3500);
+
+    // Suporte ao botão "Voltar" do navegador para navegar dentro do iframe se suportado
+    window.addEventListener('popstate', function() {
+      try {
+        iframe.contentWindow.history.back();
+      } catch (e) {}
+    });
+  </script>
+</body>
+</html>

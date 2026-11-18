@@ -7,6 +7,8 @@ interface VideoPlayerProps {
   title?: string;
   autoPlay?: boolean;
   className?: string;
+  poster?: string;
+  compact?: boolean;
 }
 
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({
@@ -14,6 +16,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   title = 'Vídeo de Divulgação',
   autoPlay = false,
   className = '',
+  poster,
+  compact = false,
 }) => {
   const parsed = parseVideoUrl(videoUrl);
   // For Facebook: allow switching between post mode and video mode
@@ -21,12 +25,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     parsed?.embedUrl
   );
   const [isUsingAlternateFb, setIsUsingAlternateFb] = useState(false);
+  const [directVideoError, setDirectVideoError] = useState(false);
+  const [proxyFailed, setProxyFailed] = useState(false);
 
   // Sync if videoUrl changes
   React.useEffect(() => {
     const p = parseVideoUrl(videoUrl);
     setActiveEmbedUrl(p?.embedUrl);
     setIsUsingAlternateFb(false);
+    setDirectVideoError(false);
+    setProxyFailed(false);
   }, [videoUrl]);
 
   if (!parsed || !videoUrl) {
@@ -90,39 +98,62 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           </div>
         </div>
 
-        {/* Facebook Embed iframe container */}
-        <div className="relative w-full flex flex-col items-center justify-center bg-slate-900/60 p-2 sm:p-4 min-h-[460px] sm:min-h-[520px]">
-          <iframe
-            key={activeEmbedUrl || videoUrl}
-            src={activeEmbedUrl}
-            title={title}
-            className="w-full max-w-[500px] h-[480px] sm:h-[540px] border-0 rounded-xl shadow-lg bg-white"
-            scrolling="no"
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-            allowFullScreen={true}
-          />
+        {/* Facebook native stream proxy first, fallback to official embed iframe */}
+        <div className={compact ? 'relative w-full flex-1 min-h-0 flex items-center justify-center bg-slate-950 p-1' : 'relative w-full flex flex-col items-center justify-center bg-slate-950 p-2 sm:p-4 min-h-[380px] sm:min-h-[460px]'}>
+          {!proxyFailed ? (
+            <video
+              key={`fb-proxy-${parsed.originalUrl}`}
+              src={`/api/video-stream-proxy?url=${encodeURIComponent(parsed.originalUrl)}`}
+              poster={poster || undefined}
+              preload="metadata"
+              controls
+              autoPlay={autoPlay}
+              muted={false}
+              playsInline
+              onError={() => setProxyFailed(true)}
+              className={compact ? 'w-full h-full object-contain rounded-lg bg-black' : 'w-full max-w-[500px] max-h-[540px] object-contain rounded-xl shadow-lg bg-black'}
+            >
+              Seu navegador não suporta reprodução de vídeo.
+            </video>
+          ) : (
+            <iframe
+              key={activeEmbedUrl || videoUrl}
+              src={
+                autoPlay && activeEmbedUrl && activeEmbedUrl.includes('plugins/video.php') && !activeEmbedUrl.includes('autoplay=')
+                  ? `${activeEmbedUrl}&autoplay=true`
+                  : activeEmbedUrl
+              }
+              title={title}
+              className={compact ? 'w-full h-full border-0 rounded-lg bg-white' : 'w-full max-w-[500px] h-[480px] sm:h-[540px] border-0 rounded-xl shadow-lg bg-white'}
+              scrolling="no"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+              allowFullScreen={true}
+            />
+          )}
         </div>
 
         {/* Informative Guidance Box regarding Facebook Privacy */}
-        <div className="px-4 py-3 bg-blue-950/20 border-t border-slate-800/90 text-[11px] text-slate-300 space-y-2">
-          <div className="flex items-start gap-2">
-            <Lock className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-            <div className="text-slate-300 leading-relaxed">
-              <strong className="text-white">Apareceu mensagem de "post não disponível"?</strong>
-              <p className="mt-0.5 text-slate-400">
-                O Facebook exige que a publicação ou vídeo esteja com privacidade definida como <strong>Pública (Globo 🌐)</strong> e tenha sido postado em uma <strong>Página aberta ou Perfil público</strong>. Publicações dentro de <em>Grupos privados/fechados</em> ou com privacidade restrita a amigos não podem ser carregadas pelo Facebook dentro de outros aplicativos.
-              </p>
+        {!compact && (
+          <div className="px-4 py-3 bg-blue-950/20 border-t border-slate-800/90 text-[11px] text-slate-300 space-y-2">
+            <div className="flex items-start gap-2">
+              <Lock className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <div className="text-slate-300 leading-relaxed">
+                <strong className="text-white">Apareceu mensagem de "post não disponível"?</strong>
+                <p className="mt-0.5 text-slate-400">
+                  O Facebook exige que a publicação ou vídeo esteja com privacidade definida como <strong>Pública (Globo 🌐)</strong> e tenha sido postado em uma <strong>Página aberta ou Perfil público</strong>. Publicações dentro de <em>Grupos privados/fechados</em> ou com privacidade restrita a amigos não podem ser carregadas pelo Facebook dentro de outros aplicativos.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-1 border-t border-slate-800/60 text-[10px] text-slate-400 flex-wrap gap-2">
+              <span className="flex items-center gap-1 text-blue-300">
+                <HelpCircle className="w-3 h-3" />
+                Dica: clique em <strong>"Abrir no Facebook"</strong> acima para acessar o conteúdo na íntegra.
+              </span>
+              <span className="text-slate-500 font-mono">Facebook Official Plugin</span>
             </div>
           </div>
-
-          <div className="flex items-center justify-between pt-1 border-t border-slate-800/60 text-[10px] text-slate-400 flex-wrap gap-2">
-            <span className="flex items-center gap-1 text-blue-300">
-              <HelpCircle className="w-3 h-3" />
-              Dica: clique em <strong>"Abrir no Facebook"</strong> acima para acessar o conteúdo na íntegra.
-            </span>
-            <span className="text-slate-500 font-mono">Facebook Official Plugin</span>
-          </div>
-        </div>
+        )}
       </div>
     );
   }
@@ -134,7 +165,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         <div className="relative w-full aspect-video bg-black">
           <iframe
             key={parsed.embedUrl}
-            src={parsed.embedUrl}
+            src={autoPlay ? parsed.embedUrl.replace('autoplay=0', 'autoplay=1') : parsed.embedUrl}
             title={title}
             className="w-full h-full border-0"
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
@@ -175,15 +206,32 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             <ExternalLink className="w-3 h-3" />
           </a>
         </div>
-        <div className="relative w-full flex items-center justify-center p-2 min-h-[460px] bg-slate-900/60">
-          <iframe
-            key={parsed.embedUrl}
-            src={parsed.embedUrl}
-            title={title}
-            className="w-full max-w-[440px] h-[500px] border-0 rounded-xl shadow-lg bg-white"
-            scrolling="no"
-            allowFullScreen
-          />
+        <div className={compact ? 'relative w-full flex-1 min-h-0 flex items-center justify-center p-1 bg-slate-950' : 'relative w-full flex items-center justify-center p-2 min-h-[380px] bg-slate-950'}>
+          {!proxyFailed ? (
+            <video
+              key={`ig-proxy-${parsed.originalUrl}`}
+              src={`/api/video-stream-proxy?url=${encodeURIComponent(parsed.originalUrl)}`}
+              poster={poster || undefined}
+              preload="metadata"
+              controls
+              autoPlay={autoPlay}
+              muted={false}
+              playsInline
+              onError={() => setProxyFailed(true)}
+              className={compact ? 'w-full h-full object-contain rounded-lg bg-black' : 'w-full max-w-[440px] max-h-[500px] object-contain rounded-xl shadow-lg bg-black'}
+            >
+              Seu navegador não suporta reprodução de vídeo.
+            </video>
+          ) : (
+            <iframe
+              key={parsed.embedUrl}
+              src={parsed.embedUrl}
+              title={title}
+              className={compact ? 'w-full h-full border-0 rounded-lg bg-white' : 'w-full max-w-[440px] h-[500px] border-0 rounded-xl shadow-lg bg-white'}
+              scrolling="no"
+              allowFullScreen
+            />
+          )}
         </div>
       </div>
     );
@@ -205,12 +253,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             <ExternalLink className="w-3 h-3" />
           </a>
         </div>
-        <div className="relative w-full flex items-center justify-center p-2 min-h-[500px] bg-slate-900/60">
+        <div className={compact ? 'relative w-full flex-1 min-h-0 flex items-center justify-center p-1 bg-slate-900/60' : 'relative w-full flex items-center justify-center p-2 min-h-[500px] bg-slate-900/60'}>
           <iframe
             key={parsed.embedUrl}
             src={parsed.embedUrl}
             title={title}
-            className="w-full max-w-[400px] h-[540px] border-0 rounded-xl shadow-lg"
+            className={compact ? 'w-full h-full border-0 rounded-lg' : 'w-full max-w-[400px] h-[540px] border-0 rounded-xl shadow-lg'}
             allowFullScreen
           />
         </div>
@@ -225,7 +273,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         <div className="relative w-full aspect-video bg-black">
           <iframe
             key={parsed.embedUrl}
-            src={parsed.embedUrl}
+            src={autoPlay && !parsed.embedUrl.includes('autoplay=') ? `${parsed.embedUrl}?autoplay=1` : parsed.embedUrl}
             title={title}
             className="w-full h-full border-0"
             allow="autoplay; fullscreen; picture-in-picture"
@@ -248,18 +296,72 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     );
   }
 
+  // 5b. GOOGLE DRIVE
+  if (parsed.type === 'googledrive' && parsed.embedUrl) {
+    return (
+      <div className={`w-full flex flex-col rounded-2xl bg-slate-950 border border-amber-500/30 overflow-hidden shadow-2xl ${className}`}>
+        <div className="flex items-center justify-between px-3.5 py-2.5 bg-amber-950/40 border-b border-amber-500/20 text-xs flex-wrap gap-2">
+          <div className="flex items-center gap-2">
+            <span className="w-6 h-6 rounded-full bg-amber-500/20 flex items-center justify-center text-amber-400 font-extrabold text-xs">
+              GD
+            </span>
+            <span className="font-bold text-amber-200">Google Drive • Vídeo</span>
+          </div>
+          <a
+            href={parsed.originalUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-bold shadow transition-colors"
+          >
+            <span>Abrir no Google Drive</span>
+            <ExternalLink className="w-3.5 h-3.5" />
+          </a>
+        </div>
+        <div className="relative w-full aspect-video bg-black flex items-center justify-center">
+          <iframe
+            src={parsed.embedUrl}
+            title={title}
+            allow="autoplay; encrypted-media; fullscreen"
+            allowFullScreen
+            className="w-full h-full border-0"
+          />
+        </div>
+      </div>
+    );
+  }
+
   // 6. DIRECT VIDEO (MP4, WEBM, OGG, BLOB)
   if (parsed.isDirectVideo) {
+    if (directVideoError && poster) {
+      return (
+        <div className={`w-full flex flex-col rounded-2xl bg-black border border-slate-800 overflow-hidden shadow-2xl ${className}`}>
+          <div className="relative w-full aspect-video bg-slate-950 flex items-center justify-center overflow-hidden">
+            <img
+              src={poster}
+              alt={title}
+              className="w-full h-full object-contain"
+            />
+          </div>
+          <div className="flex items-center justify-between px-3.5 py-2 bg-slate-950 border-t border-slate-800 text-[11px] text-slate-400">
+            <span className="font-semibold text-amber-400">Exibindo cartaz oficial (vídeo indisponível neste dispositivo)</span>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className={`w-full flex flex-col rounded-2xl bg-black border border-slate-800 overflow-hidden shadow-2xl ${className}`}>
         <div className="relative w-full aspect-video bg-black flex items-center justify-center">
           <video
             key={videoUrl}
             src={parsed.embedUrl || videoUrl}
+            poster={poster || undefined}
+            preload="metadata"
             controls
             autoPlay={autoPlay}
             muted={false}
             playsInline
+            onError={() => setDirectVideoError(true)}
             className="w-full h-full object-contain"
           >
             Seu navegador não suporta reprodução deste arquivo de vídeo.

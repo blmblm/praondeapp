@@ -32,34 +32,8 @@ import { ImportedEventItem, EventItem } from '../types';
 import { saveEventToFirestore } from '../lib/firestoreSync';
 
 export const BRAZILIAN_STATES = [
-  { uf: 'Todos', name: 'Todos os Estados (Brasil Todo)' },
-  { uf: 'SP', name: 'SP - São Paulo' },
-  { uf: 'RJ', name: 'RJ - Rio de Janeiro' },
-  { uf: 'MG', name: 'MG - Minas Gerais' },
-  { uf: 'BA', name: 'BA - Bahia' },
-  { uf: 'PR', name: 'PR - Paraná' },
-  { uf: 'RS', name: 'RS - Rio Grande do Sul' },
-  { uf: 'SC', name: 'SC - Santa Catarina' },
-  { uf: 'DF', name: 'DF - Distrito Federal' },
-  { uf: 'PE', name: 'PE - Pernambuco' },
-  { uf: 'CE', name: 'CE - Ceará' },
-  { uf: 'GO', name: 'GO - Goiás' },
-  { uf: 'ES', name: 'ES - Espírito Santo' },
-  { uf: 'PA', name: 'PA - Pará' },
-  { uf: 'AM', name: 'AM - Amazonas' },
-  { uf: 'MT', name: 'MT - Mato Grosso' },
-  { uf: 'MS', name: 'MS - Mato Grosso do Sul' },
-  { uf: 'MA', name: 'MA - Maranhão' },
-  { uf: 'RN', name: 'RN - Rio Grande do Norte' },
-  { uf: 'PB', name: 'PB - Paraíba' },
-  { uf: 'AL', name: 'AL - Alagoas' },
-  { uf: 'SE', name: 'SE - Sergipe' },
-  { uf: 'PI', name: 'PI - Piauí' },
-  { uf: 'RO', name: 'RO - Rondônia' },
-  { uf: 'TO', name: 'TO - Tocantins' },
-  { uf: 'AC', name: 'AC - Acre' },
-  { uf: 'AP', name: 'AP - Amapá' },
-  { uf: 'RR', name: 'RR - Roraima' },
+  { uf: 'SP', name: 'SP - Estado de São Paulo (Exclusivo)' },
+  { uf: 'Todos', name: 'Todas as Cidades de SP' },
 ];
 
 export const TOP_CITIES_BY_STATE: Record<string, string[]> = {
@@ -97,6 +71,7 @@ interface SymplaImporterViewProps {
   cities: { id: string; name: string; state: string }[];
   onBackToMenu: () => void;
   onEventApproved?: (event: EventItem) => void;
+  onNavigateToLiberarEventos?: (countAdded?: number) => void;
 }
 
 export const SymplaImporterView: React.FC<SymplaImporterViewProps> = ({
@@ -104,6 +79,7 @@ export const SymplaImporterView: React.FC<SymplaImporterViewProps> = ({
   cities,
   onBackToMenu,
   onEventApproved,
+  onNavigateToLiberarEventos,
 }) => {
   // Input de URL individual
   const [symplaUrl, setSymplaUrl] = useState('');
@@ -137,9 +113,9 @@ export const SymplaImporterView: React.FC<SymplaImporterViewProps> = ({
 
   // Robô de Busca ao Vivo Sympla (Centenas de registros em tempo real)
   const [liveSearchQuery, setLiveSearchQuery] = useState('samba');
-  const [batchRhythmState, setBatchRhythmState] = useState('Todos');
+  const [batchRhythmState, setBatchRhythmState] = useState('SP');
   const [liveSearchCity, setLiveSearchCity] = useState('Todas');
-  const [liveSearchState, setLiveSearchState] = useState('Todos');
+  const [liveSearchState, setLiveSearchState] = useState('SP');
   const [liveSearchLimit, setLiveSearchLimit] = useState<number>(20);
   const [liveSearchPage, setLiveSearchPage] = useState<number>(0);
   const [liveSearchResults, setLiveSearchResults] = useState<any[]>([]);
@@ -809,6 +785,7 @@ export const SymplaImporterView: React.FC<SymplaImporterViewProps> = ({
   });
 
   // Executar busca ao vivo na Sympla com suporte explícito a estado informado e cidade
+  // REGRA SOLICITADA: Grava diretamente na Quarentena e transiciona para a tela de Liberar Eventos
   const handleLiveSearch = async (
     pageNum = 0,
     append = false,
@@ -828,38 +805,69 @@ export const SymplaImporterView: React.FC<SymplaImporterViewProps> = ({
     const activeCity = cityOverride !== undefined ? cityOverride : liveSearchCity;
 
     try {
-      const params = new URLSearchParams();
-      if (activeQuery.trim()) params.append('q', activeQuery.trim());
-      if (activeCity && activeCity !== 'Todas' && activeCity !== 'Todos') {
-        params.append('city', activeCity);
-      }
-      if (activeState && activeState !== 'Todos' && activeState !== 'Todas') {
-        params.append('state', activeState);
-      }
-      params.append('limit', String(liveSearchLimit));
-      params.append('page', String(pageNum));
+      // 1. Tenta varredura e importação direta em lote para a Quarentena
+      const res = await fetch('/api/sympla/import-all-query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: activeQuery.trim() || undefined,
+          state: activeState && activeState !== 'Todos' && activeState !== 'Todas' ? activeState : undefined,
+          city: activeCity && activeCity !== 'Todas' && activeCity !== 'Todos' ? activeCity : undefined,
+          defaultCategory: searchTargetCategory !== 'auto' ? searchTargetCategory : undefined,
+          maxEvents: 600,
+        }),
+      });
 
-      const res = await fetch(`/api/sympla/search?${params.toString()}`);
       const data = await res.json();
       if (res.ok && data.success) {
-        if (append) {
-          setLiveSearchResults((prev) => {
-            const existingIds = new Set(prev.map((e) => e.id));
-            const newOnes = (data.events || []).filter((e: any) => !existingIds.has(e.id));
-            return [...prev, ...newOnes];
-          });
-        } else {
-          setLiveSearchResults(data.events || []);
-          const newIds = (data.events || [])
-            .filter((ev: any) => !ev.alreadyImported)
-            .map((ev: any) => ev.id);
-          setSelectedSearchIds(newIds);
+        await fetchQuarantine(true);
+        const count = data.addedCount ?? 0;
+        const msg = count > 0
+          ? `${count} eventos da Sympla jogados na Quarentena com sucesso! Entrando na tela de Liberar Eventos...`
+          : `Eventos da Sympla verificados na Quarentena. Entrando na tela de Liberar Eventos...`;
+        showToast(msg, 'success');
+
+        if (onNavigateToLiberarEventos) {
+          setTimeout(() => {
+            onNavigateToLiberarEventos(count);
+          }, 450);
+          return;
         }
-        setLiveSearchTotal(data.total);
-        setLiveSearchPages(data.pages);
-        setLiveSearchPage(pageNum);
       } else {
-        showToast(data.error || 'Erro ao consultar catálogo da Sympla.', 'error');
+        // Fallback: se o import-all-query reportou erro, tenta a rota de pesquisa
+        const params = new URLSearchParams();
+        if (activeQuery.trim()) params.append('q', activeQuery.trim());
+        if (activeCity && activeCity !== 'Todas' && activeCity !== 'Todos') {
+          params.append('city', activeCity);
+        }
+        if (activeState && activeState !== 'Todos' && activeState !== 'Todas') {
+          params.append('state', activeState);
+        }
+        params.append('limit', String(liveSearchLimit));
+        params.append('page', String(pageNum));
+
+        const searchRes = await fetch(`/api/sympla/search?${params.toString()}`);
+        const searchData = await searchRes.json();
+        if (searchRes.ok && searchData.success) {
+          if (append) {
+            setLiveSearchResults((prev) => {
+              const existingIds = new Set(prev.map((e) => e.id));
+              const newOnes = (searchData.events || []).filter((e: any) => !existingIds.has(e.id));
+              return [...prev, ...newOnes];
+            });
+          } else {
+            setLiveSearchResults(searchData.events || []);
+            const newIds = (searchData.events || [])
+              .filter((ev: any) => !ev.alreadyImported)
+              .map((ev: any) => ev.id);
+            setSelectedSearchIds(newIds);
+          }
+          setLiveSearchTotal(searchData.total);
+          setLiveSearchPages(searchData.pages);
+          setLiveSearchPage(pageNum);
+        } else {
+          showToast(searchData.error || 'Erro ao consultar catálogo da Sympla.', 'error');
+        }
       }
     } catch (err: any) {
       showToast('Falha na conexão com o robô de busca da Sympla.', 'error');
@@ -1101,13 +1109,25 @@ export const SymplaImporterView: React.FC<SymplaImporterViewProps> = ({
             <span>Ver Quarentena ({quarantineEvents.length}) ↓</span>
           </button>
 
+          {onNavigateToLiberarEventos && (
+            <button
+              type="button"
+              onClick={() => onNavigateToLiberarEventos()}
+              className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white border border-emerald-500/30 text-xs font-black transition-all flex items-center gap-1.5 cursor-pointer shadow-md shadow-emerald-950/40"
+              title="Abrir tela oficial de Liberar Eventos"
+            >
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              <span>Ir para Liberar Eventos →</span>
+            </button>
+          )}
+
           <div className="px-3.5 py-2 rounded-xl bg-slate-800/80 border border-slate-700 text-center">
             <span className="text-[10px] text-slate-400 block font-semibold leading-tight">Na Quarentena</span>
             <span className="text-base font-black text-amber-400 leading-none">{quarantineEvents.length}</span>
           </div>
 
           <button
-            onClick={fetchQuarantine}
+            onClick={() => fetchQuarantine()}
             disabled={isLoadingQuarantine}
             className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-colors cursor-pointer"
             title="Recarregar dados da quarentena"
@@ -1274,32 +1294,13 @@ export const SymplaImporterView: React.FC<SymplaImporterViewProps> = ({
                 className="w-full px-3 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white text-sm focus:outline-none focus:border-amber-500 cursor-pointer"
               >
                 <option value="Todas">
-                  {liveSearchState === 'Todos'
-                    ? 'Todas as Cidades (Brasil)'
-                    : `Todas as Cidades de ${liveSearchState}`}
+                  Todas as Cidades de SP
                 </option>
-                {liveSearchState !== 'Todos' && TOP_CITIES_BY_STATE[liveSearchState] ? (
-                  TOP_CITIES_BY_STATE[liveSearchState].map((ct) => (
-                    <option key={ct} value={ct}>
-                      {ct} ({liveSearchState})
-                    </option>
-                  ))
-                ) : (
-                  <>
-                    <option value="São Paulo">São Paulo (SP)</option>
-                    <option value="Rio de Janeiro">Rio de Janeiro (RJ)</option>
-                    <option value="Belo Horizonte">Belo Horizonte (MG)</option>
-                    <option value="Campinas">Campinas (SP)</option>
-                    <option value="Salvador">Salvador (BA)</option>
-                    <option value="Curitiba">Curitiba (PR)</option>
-                    <option value="Porto Alegre">Porto Alegre (RS)</option>
-                    <option value="Brasília">Brasília (DF)</option>
-                    <option value="Recife">Recife (PE)</option>
-                    <option value="Fortaleza">Fortaleza (CE)</option>
-                    <option value="Goiânia">Goiânia (GO)</option>
-                    <option value="Florianópolis">Florianópolis (SC)</option>
-                  </>
-                )}
+                {TOP_CITIES_BY_STATE['SP']?.map((ct) => (
+                  <option key={ct} value={ct}>
+                    {ct} (SP)
+                  </option>
+                ))}
               </select>
             </div>
 
@@ -1310,7 +1311,7 @@ export const SymplaImporterView: React.FC<SymplaImporterViewProps> = ({
                 onClick={() => handleLiveSearch(0, false)}
                 disabled={isSearchingLive}
                 className="w-full py-2 px-3 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 disabled:opacity-50 text-slate-950 font-black text-sm flex items-center justify-center gap-2 shadow-lg shadow-amber-500/20 transition-all cursor-pointer"
-                title={`Buscar eventos da Sympla ${liveSearchState !== 'Todos' ? `no estado ${liveSearchState}` : 'em todo o Brasil'}`}
+                title="Buscar eventos da Sympla no Estado de São Paulo (SP)"
               >
                 {isSearchingLive ? (
                   <>
@@ -1322,14 +1323,12 @@ export const SymplaImporterView: React.FC<SymplaImporterViewProps> = ({
                     <Search className="w-4 h-4 text-slate-950 shrink-0" />
                     <div className="flex flex-col text-left leading-tight truncate">
                       <span className="text-[12px] font-black truncate">
-                        {liveSearchState === 'Todos' ? 'Buscar Brasil' : `Buscar em ${liveSearchState}`}
+                        Buscar em SP
                       </span>
                       <span className="text-[9px] font-bold text-slate-900/80 truncate">
                         {liveSearchCity !== 'Todas'
                           ? liveSearchCity
-                          : liveSearchState === 'Todos'
-                          ? 'Todo o país'
-                          : 'Todo estado'}
+                          : 'Todo o Estado de SP'}
                       </span>
                     </div>
                   </>
@@ -1338,41 +1337,43 @@ export const SymplaImporterView: React.FC<SymplaImporterViewProps> = ({
             </div>
           </div>
 
-          {/* Atalhos Rápidos por Estado Informado */}
+          {/* Atalhos Rápidos por Cidades de SP */}
           <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-slate-800/60">
             <span className="text-[11px] font-bold text-slate-400 mr-1 flex items-center gap-1">
               <MapPin className="w-3 h-3 text-amber-400 shrink-0" />
-              Filtrar por Estado:
+              Cidades de SP:
             </span>
             {[
-              { uf: 'Todos', label: '🇧🇷 Brasil Todo' },
-              { uf: 'SP', label: 'SP' },
-              { uf: 'RJ', label: 'RJ' },
-              { uf: 'MG', label: 'MG' },
-              { uf: 'BA', label: 'BA' },
-              { uf: 'PR', label: 'PR' },
-              { uf: 'RS', label: 'RS' },
-              { uf: 'DF', label: 'DF' },
-              { uf: 'SC', label: 'SC' },
-              { uf: 'PE', label: 'PE' },
-              { uf: 'CE', label: 'CE' },
-              { uf: 'GO', label: 'GO' },
-              { uf: 'ES', label: 'ES' },
-            ].map((st) => {
-              const isActive = liveSearchState === st.uf;
+              { city: 'Todas', label: '📍 Todo o Estado de SP' },
+              { city: 'São Paulo', label: 'São Paulo' },
+              { city: 'Campinas', label: 'Campinas' },
+              { city: 'Santos', label: 'Santos' },
+              { city: 'Praia Grande', label: 'Praia Grande' },
+              { city: 'Santo André', label: 'Santo André' },
+              { city: 'São Bernardo do Campo', label: 'São Bernardo' },
+              { city: 'Osasco', label: 'Osasco' },
+              { city: 'Guarulhos', label: 'Guarulhos' },
+              { city: 'Ribeirão Preto', label: 'Ribeirão Preto' },
+              { city: 'Sorocaba', label: 'Sorocaba' },
+            ].map((c) => {
+              const isActive = liveSearchCity === c.city;
               return (
                 <button
-                  key={st.uf}
+                  key={c.city}
                   type="button"
-                  onClick={() => handleQuickSelectState(st.uf)}
+                  onClick={() => {
+                    setLiveSearchState('SP');
+                    setLiveSearchCity(c.city);
+                    setTimeout(() => handleLiveSearch(0, false, undefined, 'SP', c.city), 50);
+                  }}
                   className={`px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer flex items-center gap-1 ${
                     isActive
                       ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/30'
                       : 'bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300'
                   }`}
-                  title={`Filtrar busca por ${st.label}`}
+                  title={`Filtrar busca em ${c.label}`}
                 >
-                  <span>{st.label}</span>
+                  <span>{c.label}</span>
                 </button>
               );
             })}

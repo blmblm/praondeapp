@@ -8,7 +8,7 @@
 // - Bailes
 // - Shows
 
-import { ParsedSymplaEvent, parseSymplaEventUrl } from './symplaParser.js';
+import { type ParsedSymplaEvent, parseSymplaEventUrl } from './symplaParser.ts';
 
 export interface RhythmBatchItem {
   id?: string;
@@ -55,20 +55,20 @@ export const DISCOVERED_RHYTHM_FEED: RhythmBatchItem[] = [
   // 1. SAMBA E PAGODE
   {
     rhythm: 'Samba e Pagode',
-    title: 'Samba do Xoxó & Convidados no Beco do Rato',
-    description: 'Tradicional roda de samba com muito partido alto, clássicos de Cartola, Beth Carvalho e pagode de raiz com feijoada artesanal.',
+    title: 'Samba do Xoxó & Convidados no Bar Samba',
+    description: 'Tradicional roda de samba com muito partido alto, clássicos de Cartola, Beth Carvalho e pagode de raiz com feijoada artesanal na Vila Madalena.',
     date: '2026-09-19',
     time: '14:00',
     endTime: '22:00',
-    locationName: 'Beco do Rato',
-    address: 'Rua Joaquim Silva, 11 - Lapa',
-    city: 'Rio de Janeiro',
-    state: 'RJ',
+    locationName: 'Bar Samba',
+    address: 'Rua Fradique Coutinho, 1007 - Vila Madalena',
+    city: 'São Paulo',
+    state: 'SP',
     price: 35,
     isGratuito: false,
     imageUrl: 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?auto=format&fit=crop&w=800&q=80',
-    organizer: 'Beco do Rato Produções',
-    ticketUrl: 'https://www.sympla.com.br/samba-do-xoxo-e-convidados-beco-do-rato__3544665',
+    organizer: 'Bar Samba Produções',
+    ticketUrl: 'https://www.sympla.com.br/samba-do-xoxo-e-convidados-bar-samba__3544665',
   },
   {
     rhythm: 'Samba e Pagode',
@@ -106,19 +106,19 @@ export const DISCOVERED_RHYTHM_FEED: RhythmBatchItem[] = [
   },
   {
     rhythm: 'Samba e Pagode',
-    title: 'Bar do Belo: Uma Noite de Clássicos do Pagode Romântico',
-    description: 'Noite memorável com sucessos românticos do pagode 90 e 2000, voz, cavaquinho, pandeiro e muita emoção.',
+    title: 'Noite de Clássicos do Pagode Romântico & Convidados',
+    description: 'Noite memorável com sucessos românticos do pagode 90 e 2000, voz, cavaquinho, pandeiro e muita emoção na zona sul de São Paulo.',
     date: '2026-10-03',
     time: '21:00',
-    locationName: 'Bar do Belo & Lounge',
-    address: 'Av. das Américas, 3500 - Barra da Tijuca',
-    city: 'Rio de Janeiro',
-    state: 'RJ',
+    locationName: 'Tokio Marine Hall',
+    address: 'Rua Bragança Paulista, 1281 - Chácara Santo Antônio',
+    city: 'São Paulo',
+    state: 'SP',
     price: 60,
     isGratuito: false,
     imageUrl: 'https://images.unsplash.com/photo-1465847899084-d164df4dedc6?auto=format&fit=crop&w=800&q=80',
-    organizer: 'Belo Live Shows',
-    ticketUrl: 'https://www.sympla.com.br/bar-do-belo-apresenta-no-pagode-com-liomar-convida-yan__3566248',
+    organizer: 'Tokio Marine Eventos',
+    ticketUrl: 'https://www.sympla.com.br/noite-de-classicos-do-pagode-romantico__3566248',
   },
 
   // 2. BAILE NOSTALGIA
@@ -211,38 +211,38 @@ export const DISCOVERED_RHYTHM_FEED: RhythmBatchItem[] = [
   {
     rhythm: 'Baile Terceira Idade',
     title: 'Chá Dançante Primavera com Seresta e Valsas',
-    description: 'Celebração da estação com clássicos da seresta brasileira, valsas vienenses e boleros inesquecíveis para reviver doces memórias.',
+    description: 'Celebração da estação com clássicos da seresta, valsas e boleros inesquecíveis para reviver doces memórias no Clube Juventus.',
     date: '2026-10-04',
     time: '14:00',
     endTime: '18:30',
-    locationName: 'Salão Nobre Dom Pedro',
-    address: 'Rua São Paulo, 800 - Centro',
-    city: 'Belo Horizonte',
-    state: 'MG',
+    locationName: 'Clube Atlético Juventus',
+    address: 'Rua Comendador Roberto Ugolini, 20 - Mooca',
+    city: 'São Paulo',
+    state: 'SP',
     price: 30,
     isGratuito: false,
     imageUrl: 'https://images.unsplash.com/photo-1516450360452-9312f5e86fc7?auto=format&fit=crop&w=800&q=80',
-    organizer: 'Grupo Seresteiros de Minas',
-    ticketUrl: 'https://www.sympla.com.br/serestando-mulheres--domingo-13092026--1600--figa__3550863',
+    organizer: 'Grupo Seresteiros Paulistanos',
+    ticketUrl: 'https://www.sympla.com.br/cha-dancante-primavera-juventus__3550863',
   },
 
   // 4. FORRÓ
   {
     rhythm: 'Forró',
-    title: 'Grande Noite do Forró no Mercado Novo & Zouk Brasileiro',
-    description: 'A união do calor do forró tradicional com a dança de salão em dois ambientes especiais com DJs e banda ao vivo.',
+    title: 'Grande Noite do Forró no Canto da Ema',
+    description: 'A união do calor do forró tradicional com a dança de salão em ambiente acolhedor com trios ao vivo e DJs consagrados.',
     date: '2026-09-24',
     time: '20:00',
     endTime: '02:00',
-    locationName: 'Espaço Mercado Novo',
-    address: 'Av. Olegário Maciel, 742 - Centro',
-    city: 'Belo Horizonte',
-    state: 'MG',
+    locationName: 'Canto da Ema',
+    address: 'Av. Brigadeiro Faria Lima, 364 - Pinheiros',
+    city: 'São Paulo',
+    state: 'SP',
     price: 30,
     isGratuito: false,
     imageUrl: 'https://images.unsplash.com/photo-1492684223066-81342ee5ff30?auto=format&fit=crop&w=800&q=80',
-    organizer: 'Movimento Forró Brasil',
-    ticketUrl: 'https://www.sympla.com.br/24----zouk-amp-forro-no-mercado-novo---bh-cidade-da-lambada-do-zouk-brasileiro-e-do-fo-copia__3571729',
+    organizer: 'Canto da Ema Produções',
+    ticketUrl: 'https://www.sympla.com.br/forro-no-canto-da-ema__3571729',
   },
   {
     rhythm: 'Forró',
@@ -300,18 +300,18 @@ export const DISCOVERED_RHYTHM_FEED: RhythmBatchItem[] = [
   {
     rhythm: 'Forró Pé de Serra',
     title: 'Xote Central: Tributo a Luiz Gonzaga e Dominguinhos',
-    description: 'Homenagem aos reis do baião e do xote com trios pé de serra executando Asa Branca, Eu Só Quero Um Xodó e De Volta pro Aconchego.',
+    description: 'Homenagem aos reis do baião e do xote com trios pé de serra executando Asa Branca, Eu Só Quero Um Xodó e De Volta pro Aconchego no CTN.',
     date: '2026-10-02',
     time: '20:00',
-    locationName: 'Centro Cultural Nordestino',
-    address: 'Av. Rio Branco, 250 - Centro',
-    city: 'Rio de Janeiro',
-    state: 'RJ',
+    locationName: 'CTN - Centro de Tradições Nordestinas',
+    address: 'Rua Jacofer, 615 - Bairro do Limão',
+    city: 'São Paulo',
+    state: 'SP',
     price: 30,
     isGratuito: false,
     imageUrl: 'https://images.unsplash.com/photo-1508700115892-45ecd05ae2ad?auto=format&fit=crop&w=800&q=80',
-    organizer: 'Raízes do Sertão',
-    ticketUrl: 'https://www.sympla.com.br/xote-central---alcalyno__3567381',
+    organizer: 'CTN São Paulo',
+    ticketUrl: 'https://www.sympla.com.br/xote-central-ctn__3567381',
   },
   {
     rhythm: 'Forró Pé de Serra',
@@ -333,20 +333,20 @@ export const DISCOVERED_RHYTHM_FEED: RhythmBatchItem[] = [
   // 6. BAILES
   {
     rhythm: 'Bailes',
-    title: 'Baile do Glorioso Cultural com Laís Senna',
-    description: 'Noite de gala da dança de salão com sambas de gafieira, salsa, zook e boleros embalados por voz potente e orquestra afinada.',
+    title: 'Baile de Gala & Dança de Salão no Salão Nobre Juventus',
+    description: 'Noite de gala da dança de salão com sambas de gafieira, salsa, zouk e boleros embalados por voz potente e orquestra afinada na Mooca.',
     date: '2026-09-25',
     time: '21:00',
     endTime: '03:00',
-    locationName: 'Espaço Cultural Glorioso',
-    address: 'Rua General Polidoro, 168 - Botafogo',
-    city: 'Rio de Janeiro',
-    state: 'RJ',
+    locationName: 'Clube Atlético Juventus',
+    address: 'Rua Juventus, 690 - Mooca',
+    city: 'São Paulo',
+    state: 'SP',
     price: 40,
     isGratuito: false,
     imageUrl: 'https://images.unsplash.com/photo-1545128485-c400e7702796?auto=format&fit=crop&w=800&q=80',
-    organizer: 'Glorioso Produções',
-    ticketUrl: 'https://www.sympla.com.br/baile-do-glorioso-cultural-com-lais-senna__3569440',
+    organizer: 'Juventus Produções',
+    ticketUrl: 'https://www.sympla.com.br/baile-juventus-danca-de-salao__3569440',
   },
   {
     rhythm: 'Bailes',
@@ -496,7 +496,10 @@ export function detectRhythm(hit: any): 'Baile Nostalgia' | 'Samba e Pagode' | '
 
 // Mapeia objeto bruto retornado pelo catálogo Algolia da Sympla para o formato padronizado do app
 export function mapAlgoliaHitToBatchItem(hit: any, forcedRhythm?: string): RhythmBatchItem {
-  const rhythm = (forcedRhythm as any) || detectRhythm(hit);
+  let rhythm = detectRhythm(hit);
+  if (rhythm === 'Shows' && forcedRhythm) {
+    rhythm = forcedRhythm as any;
+  }
 
   // Data e hora
   let date = '';

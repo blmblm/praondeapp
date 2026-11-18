@@ -44,12 +44,25 @@ import {
   AlertTriangle,
   ShieldAlert,
   Tag,
-  Play
+  QrCode,
+  Play,
+  BarChart3,
+  TrendingUp,
+  LineChart,
+  Award,
+  Activity,
+  Ticket,
+  CalendarCheck,
+  Wrench,
+  Globe,
+  Copy,
+  FileCode
 } from 'lucide-react';
 import { EventItem, Advertiser, Supervisor, CityItem, CategoryItem, ImportedEventItem } from '../types';
 import { SponsorItem } from '../data/sponsors';
 import { EventLiberationModal } from './EventLiberationModal';
 import { SymplaImporterView } from './SymplaImporterView';
+import { Ticket360ImporterView } from './Ticket360ImporterView';
 import {
   saveEstadoToFirestore,
   deleteEstadoFromFirestore,
@@ -57,6 +70,8 @@ import {
   saveCategoriaToFirestore,
   deleteCategoriaFromFirestore,
   saveEventToFirestore,
+  savePalavraIgnoradaToFirestore,
+  deletePalavraIgnoradaFromFirestore,
 } from '../lib/firestoreSync';
 
 interface AdminModalProps {
@@ -70,7 +85,7 @@ interface AdminModalProps {
   onDeleteCategory: (category: string) => void;
   onDeleteEvent: (id: string) => void;
   onToggleLiberado?: (id: string, currentLiberado: string) => void;
-  onSetLiberado?: (id: string, liberado: 'S' | 'N', updatedUrl?: string, urlType?: 'video' | 'image' | 'link') => Promise<void> | void;
+  onSetLiberado?: (id: string, liberado: 'S' | 'N', updatedUrl?: string, urlType?: 'video' | 'image' | 'link', newCategory?: string) => Promise<void> | void;
   onSelectEvent: (event: EventItem) => void;
   onOpenSqlConsole: () => void;
   isMasterAdminState?: boolean;
@@ -86,6 +101,11 @@ const SUPERVISORS_STORAGE_KEY = 'praonde_supervisors_v1';
 const CITIES_STORAGE_KEY = 'praonde_cities_v1';
 const INITIAL_PIN = '0612';
 
+const NOME_MESES = [
+  'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
+  'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'
+];
+
 // Central managing views
 type AdminPageView = 
   | 'menu' 
@@ -97,7 +117,11 @@ type AdminPageView =
   | 'liberar_patrocinadores'
   | 'liberar_eventos'
   | 'importar_sympla'
-  | 'filtro_sympla';
+  | 'filtro_sympla'
+  | 'importar_ticket360'
+  | 'estatisticas'
+  | 'rotina_limpeza'
+  | 'dominio_pwa';
 
 const INITIAL_CITIES: CityItem[] = [
   { id: 'city-1', name: 'São Paulo', state: 'SP', region: 'Sudeste', active: true },
@@ -264,6 +288,8 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [passwordInput, setPasswordInput] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string>('');
+  const [copiedPwaCode, setCopiedPwaCode] = useState<boolean>(false);
+  const [copiedDirectCode, setCopiedDirectCode] = useState<boolean>(false);
 
   useEffect(() => {
     if (isMasterAdminState) {
@@ -297,6 +323,68 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [newIgnoredWord, setNewIgnoredWord] = useState<string>('');
   const [ignoredWordFeedback, setIgnoredWordFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
   const [isLoadingIgnoredWords, setIsLoadingIgnoredWords] = useState<boolean>(false);
+
+  // State for Rotina Quinzenal & Limpeza do Banco
+  const [cleanupStatus, setCleanupStatus] = useState<any>(null);
+  const [isLoadingCleanupStatus, setIsLoadingCleanupStatus] = useState<boolean>(false);
+  const [isRunningCleanup, setIsRunningCleanup] = useState<boolean>(false);
+  const [cleanupNotice, setCleanupNotice] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+
+  const fetchCleanupStatus = async () => {
+    try {
+      setIsLoadingCleanupStatus(true);
+      const res = await fetch('/api/admin/cleanup-status');
+      if (res.ok) {
+        const data = await res.json();
+        setCleanupStatus(data);
+      }
+    } catch (err) {
+      console.warn('Erro ao carregar status de limpeza:', err);
+    } finally {
+      setIsLoadingCleanupStatus(false);
+    }
+  };
+
+  const handleRunCleanupNow = async (scope: 'quinzenal' | 'diaria' = 'quinzenal') => {
+    try {
+      setIsRunningCleanup(true);
+      setCleanupNotice(null);
+      const res = await fetch('/api/admin/cleanup-database', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: scope })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setCleanupNotice({
+          type: 'success',
+          msg: `Rotina ${scope === 'quinzenal' ? 'Quinzenal' : 'Diária'} executada com sucesso! ${data.totalExcluidos} registro(s) expirado(s) removido(s) em ${data.totalTabelasComDataEvento} tabelas monitoradas. Banco reorganizado com sucesso (REINDEX & VACUUM concluídos em ${data.duracaoMs}ms).`
+        });
+        await fetchCleanupStatus();
+        if (onEventsUpdated) {
+          onEventsUpdated();
+        }
+      } else {
+        setCleanupNotice({
+          type: 'error',
+          msg: data.error || 'Falha ao executar rotina de limpeza.'
+        });
+      }
+    } catch (err: any) {
+      setCleanupNotice({
+        type: 'error',
+        msg: err.message || 'Erro de conexão ao executar rotina.'
+      });
+    } finally {
+      setIsRunningCleanup(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isOpen && currentView === 'rotina_limpeza') {
+      fetchCleanupStatus();
+    }
+  }, [isOpen, currentView]);
 
   const fetchIgnoredWords = async () => {
     try {
@@ -337,6 +425,10 @@ export const AdminModal: React.FC<AdminModalProps> = ({
         body: JSON.stringify({ palavra: word }),
       });
       if (res.ok) {
+        const addedWord = await res.json().catch(() => ({}));
+        if (addedWord && addedWord.id) {
+          savePalavraIgnoradaToFirestore({ id: addedWord.id, palavra: addedWord.palavra }).catch(() => {});
+        }
         setIgnoredWordFeedback({ type: 'success', msg: `Palavra "${word}" adicionada ao filtro!` });
         setNewIgnoredWord('');
         fetchIgnoredWords();
@@ -356,6 +448,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
         method: 'DELETE',
       });
       if (res.ok) {
+        deletePalavraIgnoradaFromFirestore(id).catch(() => {});
         setIgnoredWordFeedback({ type: 'success', msg: `Palavra "${word}" removida com sucesso!` });
         fetchIgnoredWords();
       }
@@ -411,10 +504,19 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [isDeletingBatch, setIsDeletingBatch] = useState(false);
   const [confirmDeleteScope, setConfirmDeleteScope] = useState<'pending' | 'filtered' | 'all' | null>(null);
 
-  // Sincroniza localEvents sempre que a prop events for atualizada
+  // Sincroniza localEvents sempre que a prop events for atualizada preservando registros já carregados
   useEffect(() => {
     if (Array.isArray(events) && events.length > 0) {
-      setLocalEvents(events);
+      setLocalEvents((prev) => {
+        if (prev.length === 0) return events;
+        const map = new Map<string, EventItem>();
+        prev.forEach((e) => map.set(e.id, e));
+        events.forEach((e) => {
+          const ex = map.get(e.id);
+          map.set(e.id, ex ? { ...ex, ...e } : e);
+        });
+        return Array.from(map.values());
+      });
     }
   }, [events]);
 
@@ -422,7 +524,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const fetchEventsFromApi = async () => {
     setIsLoadingEvents(true);
     try {
-      const res = await fetch('/api/events?order_by=criado_em');
+      const res = await fetch('/api/events?order_by=criado_em&admin=true&limit=5000');
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data)) {
@@ -446,6 +548,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   useEffect(() => {
     if (currentView === 'liberar_eventos') {
       fetchEventsFromApi();
+      fetchQuarantineCount();
     }
   }, [currentView]);
 
@@ -485,8 +588,113 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   useEffect(() => {
     if (isOpen) {
       fetchDbSponsors();
+      fetchPixConfig();
     }
   }, [isOpen]);
+
+  // Configurações do Pix da Plataforma (Chave Oficial, Beneficiário, Mercado Pago)
+  const [showPixConfigModal, setShowPixConfigModal] = useState(false);
+  const [pixConfigForm, setPixConfigForm] = useState({
+    chavePix: 'praondeeu@gmail.com',
+    tipoChave: 'email',
+    nomeBeneficiario: 'PRA ONDE EU VOU',
+    cidadeBeneficiario: 'PRAIA GRANDE',
+    mercadoPagoToken: '',
+  });
+  const [loadingPixConfig, setLoadingPixConfig] = useState(false);
+  const [savingPixConfig, setSavingPixConfig] = useState(false);
+  const [pixConfigFeedback, setPixConfigFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+
+  const fetchPixConfig = async () => {
+    setLoadingPixConfig(true);
+    try {
+      const res = await fetch('/api/admin/pix-config');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setPixConfigForm({
+            chavePix: data.chavePix || 'praondeeu@gmail.com',
+            tipoChave: data.tipoChave || 'email',
+            nomeBeneficiario: data.nomeBeneficiario || 'PRA ONDE EU VOU',
+            cidadeBeneficiario: data.cidadeBeneficiario || 'PRAIA GRANDE',
+            mercadoPagoToken: data.mercadoPagoToken || '',
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('Erro ao carregar configurações de Pix:', e);
+    } finally {
+      setLoadingPixConfig(false);
+    }
+  };
+
+  const handleSavePixConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSavingPixConfig(true);
+    setPixConfigFeedback(null);
+    try {
+      const res = await fetch('/api/admin/pix-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(pixConfigForm),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setPixConfigFeedback({ type: 'success', msg: 'Configurações de Pix salvas com sucesso! O novo QR Code e dados oficiais já estão ativos no cadastro de comércio.' });
+      } else {
+        setPixConfigFeedback({ type: 'error', msg: data.error || 'Erro ao salvar configurações de Pix.' });
+      }
+    } catch (err: any) {
+      setPixConfigFeedback({ type: 'error', msg: err.message || 'Erro de comunicação.' });
+    } finally {
+      setSavingPixConfig(false);
+    }
+  };
+
+  // Carregar estatísticas do banco de dados para a Central de Gerenciamento
+  const [statsData, setStatsData] = useState<{ id: number; ano: number; mes: number; estado: string; total_consultas: number }[]>([]);
+  const [isLoadingStats, setIsLoadingStats] = useState<boolean>(false);
+  const [statsYearFilter, setStatsYearFilter] = useState<string>('2026');
+  const [statsStateFilter, setStatsStateFilter] = useState<string>('Todos');
+
+  const fetchStats = async () => {
+    setIsLoadingStats(true);
+    try {
+      const res = await fetch('/api/admin/estatisticas');
+      if (res.ok) {
+        const json = await res.json();
+        if (json.success && Array.isArray(json.data)) {
+          setStatsData(json.data);
+        }
+      }
+    } catch (e) {
+      console.warn('Erro ao carregar estatísticas:', e);
+    } finally {
+      setIsLoadingStats(false);
+    }
+  };
+
+  const handleResetStats = async () => {
+    if (!window.confirm('Deseja realmente zerar todas as estatísticas de consultas? O contador começará do zero com as novas buscas dos usuários.')) return;
+    setIsLoadingStats(true);
+    try {
+      const res = await fetch('/api/admin/estatisticas', { method: 'DELETE' });
+      if (res.ok) {
+        setStatsData([]);
+        await fetchStats();
+      }
+    } catch (e) {
+      console.warn('Erro ao zerar estatísticas:', e);
+    } finally {
+      setIsLoadingStats(false);
+    }
+  };
+
+  useEffect(() => {
+    if (currentView === 'estatisticas') {
+      fetchStats();
+    }
+  }, [currentView]);
 
   // Sincronizar supervisores do SQLite ao abrir
   useEffect(() => {
@@ -1157,26 +1365,45 @@ export const AdminModal: React.FC<AdminModalProps> = ({
       state: imp.state || 'SP',
       latitude: imp.latitude ? String(imp.latitude) : undefined,
       longitude: imp.longitude ? String(imp.longitude) : undefined,
-      liberado: 'N', // Em quarentena = pendente de liberação
+      liberado: '', // Em quarentena = pendente de liberação
       isFree: !!imp.isGratuito,
       price: imp.price || 0,
-      priceDetails: imp.ticketUrl ? 'Ingressos Sympla' : '',
+      priceDetails: imp.ticketUrl ? (imp.origem === 'ticket360' ? 'Ingressos Ticket360' : (imp.origem === 'anunciante' ? 'Divulgação de Anunciante' : 'Ingressos Sympla')) : '',
       imageUrl: imp.imageUrl || '',
       videoUrl: imp.videoUrl || undefined,
       mediaType: imp.videoUrl ? 'video' : 'image',
-      organizer: imp.organizer || 'Produção',
-      contact: imp.ticketUrl || '',
-      tags: ['Quarentena', 'Sympla', imp.category || 'Shows'],
+      organizer: imp.organizer || (imp.origem === 'ticket360' ? 'Ticket360 Entretenimento' : (imp.origem === 'anunciante' ? 'Anunciante / Usuário' : 'Produção')),
+      contact: imp.ticketUrl || imp.contact || '',
+      tags: ['Quarentena', imp.origem === 'ticket360' ? 'Ticket360' : (imp.origem === 'anunciante' ? 'Divulgação / Usuário' : 'Sympla'), imp.category || 'Shows'],
       isQuarantine: true,
       status: 'quarentena',
       createdAt: imp.createdAt || new Date().toISOString(),
     }));
   }, [quarantineEvents]);
 
-  // Contagens para Liberar Eventos
+  // Contagens desduplicadas para Liberar Eventos
+  const allPendingItems = useMemo(() => {
+    const seen = new Map<string, EventItem>();
+    for (const q of mappedQuarantineItems) {
+      seen.set(q.id, q);
+    }
+    for (const e of localEvents) {
+      if (e.liberado !== 'S') {
+        if (!seen.has(e.id)) {
+          seen.set(e.id, e);
+        } else {
+          const prev = seen.get(e.id)!;
+          if (!prev.videoUrl && e.videoUrl) {
+            seen.set(e.id, { ...prev, videoUrl: e.videoUrl, mediaType: 'video' });
+          }
+        }
+      }
+    }
+    return Array.from(seen.values());
+  }, [mappedQuarantineItems, localEvents]);
+
   const totalQuarantine = quarantineEvents.length;
-  const totalPendingCatalog = localEvents.filter((e) => !e.liberado || e.liberado === '').length;
-  const totalPending = totalQuarantine + totalPendingCatalog;
+  const totalPending = allPendingItems.length;
   const totalApproved = localEvents.filter((e) => e.liberado === 'S').length;
 
   // Filtered events for "Liberar Eventos"
@@ -1184,15 +1411,36 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     let source: EventItem[] = [];
 
     if (eventFilterStatus === 'quarentena') {
-      source = [...mappedQuarantineItems];
+      const seenMap = new Map<string, EventItem>();
+      for (const item of mappedQuarantineItems) {
+        seenMap.set(item.id, item);
+      }
+      for (const item of localEvents) {
+        if (item.status === 'quarentena' || (item.liberado !== 'S' && item.status !== 'rejeitado')) {
+          if (!seenMap.has(item.id)) {
+            seenMap.set(item.id, item);
+          } else {
+            const prev = seenMap.get(item.id)!;
+            if (!prev.videoUrl && item.videoUrl) {
+              seenMap.set(item.id, { ...prev, videoUrl: item.videoUrl, mediaType: 'video' });
+            }
+          }
+        }
+      }
+      source = Array.from(seenMap.values());
     } else if (eventFilterStatus === 'approved') {
       source = localEvents.filter((e) => e.liberado === 'S');
     } else if (eventFilterStatus === 'pending') {
-      const pendingCatalog = localEvents.filter((e) => !e.liberado || e.liberado === '');
-      source = [...mappedQuarantineItems, ...pendingCatalog];
+      source = [...allPendingItems];
     } else {
       // 'all'
-      source = [...mappedQuarantineItems, ...localEvents];
+      const seenMap = new Map<string, EventItem>();
+      for (const item of [...localEvents, ...mappedQuarantineItems]) {
+        if (!seenMap.has(item.id)) {
+          seenMap.set(item.id, item);
+        }
+      }
+      source = Array.from(seenMap.values());
     }
 
     if (selectedCategoryForLiberation !== 'Todas') {
@@ -1220,71 +1468,129 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     updatedUrl?: string,
     urlType?: 'video' | 'image' | 'link'
   ) => {
-    // Atualização otimista imediata: remove o item processado da listagem ativa para limpar a tela de imediato
-    setLocalEvents((prev) => prev.filter((e) => e.id !== id));
-    setQuarantineEvents((prev) => prev.filter((q) => q.id !== id));
     const isQuarantine = quarantineEvents.some((q) => q.id === id) || (selectedEventForAnalysis?.id === id && !!selectedEventForAnalysis?.isQuarantine);
+
+    if (nextLiberado === 'N') {
+      // Ao clicar em "Cancelar / Cancelar Evento":
+      // Tanto para eventos da quarentena quanto para eventos do catálogo pendentes:
+      // Exclui o evento para que não continue aparecendo na lista de liberação!
+      const targetEvent = quarantineEvents.find((q) => q.id === id) || localEvents.find((e) => e.id === id);
+      const targetTitle = targetEvent?.title || selectedEventForAnalysis?.title || 'Evento';
+
+      // 1. Atualização otimista imediata na UI
+      setLocalEvents((prev) => prev.filter((e) => e.id !== id));
+      setQuarantineEvents((prev) => prev.filter((q) => q.id !== id));
+      setQuarantineCount((prev) => Math.max(0, prev - 1));
+      if (selectedEventForAnalysis?.id === id) {
+        setSelectedEventForAnalysis(null);
+      }
+
+      // 2. Notificação visual de feedback
+      setLiberationNotice(`Evento "${targetTitle}" cancelado e excluído com sucesso.`);
+      setTimeout(() => setLiberationNotice(''), 4000);
+
+      // 3. Exclui permanentemente no backend e Firestore
+      if (isQuarantine) {
+        try {
+          await fetch(`/api/imported-events/${id}?permanent=true`, { method: 'DELETE' });
+        } catch (err) {
+          console.error('Erro ao excluir item da quarentena:', err);
+        }
+      } else {
+        if (onDeleteEvent) {
+          onDeleteEvent(id);
+        } else {
+          try {
+            await fetch(`/api/events/${id}`, { method: 'DELETE' });
+          } catch (delErr) {
+            console.error('Erro ao excluir evento do SQLite:', delErr);
+          }
+        }
+      }
+
+      // 4. Sincroniza e recarrega dados frescos
+      await fetchEventsFromApi();
+      if (onEventsUpdated) {
+        await onEventsUpdated();
+      }
+      return;
+    }
+
+    // Se nextLiberado === 'S' (Liberar evento)
+    // Atualização otimista: atualiza o status liberado do evento específico preservando os outros
+    setLocalEvents((prev) =>
+      prev.map((e) => (e.id === id ? { ...e, liberado: 'S', status: 'aprovado', ...(newCategory ? { category: newCategory } : {}) } : e))
+    );
+    if (isQuarantine) {
+      setQuarantineEvents((prev) => prev.filter((q) => q.id !== id));
+    }
 
     // Se uma nova categoria foi alterada na análise, aplica a atualização
     if (newCategory) {
       await handleUpdateCategoryInAnalysis(id, newCategory);
     }
 
-    // Se uma URL foi atualizada ou informada na tela de liberação, salva nas tabelas correspondentes
+    // Se uma URL ou cartaz foi atualizado na tela de liberação, salva nas tabelas correspondentes e no Firestore
     if (updatedUrl && updatedUrl.trim()) {
-      await handleUpdateUrlInAnalysis(id, updatedUrl.trim(), urlType || 'video');
+      await handleUpdateUrlInAnalysis(id, updatedUrl.trim(), urlType || (updatedUrl.startsWith('data:image/') ? 'image' : 'video'));
     }
 
     if (isQuarantine) {
-      if (nextLiberado === 'S') {
-        try {
-          const res = await fetch(`/api/imported-events/${id}/approve`, { 
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ category: newCategory })
-          });
-          const json = await res.json();
-          if (json.success && json.event) {
-            saveEventToFirestore(json.event).catch(() => {});
-            if (onEventApproved) onEventApproved(json.event);
-            setQuarantineEvents((prev) => prev.filter((q) => q.id !== id));
-            setQuarantineCount((prev) => Math.max(0, prev - 1));
-            setLiberationNotice(`Evento "${json.event.title}" aprovado e liberado com sucesso no aplicativo!`);
-            setTimeout(() => setLiberationNotice(''), 4000);
-            if (onEventsUpdated) await onEventsUpdated();
-          }
-        } catch (err) {
-          console.error('Erro ao aprovar evento da quarentena:', err);
-        }
-      } else if (nextLiberado === 'N') {
-        // Ao clicar em "Não Liberar" em um item da quarentena: exclui da lista de quarentena
-        try {
-          const targetEvent = quarantineEvents.find((q) => q.id === id);
-          const targetTitle = targetEvent?.title || selectedEventForAnalysis?.title || 'Evento';
-          await fetch(`/api/imported-events/${id}?permanent=true`, { 
-            method: 'DELETE' 
-          });
+      try {
+        const isVid = urlType === 'video' || (updatedUrl && (
+          updatedUrl.startsWith('data:video/') ||
+          updatedUrl.startsWith('/uploads/videos/') ||
+          updatedUrl.includes('youtube') ||
+          updatedUrl.includes('youtu.be') ||
+          updatedUrl.includes('facebook') ||
+          updatedUrl.includes('fb.') ||
+          updatedUrl.includes('instagram') ||
+          updatedUrl.includes('tiktok') ||
+          updatedUrl.includes('vimeo') ||
+          updatedUrl.includes('.mp4') ||
+          updatedUrl.includes('.webm')
+        ));
+
+        const res = await fetch(`/api/imported-events/${id}/approve`, { 
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            category: newCategory,
+            url: updatedUrl,
+            videoUrl: isVid ? updatedUrl : undefined,
+            imageUrl: (!isVid && updatedUrl) ? updatedUrl : undefined,
+            urlType: isVid ? 'video' : urlType,
+          })
+        });
+        const json = await res.json();
+        if (json.success && json.event) {
+          saveEventToFirestore(json.event).catch(() => {});
+          if (onEventApproved) onEventApproved(json.event);
           setQuarantineEvents((prev) => prev.filter((q) => q.id !== id));
           setQuarantineCount((prev) => Math.max(0, prev - 1));
-          setLiberationNotice(`Evento "${targetTitle}" não liberado e excluído da lista de quarentena com sucesso.`);
+          setLiberationNotice(`Evento "${json.event.title}" aprovado e liberado com sucesso no aplicativo!`);
           setTimeout(() => setLiberationNotice(''), 4000);
-        } catch (err) {
-          console.error('Erro ao excluir evento da quarentena ao Não Liberar:', err);
+          if (onEventsUpdated) await onEventsUpdated();
         }
+      } catch (err) {
+        console.error('Erro ao aprovar evento da quarentena:', err);
       }
     } else {
       if (onSetLiberado) {
-        await onSetLiberado(id, nextLiberado, updatedUrl, urlType);
+        await onSetLiberado(id, 'S', updatedUrl, urlType, newCategory);
       } else if (onToggleLiberado) {
         const currentEvt = events.find((e) => e.id === id);
         const current = currentEvt?.liberado || '';
-        if (current !== nextLiberado) {
+        if (current !== 'S') {
           onToggleLiberado(id, current);
         }
       }
+      const targetTitle = localEvents.find((e) => e.id === id)?.title || 'Evento';
+      setLiberationNotice(`Evento "${targetTitle}" liberado com sucesso no aplicativo!`);
+      setTimeout(() => setLiberationNotice(''), 4000);
     }
     // Atualiza o item atualmente selecionado em análise se ainda for o mesmo
-    setSelectedEventForAnalysis((prev) => (prev && prev.id === id ? { ...prev, liberado: nextLiberado, ...(newCategory ? { category: newCategory } : {}) } : prev));
+    setSelectedEventForAnalysis((prev) => (prev && prev.id === id ? { ...prev, liberado: 'S', status: 'aprovado', ...(newCategory ? { category: newCategory } : {}) } : prev));
     
     // Recarrega os eventos do banco de dados para garantir que a lista/grid seja atualizada instantaneamente sem o registro liberado/alterado
     await fetchEventsFromApi();
@@ -1303,7 +1609,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
       const json = await res.json();
       if (res.ok && json.success) {
         setSelectedEventForAnalysis((prev) => (prev && prev.id === id ? { ...prev, category: newCategory } : prev));
-        setQuarantineEvents((prev) => prev.map((q) => (q.id === id ? { ...q, categoria: newCategory } : q)));
+        setQuarantineEvents((prev) => prev.map((q) => (q.id === id ? { ...q, category: newCategory, categoria: newCategory } : q)));
         
         // Atualiza otimistamente o estado da lista local para refletir na tela imediatamente
         setLocalEvents((prev) =>
@@ -1341,7 +1647,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
       const json = await res.json();
       if (res.ok && json.success) {
         const isVid = urlType === 'video' || (newUrl && (newUrl.includes('youtube') || newUrl.includes('fb.') || newUrl.includes('.mp4') || newUrl.startsWith('data:video/')));
-        const isImg = urlType === 'image' || (newUrl && (newUrl.startsWith('data:image/') || newUrl.includes('.jpg') || newUrl.includes('.png')));
+        const isImg = urlType === 'image' || (newUrl && (newUrl.startsWith('data:image/') || newUrl.startsWith('/uploads/images/') || /\.(jpe?g|png|webp|gif|svg|avif|bmp|jfif|heic|heif|tiff?|ico)($|\?|#)/i.test(newUrl)));
 
         setSelectedEventForAnalysis((prev) => {
           if (!prev || prev.id !== id) return prev;
@@ -1421,7 +1727,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
     const pendingCount = targetCategory
       ? (
-          events.filter((e) => (e.category || '').toLowerCase().trim() === targetCategory.toLowerCase().trim() && (!e.liberado || e.liberado === '')).length +
+          events.filter((e) => (e.category || '').toLowerCase().trim() === targetCategory.toLowerCase().trim() && e.liberado !== 'S').length +
           quarantineEvents.filter((q) => (q.category || '').toLowerCase().trim() === targetCategory.toLowerCase().trim()).length
         )
       : totalPending;
@@ -1548,13 +1854,14 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     if (isDeletingBatch) return;
 
     let itemsToDelete: EventItem[] = [];
+    const currentList = localEvents.length > 0 ? localEvents : events;
     if (scope === 'pending') {
-      const pendingCatalog = events.filter((e) => !e.liberado || e.liberado === '');
+      const pendingCatalog = currentList.filter((e) => e.liberado !== 'S');
       itemsToDelete = [...mappedQuarantineItems, ...pendingCatalog];
     } else if (scope === 'filtered') {
       itemsToDelete = filteredEventsForLiberation;
     } else if (scope === 'all') {
-      itemsToDelete = [...mappedQuarantineItems, ...events];
+      itemsToDelete = [...mappedQuarantineItems, ...currentList];
     }
 
     if (itemsToDelete.length === 0) {
@@ -1927,6 +2234,37 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   </div>
                 </button>
 
+                {/* BOTÃO NOVO: IMPORTAR TICKET360 (QUARENTENA & CURADORIA) */}
+                <button
+                  id="btn-admin-importar-ticket360"
+                  onClick={() => {
+                    fetchQuarantineCount();
+                    setCurrentView('importar_ticket360');
+                  }}
+                  className="group relative flex flex-col items-center text-center p-5 rounded-2xl bg-gradient-to-b from-slate-800/80 to-slate-950 border border-cyan-500/50 hover:border-cyan-400 hover:shadow-xl hover:shadow-cyan-500/15 transition-all duration-200 cursor-pointer"
+                >
+                  <div className="relative w-14 h-14 rounded-2xl bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-300 group-hover:scale-105 group-hover:bg-cyan-500/25 transition-all mb-3 shadow-inner">
+                    <Ticket className="w-7 h-7" />
+                    {quarantineCount > 0 && (
+                      <span className="absolute -top-1.5 -right-1.5 px-2 py-0.5 rounded-full bg-cyan-500 text-slate-950 text-[10px] font-black animate-pulse shadow-md">
+                        {quarantineCount}
+                      </span>
+                    )}
+                  </div>
+                  <h4 className="text-base font-bold text-white group-hover:text-cyan-300 transition-colors mb-1.5">
+                    Importar Ticket360
+                  </h4>
+                  <p className="text-xs text-slate-400 leading-relaxed flex-1">
+                    Buscar eventos Ticket360 por link, curadoria na quarentena e liberação no app ({quarantineCount} na quarentena).
+                  </p>
+                  <div className="mt-3 flex items-center justify-center gap-2 flex-wrap w-full">
+                    <div className="inline-flex items-center gap-1 text-xs font-bold text-cyan-400">
+                      <span>Acessar Ticket360</span>
+                      <span className="group-hover:translate-x-1 transition-transform">→</span>
+                    </div>
+                  </div>
+                </button>
+
                 {/* BOTÃO 2: CADASTRAR CATEGORIA */}
                 <button
                   id="btn-admin-cadastrar-categoria"
@@ -2057,6 +2395,75 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   </p>
                   <div className="mt-4 inline-flex items-center gap-1 text-xs font-bold text-rose-400">
                     <span>Configurar Filtros</span>
+                    <span className="group-hover:translate-x-1 transition-transform">→</span>
+                  </div>
+                </button>
+
+                {/* BOTÃO NOVO: DESEMPENHO E ESTATÍSTICAS */}
+                <button
+                  id="btn-admin-estatisticas"
+                  onClick={() => setCurrentView('estatisticas')}
+                  className="group relative flex flex-col items-center text-center p-5 rounded-2xl bg-gradient-to-b from-slate-800/80 to-slate-950 border border-slate-700/80 hover:border-violet-500/60 hover:shadow-xl hover:shadow-violet-500/10 transition-all duration-200 cursor-pointer animate-in fade-in"
+                >
+                  <div className="w-14 h-14 rounded-2xl bg-violet-500/15 border border-violet-500/30 flex items-center justify-center text-violet-400 group-hover:scale-105 group-hover:bg-violet-500/25 transition-all mb-3 shadow-inner">
+                    <BarChart3 className="w-7 h-7" />
+                  </div>
+                  <h4 className="text-base font-bold text-white group-hover:text-violet-300 transition-colors mb-1.5">
+                    Desempenho & Métricas
+                  </h4>
+                  <p className="text-xs text-slate-400 leading-relaxed flex-1">
+                    Monitore o total de consultas por ano, estado e mês. Dados estatísticos ricos para captação de patrocinadores.
+                  </p>
+                  <div className="mt-4 inline-flex items-center gap-1 text-xs font-bold text-violet-400">
+                    <span>Ver Painel</span>
+                    <span className="group-hover:translate-x-1 transition-transform">→</span>
+                  </div>
+                </button>
+
+                {/* BOTÃO: ROTINA QUINZENAL & LIMPEZA DO BANCO */}
+                <button
+                  id="btn-admin-rotina-limpeza"
+                  onClick={() => setCurrentView('rotina_limpeza')}
+                  className="group relative flex flex-col items-center text-center p-5 rounded-2xl bg-gradient-to-b from-slate-800/80 to-slate-950 border border-emerald-500/50 hover:border-emerald-400 hover:shadow-xl hover:shadow-emerald-500/15 transition-all duration-200 cursor-pointer animate-in fade-in"
+                >
+                  <div className="relative w-14 h-14 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 group-hover:scale-105 group-hover:bg-emerald-500/25 transition-all mb-3 shadow-inner">
+                    <CalendarCheck className="w-7 h-7" />
+                    <span className="absolute -top-1.5 -right-1.5 px-2 py-0.5 rounded-full bg-emerald-500 text-slate-950 text-[10px] font-black shadow-md">
+                      Dias 1 & 15
+                    </span>
+                  </div>
+                  <h4 className="text-base font-bold text-white group-hover:text-emerald-300 transition-colors mb-1.5">
+                    Rotina Quinzenal & Limpeza
+                  </h4>
+                  <p className="text-xs text-slate-400 leading-relaxed flex-1">
+                    Exclusão automática de eventos anteriores a hoje para TODAS as tabelas e reorganização geral do banco (VACUUM & REINDEX).
+                  </p>
+                  <div className="mt-4 inline-flex items-center gap-1 text-xs font-bold text-emerald-400">
+                    <span>Ver Rotina & Executar</span>
+                    <span className="group-hover:translate-x-1 transition-transform">→</span>
+                  </div>
+                </button>
+
+                {/* BOTÃO NOVO: DOMÍNIO PRÓPRIO & LOCAWEB PWA */}
+                <button
+                  id="btn-admin-dominio-pwa"
+                  onClick={() => setCurrentView('dominio_pwa')}
+                  className="group relative flex flex-col items-center text-center p-5 rounded-2xl bg-gradient-to-b from-slate-800/80 to-slate-950 border border-indigo-500/50 hover:border-indigo-400 hover:shadow-xl hover:shadow-indigo-500/15 transition-all duration-200 cursor-pointer animate-in fade-in"
+                >
+                  <div className="relative w-14 h-14 rounded-2xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-400 group-hover:scale-105 group-hover:bg-indigo-500/25 transition-all mb-3 shadow-inner">
+                    <Globe className="w-7 h-7" />
+                    <span className="absolute -top-1.5 -right-1.5 px-2 py-0.5 rounded-full bg-indigo-500 text-white text-[10px] font-black shadow-md">
+                      Locaweb
+                    </span>
+                  </div>
+                  <h4 className="text-base font-bold text-white group-hover:text-indigo-300 transition-colors mb-1.5">
+                    Domínio & Locaweb PWA
+                  </h4>
+                  <p className="text-xs text-slate-400 leading-relaxed flex-1">
+                    Baixar o arquivo index.html pronto para colocar na Locaweb (praondeeuvou.ia.br) como PWA em tela cheia.
+                  </p>
+                  <div className="mt-4 inline-flex items-center gap-1 text-xs font-bold text-indigo-400">
+                    <span>Ver Arquivos & Baixar</span>
                     <span className="group-hover:translate-x-1 transition-transform">→</span>
                   </div>
                 </button>
@@ -2212,6 +2619,325 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                     </form>
                   </div>
                 </div>
+              )}
+            </div>
+          )}
+
+          {/* =========================================================================
+              VIEW: ESTATÍSTICAS E DESEMPENHO (BI DASHBOARD)
+              ========================================================================= */}
+          {currentView === 'estatisticas' && (
+            <div className="max-w-4xl mx-auto space-y-6 animate-in fade-in">
+              <div className="flex items-center justify-between gap-3 pb-3 border-b border-slate-800">
+                <div className="flex items-center gap-2 min-w-0">
+                  <BarChart3 className="w-5 h-5 text-violet-400 shrink-0" />
+                  <h3 className="text-sm sm:text-base font-bold text-white truncate">Desempenho & Estatísticas de Consultas</h3>
+                </div>
+                <button
+                  onClick={() => setCurrentView('menu')}
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-xs font-semibold border border-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-sm"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>Voltar</span>
+                </button>
+              </div>
+
+              {/* Filtros e Controles */}
+              <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 flex flex-col sm:flex-row items-center gap-4 justify-between">
+                <div className="text-left font-sans">
+                  <h4 className="text-sm font-bold text-white">Filtros de Desempenho</h4>
+                  <p className="text-xs text-slate-400">Filtre os dados para refinar os insights de captação comercial:</p>
+                </div>
+                <div className="flex items-center gap-3 w-full sm:w-auto font-sans">
+                  <div className="flex-1 sm:flex-initial">
+                    <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Ano</label>
+                    <select
+                      value={statsYearFilter}
+                      onChange={(e) => setStatsYearFilter(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-850 rounded-lg px-3 py-1.5 text-xs text-slate-200 font-bold focus:border-violet-500 focus:outline-none"
+                    >
+                      <option value="Todos">Todos os Anos</option>
+                      {Array.from(new Set([new Date().getFullYear().toString(), '2026', ...statsData.map(s => String(s.ano))])).sort((a, b) => Number(b) - Number(a)).map(y => (
+                        <option key={y} value={y}>{y}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex-1 sm:flex-initial">
+                    <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Estado</label>
+                    <select
+                      value={statsStateFilter}
+                      onChange={(e) => setStatsStateFilter(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-850 rounded-lg px-3 py-1.5 text-xs text-slate-200 font-bold focus:border-violet-500 focus:outline-none"
+                    >
+                      <option value="Todos">Todos os Estados</option>
+                      <option value="SP">SP (São Paulo - Oficial)</option>
+                      {Array.from(new Set(statsData.map(s => s.estado.toUpperCase()))).filter(e => e !== 'SP').map(st => (
+                        <option key={st} value={st}>{st}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">&nbsp;</label>
+                      <button
+                        onClick={fetchStats}
+                        className="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-slate-950 rounded-lg text-xs font-black transition-all cursor-pointer flex items-center gap-1.5 shadow-sm"
+                        title="Atualizar métricas de consultas"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isLoadingStats ? 'animate-spin' : ''}`} />
+                        <span>Atualizar</span>
+                      </button>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">&nbsp;</label>
+                      <button
+                        type="button"
+                        onClick={handleResetStats}
+                        className="px-3 py-1.5 bg-rose-500/15 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 shadow-sm"
+                        title="Zerar métricas de consultas para iniciar a contagem a partir de 0"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Zerar</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {isLoadingStats ? (
+                <div className="py-12 text-center text-slate-400 flex flex-col items-center gap-3 font-sans">
+                  <RefreshCw className="w-8 h-8 text-violet-400 animate-spin" />
+                  <p className="text-sm font-semibold">Carregando métricas e relatórios...</p>
+                </div>
+              ) : (
+                (() => {
+                  // Filtra os dados de acordo com os filtros selecionados
+                  const filteredStats = statsData.filter((item) => {
+                    const matchYear = statsYearFilter === 'Todos' || String(item.ano) === statsYearFilter;
+                    const matchState = statsStateFilter === 'Todos' || item.estado.toUpperCase() === statsStateFilter.toUpperCase();
+                    return matchYear && matchState;
+                  });
+
+                  // Cálculos de KPI
+                  const totalConsultas = filteredStats.reduce((sum, item) => sum + item.total_consultas, 0);
+                  
+                  // Encontrar melhor mês
+                  const monthTotals = Array(12).fill(0);
+                  filteredStats.forEach((item) => {
+                    if (item.mes >= 1 && item.mes <= 12) {
+                      monthTotals[item.mes - 1] += item.total_consultas;
+                    }
+                  });
+                  const maxMonthVal = Math.max(...monthTotals, 0);
+                  const maxMonthIdx = monthTotals.indexOf(maxMonthVal);
+                  const melhorMesNome = maxMonthVal > 0 ? NOME_MESES[maxMonthIdx] : 'N/A';
+
+                  // Encontrar líder por estado
+                  const stateTotals: { [key: string]: number } = {};
+                  filteredStats.forEach((item) => {
+                    stateTotals[item.estado] = (stateTotals[item.estado] || 0) + item.total_consultas;
+                  });
+                  let liderEstado = 'Nacional';
+                  let maxStateVal = 0;
+                  Object.entries(stateTotals).forEach(([st, val]) => {
+                    if (val > maxStateVal) {
+                      maxStateVal = val;
+                      liderEstado = st;
+                    }
+                  });
+
+                  return (
+                    <div className="space-y-6 font-sans">
+                      {/* Grid de KPIs / Mini Cards */}
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        {/* CARD 1: TOTAL DE CONSULTAS */}
+                        <div className="p-5 rounded-2xl bg-gradient-to-b from-slate-900 to-slate-950 border border-slate-800 flex items-center gap-4">
+                          <div className="w-12 h-12 rounded-xl bg-violet-500/10 border border-violet-500/20 flex items-center justify-center text-violet-400">
+                            <Activity className="w-6 h-6" />
+                          </div>
+                          <div className="text-left min-w-0">
+                            <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest">Pessoas que Acessaram</span>
+                            <span className="block text-2xl font-black text-white leading-none mt-1">
+                              {totalConsultas.toLocaleString('pt-BR')}
+                            </span>
+                            <span className="block text-[10px] text-emerald-400 mt-1 font-bold">✓ Dados 100% Auditados</span>
+                          </div>
+                        </div>
+
+                        {/* CARD 2: MELHOR MÊS */}
+                        <div className="p-5 rounded-2xl bg-gradient-to-b from-slate-900 to-slate-950 border border-slate-800 flex items-center gap-4">
+                          <div className="w-12 h-12 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
+                            <Calendar className="w-6 h-6" />
+                          </div>
+                          <div className="text-left min-w-0">
+                            <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest">Melhor Mês</span>
+                            <span className="block text-base font-black text-white leading-none mt-1.5 truncate">
+                              {melhorMesNome} {statsYearFilter !== 'Todos' ? statsYearFilter : ''}
+                            </span>
+                            <span className="block text-[10px] text-slate-400 mt-1">
+                              {maxMonthVal > 0 ? `${maxMonthVal.toLocaleString('pt-BR')} buscas` : 'Sem registros'}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* CARD 3: LÍDER DE BUSCAS */}
+                        <div className="p-5 rounded-2xl bg-gradient-to-b from-slate-900 to-slate-950 border border-slate-800 flex items-center gap-4">
+                          <div className="w-12 h-12 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
+                            <Award className="w-6 h-6" />
+                          </div>
+                          <div className="text-left min-w-0">
+                            <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest">Estado Líder</span>
+                            <span className="block text-2xl font-black text-white leading-none mt-1">
+                              {liderEstado}
+                            </span>
+                            <span className="block text-[10px] text-slate-400 mt-1">
+                              {maxStateVal > 0 ? `${maxStateVal.toLocaleString('pt-BR')} buscas` : 'Sem registros'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Gráfico de Barras Vertical para o Histórico de Consultas (CSS Puro) */}
+                      <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800">
+                        <div className="flex items-center justify-between gap-3 mb-6">
+                          <div className="text-left">
+                            <h4 className="text-sm font-bold text-white">Evolução Mensal de Consultas</h4>
+                            <p className="text-xs text-slate-400">Volume total de cliques e pesquisas no catálogo de eventos:</p>
+                          </div>
+                          <div className="px-3 py-1 rounded-full bg-violet-500/10 border border-violet-500/20 text-[10px] font-black text-violet-400 uppercase tracking-widest">
+                            {statsStateFilter === 'Todos' ? 'Nacional' : `Estado: ${statsStateFilter}`}
+                          </div>
+                        </div>
+
+                        {/* As colunas do gráfico */}
+                        {maxMonthVal === 0 ? (
+                          <div className="h-48 flex flex-col items-center justify-center text-slate-400 text-xs gap-2 p-6 text-center">
+                            <Activity className="w-8 h-8 text-violet-400/40" />
+                            <p className="font-semibold text-slate-300">Nenhuma consulta registrada até o momento.</p>
+                            <p className="text-slate-500 max-w-md">O aplicativo está pronto para publicação. O volume de buscas será contabilizado automaticamente em tempo real conforme os usuários pesquisarem eventos.</p>
+                          </div>
+                        ) : (
+                          <div className="space-y-4">
+                            <div className="h-48 flex items-end gap-2 sm:gap-4 border-b border-slate-800 pb-2 px-2">
+                              {monthTotals.map((val, idx) => {
+                                const pct = maxMonthVal > 0 ? (val / maxMonthVal) * 100 : 0;
+                                return (
+                                  <div key={idx} className="flex-1 flex flex-col items-center group relative h-full justify-end">
+                                    {/* Tooltip com valor */}
+                                    <div className="absolute -top-7 scale-0 group-hover:scale-100 transition-all bg-slate-950 text-[10px] font-bold text-white px-2 py-0.5 rounded border border-slate-800 pointer-events-none z-10 whitespace-nowrap shadow-md">
+                                      {val.toLocaleString('pt-BR')} buscas
+                                    </div>
+                                    {/* Barra com degradê violeta */}
+                                    <div
+                                      style={{ height: `${Math.max(pct, val > 0 ? 4 : 0)}%` }}
+                                      className={`w-full rounded-t-lg bg-gradient-to-t ${val > 0 ? 'from-violet-800 via-violet-600 to-fuchsia-500 hover:from-violet-500 hover:to-fuchsia-400' : 'from-slate-850 to-slate-800'} border-t border-violet-400/40 transition-all duration-500 cursor-pointer shadow-lg`}
+                                    />
+                                  </div>
+                                );
+                              })}
+                            </div>
+                            {/* Nomes dos Meses */}
+                            <div className="grid grid-cols-12 gap-1 text-[9px] font-bold text-slate-400 text-center uppercase tracking-widest px-1">
+                              {NOME_MESES.map((mes) => (
+                                <span key={mes} className="truncate" title={mes}>
+                                  {mes.substring(0, 3)}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Guia Comercial / Pitch de Captação de Patrocinadores (Destaque Monetização) */}
+                      <div className="p-6 rounded-2xl bg-gradient-to-r from-violet-950/30 via-slate-900 to-purple-950/20 border-2 border-violet-500/30">
+                        <div className="flex items-start gap-4 text-left">
+                          <div className="w-12 h-12 rounded-xl bg-violet-500/10 border border-violet-500/20 flex items-center justify-center text-violet-400 shrink-0">
+                            <Sparkles className="w-6 h-6" />
+                          </div>
+                          <div className="space-y-3 min-w-0 flex-1">
+                            <h4 className="text-base font-bold text-violet-300">Guia Comercial — Captação de Patrocinadores 🚀</h4>
+                            <p className="text-xs text-slate-300 leading-relaxed">
+                              Use estes dados consolidados reais para fechar parcerias comerciais com adegas, bares, lanchonetes e organizadores locais. Mostre como anunciar por apenas <strong>R$ 100,00 por mês</strong> é extremamente barato e lucrativo:
+                            </p>
+                            
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+                              <div className="p-3.5 rounded-xl bg-slate-950/80 border border-slate-850">
+                                <span className="block text-[10px] font-bold text-violet-400 uppercase tracking-widest">Exposição por R$ 100/mês</span>
+                                <p className="text-xs text-slate-300 mt-1 leading-normal">
+                                  Com <strong className="text-white">{totalConsultas.toLocaleString('pt-BR')} buscas</strong> neste filtro, cada exibição da marca de um patrocinador custa apenas:
+                                </p>
+                                <span className="block text-lg font-black text-emerald-400 mt-1.5">
+                                  R$ {totalConsultas > 0 ? (100 / totalConsultas).toFixed(3) : '0.000'} <span className="text-xs font-normal text-slate-400">por visualização!</span>
+                                </span>
+                              </div>
+
+                              <div className="p-3.5 rounded-xl bg-slate-950/80 border border-slate-850">
+                                <span className="block text-[10px] font-bold text-violet-400 uppercase tracking-widest">Custo por Mil Visualizações (CPM)</span>
+                                <p className="text-xs text-slate-300 mt-1 leading-normal">
+                                  O valor pago pelo patrocinador para ser exibido a cada 1.000 buscas segmentadas dos clientes é de:
+                                </p>
+                                <span className="block text-lg font-black text-emerald-400 mt-1.5">
+                                  R$ {totalConsultas > 0 ? ((100 / totalConsultas) * 1000).toFixed(2) : '0.00'} <span className="text-xs font-normal text-slate-400">por 1.000 exibições!</span>
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Pitch de Vendas Sugerido */}
+                            <div className="p-3 rounded-lg bg-slate-950/40 border border-slate-850 text-xs text-slate-400 italic">
+                              💡 <strong>Argumento de Vendas:</strong> "O Pra Onde Eu Vou já teve {totalConsultas.toLocaleString('pt-BR')} buscas qualificadas neste período. Ao anunciar sua adega conosco por apenas R$ 100/mês, sua marca é exibida para as pessoas certas que já decidiram sair de casa, custando menos de {totalConsultas > 0 ? (100 / totalConsultas * 100).toFixed(1) : '1'} centavo por exibição garantida!"
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Tabela de Relatório Detalhado de Consultas */}
+                      <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800">
+                        <div className="text-left mb-4">
+                          <h4 className="text-sm font-bold text-white">Detalhamento dos Dados de Desempenho</h4>
+                          <p className="text-xs text-slate-400">Tabela de auditoria física de buscas por localidade e período:</p>
+                        </div>
+
+                        {filteredStats.length === 0 ? (
+                          <div className="py-8 text-center text-slate-500 text-xs">
+                            Nenhuma consulta registrada para os filtros selecionados.
+                          </div>
+                        ) : (
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-left text-xs border-collapse">
+                              <thead>
+                                <tr className="border-b border-slate-800 text-slate-400 font-bold uppercase tracking-wider text-[10px]">
+                                  <th className="py-3 px-4">Ano</th>
+                                  <th className="py-3 px-4">Mês</th>
+                                  <th className="py-3 px-4">Estado (UF)</th>
+                                  <th className="py-3 px-4 text-right">Total de Consultas</th>
+                                  <th className="py-3 px-4 text-right">Participação (%)</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {filteredStats.map((item, idx) => {
+                                  const pctShare = totalConsultas > 0 ? (item.total_consultas / totalConsultas) * 100 : 0;
+                                  return (
+                                    <tr key={item.id || idx} className="border-b border-slate-800/60 hover:bg-slate-950/40 text-slate-300 font-medium">
+                                      <td className="py-3 px-4 text-white font-bold">{item.ano}</td>
+                                      <td className="py-3 px-4">{NOME_MESES[item.mes - 1] || item.mes}</td>
+                                      <td className="py-3 px-4">
+                                        <span className="px-2 py-0.5 rounded-md bg-slate-800 border border-slate-700 text-slate-300 font-bold text-[10px]">
+                                          {item.estado}
+                                        </span>
+                                      </td>
+                                      <td className="py-3 px-4 text-right text-white font-bold">{item.total_consultas.toLocaleString('pt-BR')}</td>
+                                      <td className="py-3 px-4 text-right text-violet-400 font-bold">{pctShare.toFixed(1)}%</td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()
               )}
             </div>
           )}
@@ -2617,7 +3343,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
               <div className="flex items-center justify-between gap-3 pb-3 border-b border-slate-800">
                 <div className="flex items-center gap-2 min-w-0">
                   <Building2 className="w-5 h-5 text-amber-400 shrink-0" />
-                  <h3 className="text-sm sm:text-base font-bold text-white truncate">Cadastrar Cidades</h3>
+                  <h3 className="text-sm sm:text-base font-bold text-white truncate">Cidades do Estado de São Paulo (SP)</h3>
                 </div>
                 <button
                   id="btn-cities-back"
@@ -2633,9 +3359,9 @@ export const AdminModal: React.FC<AdminModalProps> = ({
               {/* Formulário para Cadastrar Cidade */}
               <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-5 space-y-4">
                 <div>
-                  <h4 className="text-sm font-bold text-white mb-1">Adicionar Nova Cidade</h4>
+                  <h4 className="text-sm font-bold text-white mb-1">Adicionar Nova Cidade Paulista</h4>
                   <p className="text-xs text-slate-400">
-                    Cadastre novos municípios para organização geográfica dos eventos no catálogo e no mapa.
+                    Cadastre novos municípios do Estado de São Paulo para organização dos eventos no catálogo e no mapa.
                   </p>
                 </div>
 
@@ -2657,26 +3383,25 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                       <select
                         value={newCityState}
                         onChange={(e) => setNewCityState(e.target.value)}
-                        className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-white text-xs focus:outline-none focus:ring-2 focus:ring-amber-500"
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-amber-300 font-bold text-xs focus:outline-none focus:ring-2 focus:ring-amber-500"
                       >
-                        {['SP', 'RJ', 'MG', 'ES', 'PR', 'SC', 'RS', 'BA', 'PE', 'CE', 'MA', 'GO', 'DF', 'AM', 'PA'].map((uf) => (
-                          <option key={uf} value={uf}>{uf}</option>
-                        ))}
+                        <option value="SP">SP - São Paulo (Exclusivo)</option>
                       </select>
                     </div>
 
                     <div>
-                      <label className="block text-xs font-semibold text-slate-300 mb-1">Região</label>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Região de SP</label>
                       <select
                         value={newCityRegion}
                         onChange={(e) => setNewCityRegion(e.target.value)}
                         className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-white text-xs focus:outline-none focus:ring-2 focus:ring-amber-500"
                       >
-                        <option value="Sudeste">Sudeste</option>
-                        <option value="Nordeste">Nordeste</option>
-                        <option value="Sul">Sul</option>
-                        <option value="Centro-Oeste">Centro-Oeste</option>
-                        <option value="Norte">Norte</option>
+                        <option value="Capital">Capital (São Paulo)</option>
+                        <option value="Grande São Paulo">Grande São Paulo / ABC</option>
+                        <option value="Baixada Santista">Baixada Santista / Litoral</option>
+                        <option value="Campinas e Região">Campinas e Região</option>
+                        <option value="Interior Paulista">Interior Paulista</option>
+                        <option value="Vale do Paraíba">Vale do Paraíba</option>
                       </select>
                     </div>
                   </div>
@@ -2811,26 +3536,28 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                 </div>
 
                 <div className="flex items-center gap-2 flex-wrap shrink-0">
-                  {/* Botão sempre visível para Liberar Todos os Eventos */}
-                  <button
-                    id="btn-liberar-todos-eventos"
-                    onClick={() => handleLiberateAllEvents(false)}
-                    disabled={isLiberatingAll || isDeletingBatch}
-                    className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white text-xs font-bold flex items-center gap-1.5 shadow-md shadow-emerald-600/30 transition-all cursor-pointer shrink-0 disabled:opacity-50"
-                    title="Liberar todos os eventos da quarentena e catálogo oficial (define campo liberado = 'S')"
-                  >
-                    {isLiberatingAll ? (
-                      <>
-                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                        <span>Liberando Todos...</span>
-                      </>
-                    ) : (
-                      <>
-                        <CheckCheck className="w-4 h-4 text-emerald-200" />
-                        <span>Liberar Todos os Eventos {totalPending > 0 ? `(${totalPending} pendentes)` : `(${events.length + totalQuarantine})`}</span>
-                      </>
-                    )}
-                  </button>
+                  {/* Botão para Liberar Todos os Eventos (somente se houver pendentes) */}
+                  {totalPending > 0 && (
+                    <button
+                      id="btn-liberar-todos-eventos"
+                      onClick={() => handleLiberateAllEvents(false)}
+                      disabled={isLiberatingAll || isDeletingBatch}
+                      className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white text-xs font-bold flex items-center gap-1.5 shadow-md shadow-emerald-600/30 transition-all cursor-pointer shrink-0 disabled:opacity-50"
+                      title="Liberar todos os eventos da quarentena e catálogo oficial (define campo liberado = 'S')"
+                    >
+                      {isLiberatingAll ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>Liberando Todos...</span>
+                        </>
+                      ) : (
+                        <>
+                          <CheckCheck className="w-4 h-4 text-emerald-200" />
+                          <span>Liberar Todos os Eventos ({totalPending} pendentes)</span>
+                        </>
+                      )}
+                    </button>
+                  )}
 
 
 
@@ -2861,6 +3588,33 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                       <span>Liberar Cat. "{selectedCategoryForLiberation}"</span>
                     </button>
                   )}
+
+                  <button
+                    id="btn-recarregar-firestore"
+                    type="button"
+                    onClick={async () => {
+                      setIsLoadingEvents(true);
+                      try {
+                        const res = await fetch('/api/admin/sync-from-firestore', { method: 'POST' });
+                        const data = await res.json();
+                        setLiberationNotice(`Banco recarregado com sucesso! ${data.count || data.totalInDb} eventos ativos.`);
+                        setTimeout(() => setLiberationNotice(''), 4500);
+                        await fetchEventsFromApi();
+                        if (onEventsUpdated) onEventsUpdated();
+                      } catch {
+                        setLiberationNotice('Erro ao sincronizar eventos do Firestore.');
+                        setTimeout(() => setLiberationNotice(''), 3500);
+                      } finally {
+                        setIsLoadingEvents(false);
+                      }
+                    }}
+                    disabled={isLoadingEvents}
+                    className="px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 hover:text-amber-200 text-xs font-semibold border border-amber-500/40 flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-sm disabled:opacity-50"
+                    title="Recarrega todos os 198 eventos salvos no Firestore diretamente para o banco SQLite"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isLoadingEvents ? 'animate-spin text-amber-400' : 'text-amber-400'}`} />
+                    <span>Recarregar do Firestore</span>
+                  </button>
 
                   <button
                     id="btn-atualizar-lista-eventos"
@@ -3043,9 +3797,10 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   {/* Cards de cada Categoria */}
                   {allCategoriesForLiberation.map((cat) => {
                     const isSelected = selectedCategoryForLiberation.toLowerCase().trim() === cat.name.toLowerCase().trim();
-                    const catEvents = events.filter((e) => (e.category || '').toLowerCase().trim() === cat.name.toLowerCase().trim());
+                    const currentEventList = localEvents.length > 0 ? localEvents : events;
+                    const catEvents = currentEventList.filter((e) => (e.category || '').toLowerCase().trim() === cat.name.toLowerCase().trim());
                     const catQuarantine = quarantineEvents.filter((q) => (q.category || '').toLowerCase().trim() === cat.name.toLowerCase().trim());
-                    const pendingCount = catEvents.filter((e) => !e.liberado || e.liberado === '').length + catQuarantine.length;
+                    const pendingCount = catEvents.filter((e) => e.liberado !== 'S').length + catQuarantine.length;
 
                     return (
                       <button
@@ -3097,9 +3852,18 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                       : 'Nenhum evento encontrado para o status selecionado.'}
                   </div>
                   {eventFilterStatus === 'pending' && (
-                    <p className="text-[11px] text-slate-500">
-                      Não há eventos pendentes de liberação no catálogo. Todos os eventos estão liberados!
-                    </p>
+                    <div className="space-y-2 pt-1">
+                      <p className="text-[11px] text-slate-400">
+                        Não há eventos pendentes de liberação no catálogo. Todos os eventos estão liberados!
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setEventFilterStatus('approved')}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition-all shadow cursor-pointer"
+                      >
+                        <span>Ver Tabela de Eventos Liberados</span>
+                      </button>
+                    </div>
                   )}
                   {selectedCategoryForLiberation !== 'Todas' && (
                     <button
@@ -3188,6 +3952,11 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                                         <Play className="w-2 h-2 fill-purple-300" /> Vídeo
                                       </span>
                                     )}
+                                    {evt.tags?.includes('Ticket360') && (
+                                      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shrink-0 flex items-center gap-1">
+                                        <Ticket className="w-2.5 h-2.5" /> Ticket360
+                                      </span>
+                                    )}
                                   </div>
                                   <div className="text-[11px] text-slate-400 truncate max-w-[200px] flex items-center gap-2 mt-0.5">
                                     <span className="truncate">{evt.organizer || 'Sem organizador'}</span>
@@ -3233,7 +4002,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                                           e.stopPropagation();
                                           handleSaveLiberation(evt.id, 'N');
                                         }}
-                                        title="Cancelar Evento: atualiza o campo liberado com 'N'"
+                                        title="Cancelar e excluir este evento da lista de liberação"
                                         className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer border ${
                                           isRejected
                                             ? 'bg-rose-600 text-white border-rose-500 shadow-sm'
@@ -3338,7 +4107,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                                     e.stopPropagation();
                                     handleSaveLiberation(evt.id, 'N');
                                   }}
-                                  title="Cancelar/Recusar Evento: atualiza o campo liberado com 'N' (Não Liberado)"
+                                  title="Cancelar/Recusar Evento: cancela e exclui o evento da lista de liberação"
                                   className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-black transition-all cursor-pointer border ${
                                     isRejected
                                       ? 'bg-rose-600 text-white border-rose-500 shadow-md shadow-rose-500/20 active:scale-95'
@@ -3653,15 +4422,21 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
                     <div>
                       <label className="block text-xs font-semibold text-slate-300 mb-1">
-                        Cidade
+                        Cidade do Estabelecimento *
                       </label>
-                      <input
-                        type="text"
+                      <select
                         value={sponsorCity}
                         onChange={(e) => setSponsorCity(e.target.value)}
-                        placeholder="Santo André"
-                        className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500"
-                      />
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs text-white focus:outline-none focus:ring-2 focus:ring-amber-500 cursor-pointer"
+                        required
+                      >
+                        <option value="">Selecione uma Cidade...</option>
+                        {cities.map((c) => (
+                          <option key={c.id} value={c.name} className="bg-slate-900 text-white">
+                            {c.name} ({c.state})
+                          </option>
+                        ))}
+                      </select>
                     </div>
 
                     <div>
@@ -3894,6 +4669,17 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
                 <div className="flex items-center gap-2">
                   <button
+                    onClick={() => {
+                      setShowPixConfigModal(!showPixConfigModal);
+                      if (!showPixConfigModal) fetchPixConfig();
+                    }}
+                    className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-slate-950 text-xs font-black flex items-center gap-1.5 transition-colors cursor-pointer shadow-md"
+                  >
+                    <QrCode className="w-3.5 h-3.5" />
+                    <span>Configurar Chave Pix</span>
+                  </button>
+
+                  <button
                     onClick={fetchDbSponsors}
                     disabled={loadingDbSponsors}
                     className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-60"
@@ -3903,6 +4689,139 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   </button>
                 </div>
               </div>
+
+              {/* Painel de Configuração de Chave Pix da Plataforma */}
+              {showPixConfigModal && (
+                <div className="bg-slate-900 border-2 border-emerald-500/50 rounded-2xl p-5 shadow-2xl animate-in fade-in duration-200">
+                  <div className="flex items-center justify-between border-b border-slate-800 pb-3 mb-4">
+                    <div className="flex items-center gap-2">
+                      <div className="p-2 rounded-xl bg-emerald-500/20 text-emerald-400">
+                        <QrCode className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h4 className="text-sm font-bold text-white">Configurações Oficiais de Pix (Recebimento de Patrocínios)</h4>
+                        <p className="text-xs text-slate-400">
+                          Estes dados são usados para gerar o QR Code oficial escaneável e o código Pix Copia e Cola para os comerciantes.
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setShowPixConfigModal(false)}
+                      className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  {pixConfigFeedback && (
+                    <div className={`p-3 rounded-xl text-xs mb-4 flex items-center gap-2 ${
+                      pixConfigFeedback.type === 'success' ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300' : 'bg-rose-500/10 border border-rose-500/30 text-rose-300'
+                    }`}>
+                      {pixConfigFeedback.type === 'success' ? <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" /> : <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />}
+                      <span>{pixConfigFeedback.msg}</span>
+                    </div>
+                  )}
+
+                  <form onSubmit={handleSavePixConfig} className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-300 mb-1">
+                        Chave Pix do Recebedor (Obrigatório):
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={pixConfigForm.chavePix}
+                        onChange={(e) => setPixConfigForm({ ...pixConfigForm, chavePix: e.target.value })}
+                        placeholder="ex: praondeeu@gmail.com ou celular ou CPF"
+                        className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-xs text-white font-mono focus:border-emerald-500 focus:outline-none"
+                      />
+                      <span className="text-[10px] text-slate-400 block mt-1">
+                        Chave atual padrão: <strong>praondeeu@gmail.com</strong>
+                      </span>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-slate-300 mb-1">
+                        Tipo da Chave Pix:
+                      </label>
+                      <select
+                        value={pixConfigForm.tipoChave}
+                        onChange={(e) => setPixConfigForm({ ...pixConfigForm, tipoChave: e.target.value })}
+                        className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-xs text-white focus:border-emerald-500 focus:outline-none"
+                      >
+                        <option value="email">E-mail</option>
+                        <option value="telefone">Telefone (com DDD)</option>
+                        <option value="cpf">CPF (apenas números)</option>
+                        <option value="cnpj">CNPJ (apenas números)</option>
+                        <option value="aleatoria">Chave Aleatória (EVP)</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-slate-300 mb-1">
+                        Nome do Beneficiário / Titular (Máx 25 letras):
+                      </label>
+                      <input
+                        type="text"
+                        value={pixConfigForm.nomeBeneficiario}
+                        onChange={(e) => setPixConfigForm({ ...pixConfigForm, nomeBeneficiario: e.target.value.toUpperCase() })}
+                        placeholder="PRA ONDE EU VOU"
+                        maxLength={25}
+                        className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-xs text-white font-mono focus:border-emerald-500 focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-slate-300 mb-1">
+                        Cidade do Beneficiário (Máx 15 letras):
+                      </label>
+                      <input
+                        type="text"
+                        value={pixConfigForm.cidadeBeneficiario}
+                        onChange={(e) => setPixConfigForm({ ...pixConfigForm, cidadeBeneficiario: e.target.value.toUpperCase() })}
+                        placeholder="PRAIA GRANDE"
+                        maxLength={15}
+                        className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-xs text-white font-mono focus:border-emerald-500 focus:outline-none"
+                      />
+                    </div>
+
+                    <div className="sm:col-span-2">
+                      <label className="block text-xs font-bold text-slate-300 mb-1">
+                        Token de Acesso do Mercado Pago (Opcional para conciliação automática):
+                      </label>
+                      <input
+                        type="password"
+                        value={pixConfigForm.mercadoPagoToken}
+                        onChange={(e) => setPixConfigForm({ ...pixConfigForm, mercadoPagoToken: e.target.value })}
+                        placeholder="APP_USR-..."
+                        className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-xs text-white font-mono focus:border-emerald-500 focus:outline-none"
+                      />
+                      <span className="text-[10px] text-slate-500 block mt-1">
+                        Deixe em branco para usar o gerador oficial BACEN direto para a sua Chave Pix.
+                      </span>
+                    </div>
+
+                    <div className="sm:col-span-2 flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                      <button
+                        type="button"
+                        onClick={() => setShowPixConfigModal(false)}
+                        className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold transition-colors cursor-pointer"
+                      >
+                        Cancelar
+                      </button>
+
+                      <button
+                        type="submit"
+                        disabled={savingPixConfig}
+                        className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-slate-950 text-xs font-black transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+                      >
+                        {savingPixConfig ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                        <span>Salvar Configurações de Pix</span>
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              )}
 
               {/* Feedback de Ação */}
               {sponsorLiberationFeedback && (
@@ -4265,6 +5184,55 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                 fetchQuarantineCount();
                 setCurrentView('menu');
               }}
+              onNavigateToLiberarEventos={async (countAdded?: number) => {
+                await fetchQuarantineCount();
+                await fetchEventsFromApi();
+                setSelectedCategoryForLiberation('Todas');
+                setEventFilterStatus('pending');
+                setCurrentView('liberar_eventos');
+                if (typeof countAdded === 'number') {
+                  if (countAdded > 0) {
+                    setLiberationNotice(`${countAdded} novos eventos da Sympla adicionados à fila de liberação!`);
+                  } else {
+                    setLiberationNotice('Eventos da Sympla carregados na fila de liberação! Revise, altere a categoria ou libere abaixo.');
+                  }
+                  setTimeout(() => setLiberationNotice(''), 6000);
+                }
+              }}
+              onEventApproved={(newEvent) => {
+                fetchQuarantineCount();
+                if (newEvent && onEventApproved) {
+                  onEventApproved(newEvent);
+                }
+                if (onEventsUpdated) onEventsUpdated();
+              }}
+            />
+          )}
+
+          {/* VIEW: IMPORTAR TICKET360 (QUARENTENA & CURADORIA) */}
+          {currentView === 'importar_ticket360' && (
+            <Ticket360ImporterView
+              categories={categories}
+              cities={cities}
+              onBackToMenu={() => {
+                fetchQuarantineCount();
+                setCurrentView('menu');
+              }}
+              onNavigateToLiberarEventos={async (countAdded?: number) => {
+                await fetchQuarantineCount();
+                await fetchEventsFromApi();
+                setSelectedCategoryForLiberation('Todas');
+                setEventFilterStatus('pending');
+                setCurrentView('liberar_eventos');
+                if (typeof countAdded === 'number') {
+                  if (countAdded > 0) {
+                    setLiberationNotice(`${countAdded} novos eventos da Ticket360 adicionados à fila de liberação!`);
+                  } else {
+                    setLiberationNotice('Eventos da Ticket360 carregados na fila de liberação! Revise, altere a categoria ou libere abaixo.');
+                  }
+                  setTimeout(() => setLiberationNotice(''), 6000);
+                }
+              }}
               onEventApproved={(newEvent) => {
                 fetchQuarantineCount();
                 if (newEvent && onEventApproved) {
@@ -4367,6 +5335,571 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                     ))}
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* VIEW: ROTINA QUINZENAL & LIMPEZA DO BANCO */}
+          {currentView === 'rotina_limpeza' && (
+            <div className="max-w-4xl mx-auto py-2 sm:py-4 space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-200">
+              {/* Header */}
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-slate-800/80 pb-4">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setCurrentView('menu')}
+                      className="p-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors cursor-pointer"
+                    >
+                      <ArrowLeft className="w-4 h-4" />
+                    </button>
+                    <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                      <CalendarCheck className="w-6 h-6 text-emerald-400" />
+                      <span>Rotina Quinzenal & Reorganização de Tabelas</span>
+                    </h3>
+                  </div>
+                  <p className="text-xs text-slate-400 pl-8">
+                    Exclusão automática de registros com <code className="text-emerald-300 font-mono">data_evento</code> anterior à data atual e reorganização completa (<code className="text-amber-300 font-mono">REINDEX</code> + <code className="text-amber-300 font-mono">VACUUM</code>).
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0 pl-8 sm:pl-0">
+                  <button
+                    onClick={fetchCleanupStatus}
+                    disabled={isLoadingCleanupStatus}
+                    className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                    title="Atualizar dados"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isLoadingCleanupStatus ? 'animate-spin' : ''}`} />
+                    <span>Atualizar</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Banner Informativo Respondendo à Dúvida do Usuário */}
+              <div className="space-y-3">
+                <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-950/40 via-slate-900 to-slate-900 border border-emerald-500/30 flex items-start gap-3 shadow-lg">
+                  <div className="w-9 h-9 rounded-xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0 mt-0.5">
+                    <CheckCircle2 className="w-5 h-5" />
+                  </div>
+                  <div className="space-y-1">
+                    <h4 className="text-sm font-bold text-white">
+                      Automação Total: Você NÃO precisa solicitar tabela por tabela!
+                    </h4>
+                    <p className="text-xs text-slate-300 leading-relaxed">
+                      O robô do sistema inspeciona dinamicamente <strong>todas as tabelas</strong> do banco de dados SQLite (<code className="text-emerald-300 font-mono">praondeeu.db</code>). Qualquer tabela com a coluna <code className="text-emerald-300 font-mono">data_evento</code> é processada automaticamente, sem necessidade de pedir uma a uma.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Destaque: Horário 06h00 da manhã & Proteção eventos_categoria */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="p-3.5 rounded-xl bg-blue-950/30 border border-blue-500/30 flex items-start gap-2.5">
+                    <Clock className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+                    <div className="text-xs space-y-0.5">
+                      <span className="font-bold text-blue-300">Horário Estratégico: 06h00 da Manhã</span>
+                      <p className="text-slate-400 leading-relaxed">
+                        Programado para rodar rigorosamente às <strong>06:00 da manhã</strong>, horário de menor fluxo com quase nenhum usuário acessando a plataforma.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="p-3.5 rounded-xl bg-amber-950/30 border border-amber-500/30 flex items-start gap-2.5">
+                    <ShieldCheck className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                    <div className="text-xs space-y-0.5">
+                      <span className="font-bold text-amber-300">Tabela Protegida: eventos_categoria</span>
+                      <p className="text-slate-400 leading-relaxed">
+                        A tabela <code className="text-amber-200 font-mono">eventos_categoria</code> foi <strong>retirada da rotina de exclusão</strong> e fica 100% preservada.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Cards de Agendamento Ativo */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Rotina Quinzenal */}
+                <div className="p-5 rounded-2xl bg-slate-900/80 border border-emerald-500/30 relative overflow-hidden space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-[10px] font-black uppercase tracking-wider">
+                      Agendamento Ativo
+                    </span>
+                    <span className="text-[11px] font-mono font-bold text-emerald-400">⏰ 06:00 da manhã (Fuso SP)</span>
+                  </div>
+                  <div>
+                    <h4 className="text-base font-bold text-white flex items-center gap-1.5">
+                      <span>Rotina Quinzenal</span>
+                      <span className="text-xs text-emerald-400 font-medium">(Todo Dia 1 e Dia 15)</span>
+                    </h4>
+                    <p className="text-xs text-slate-400 mt-1">
+                      Processa todo dia 15 e todo dia 1 do mês às 06h00 da manhã. Exclui eventos passados das tabelas ativas e roda compactação e reindexação total.
+                    </p>
+                  </div>
+                  <div className="pt-2 border-t border-slate-800 text-[11px] text-slate-300 flex items-center gap-2">
+                    <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Próxima execução: Dia 1 ou 15 às 06:00</span>
+                  </div>
+                </div>
+
+                {/* Rotina Diária */}
+                <div className="p-5 rounded-2xl bg-slate-900/80 border border-slate-800 relative overflow-hidden space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="px-2.5 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-slate-300 text-[10px] font-black uppercase tracking-wider">
+                      Reforço Diário Ativo
+                    </span>
+                    <span className="text-[11px] font-mono font-bold text-slate-300">⏰ 06:00 da manhã (Fuso SP)</span>
+                  </div>
+                  <div>
+                    <h4 className="text-base font-bold text-white flex items-center gap-1.5">
+                      <span>Rotina Diária</span>
+                      <span className="text-xs text-slate-400 font-medium">(Todos os dias)</span>
+                    </h4>
+                    <p className="text-xs text-slate-400 mt-1">
+                      Manutenção preventiva todos os dias às 06h00 para manter o catálogo sempre limpo e sem datas ultrapassadas.
+                    </p>
+                  </div>
+                  <div className="pt-2 border-t border-slate-800 text-[11px] text-slate-300 flex items-center gap-2">
+                    <Check className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Garantia de eventos sempre vigentes</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Botões de Ação Imediata (Manual) */}
+              <div className="p-5 rounded-2xl bg-slate-900/60 border border-slate-800 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div>
+                    <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                      <Wrench className="w-4 h-4 text-amber-400" />
+                      <span>Execução Manual Imediata</span>
+                    </h4>
+                    <p className="text-xs text-slate-400">
+                      Dispare a rotina agora mesmo para testar ou realizar manutenção sob demanda.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      disabled={isRunningCleanup}
+                      onClick={() => handleRunCleanupNow('quinzenal')}
+                      className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-2 transition-all cursor-pointer shadow-lg shadow-emerald-600/20 active:scale-95 disabled:opacity-50"
+                    >
+                      {isRunningCleanup ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                          <span>Processando todas as tabelas...</span>
+                        </>
+                      ) : (
+                        <>
+                          <CalendarCheck className="w-4 h-4" />
+                          <span>Executar Rotina Quinzenal Agora</span>
+                        </>
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isRunningCleanup}
+                      onClick={() => handleRunCleanupNow('diaria')}
+                      className="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
+                    >
+                      <span>Executar Diária</span>
+                    </button>
+                  </div>
+                </div>
+
+                {cleanupNotice && (
+                  <div
+                    className={`p-3 rounded-xl text-xs font-semibold flex items-center gap-2 ${
+                      cleanupNotice.type === 'success'
+                        ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/30'
+                        : 'bg-rose-500/10 text-rose-300 border border-rose-500/30'
+                    }`}
+                  >
+                    {cleanupNotice.type === 'success' ? (
+                      <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                    )}
+                    <span>{cleanupNotice.msg}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Lista Dinâmica de Tabelas Gerenciadas no SQLite */}
+              <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                      <Database className="w-4 h-4 text-emerald-400" />
+                      <span>Tabelas do Banco de Dados ({cleanupStatus?.monitoredTables?.filter((t: any) => t.hasDataEvento).length || '...'})</span>
+                    </h4>
+                    <p className="text-xs text-slate-400">
+                      Tabelas com coluna <code className="text-emerald-300 font-mono">data_evento</code> processadas dinamicamente. A tabela <code className="text-amber-300 font-mono">eventos_categoria</code> está protegida.
+                    </p>
+                  </div>
+                </div>
+
+                {isLoadingCleanupStatus && !cleanupStatus ? (
+                  <div className="p-8 text-center text-xs text-slate-500 flex items-center justify-center gap-2">
+                    <RefreshCw className="w-4 h-4 animate-spin text-emerald-400" />
+                    <span>Identificando tabelas do banco de dados...</span>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 pt-1 max-h-64 overflow-y-auto pr-1">
+                    {(cleanupStatus?.monitoredTables || [])
+                      .filter((t: any) => t.hasDataEvento)
+                      .map((t: any) => {
+                        const isProtected = t.name === 'eventos_categoria' || t.isProtected;
+                        return (
+                          <div
+                            key={t.name}
+                            className={`p-3 rounded-xl border flex items-center justify-between text-xs ${
+                              isProtected
+                                ? 'bg-amber-950/20 border-amber-500/40 shadow-sm'
+                                : 'bg-slate-950/70 border-slate-800'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2 overflow-hidden">
+                              <span
+                                className={`w-2 h-2 rounded-full shrink-0 ${
+                                  isProtected ? 'bg-amber-400 ring-2 ring-amber-400/30' : 'bg-emerald-400'
+                                }`}
+                              />
+                              <div className="truncate">
+                                <span className={`font-mono truncate block ${isProtected ? 'text-amber-200 font-bold' : 'text-white'}`} title={t.name}>
+                                  {t.name}
+                                </span>
+                                {isProtected && (
+                                  <span className="text-[10px] text-amber-400 font-semibold block">
+                                    🛡️ Protegida da exclusão
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <span
+                              className={`px-2 py-0.5 rounded-md text-[11px] font-bold shrink-0 ${
+                                isProtected
+                                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                                  : 'bg-slate-800 text-slate-300'
+                              }`}
+                            >
+                              {t.count} reg.
+                            </span>
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+              </div>
+
+              {/* Histórico das Últimas Execuções */}
+              {cleanupStatus?.history && cleanupStatus.history.length > 0 && (
+                <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-3">
+                  <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Clock className="w-4 h-4 text-slate-400" />
+                    <span>Histórico Recente de Execuções</span>
+                  </h4>
+                  <div className="divide-y divide-slate-800 max-h-56 overflow-y-auto pr-1 text-xs">
+                    {cleanupStatus.history.map((h: any) => (
+                      <div key={h.id} className="py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div className="space-y-0.5">
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
+                                h.tipo === 'quinzenal'
+                                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                  : h.tipo === 'diaria'
+                                  ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+                                  : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                              }`}
+                            >
+                              {h.tipo}
+                            </span>
+                            <span className="text-white font-medium">
+                              Data de corte: <code className="text-emerald-300 font-mono">{h.data_corte}</code>
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-400">
+                            Executado em: {new Date(h.executado_em).toLocaleString('pt-BR')} • Duração: {h.duracao_ms}ms
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="text-emerald-400 font-bold">
+                            {h.total_excluidos} excluídos
+                          </span>
+                          {h.reorganizado === 1 && (
+                            <span className="px-2 py-0.5 rounded-md bg-slate-800 text-[10px] font-bold text-slate-300 border border-slate-700">
+                              REINDEX + VACUUM OK
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* =========================================================================
+              VIEW: DOMÍNIO PRÓPRIO & LOCAWEB PWA (praondeeuvou.ia.br)
+              ========================================================================= */}
+          {currentView === 'dominio_pwa' && (
+            <div className="max-w-4xl mx-auto py-2 sm:py-4 space-y-6 animate-in fade-in">
+              {/* Cabeçalho */}
+              <div className="flex items-center justify-between gap-4 pb-3 border-b border-slate-800">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
+                    <Globe className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg sm:text-xl font-bold text-white flex items-center gap-2">
+                      <span>Publicação do Domínio & PWA na Locaweb</span>
+                    </h3>
+                    <p className="text-xs text-slate-400">
+                      Configure o domínio <strong className="text-indigo-300">praondeeuvou.ia.br</strong> para abrir o seu aplicativo como um site PWA completo.
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setCurrentView('menu')}
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  <span>Voltar</span>
+                </button>
+              </div>
+
+              {/* Informações de Integração */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="p-4 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-1.5">
+                  <span className="text-[11px] font-bold text-indigo-400 uppercase tracking-wider block">
+                    Seu Domínio Registrado
+                  </span>
+                  <div className="flex items-center justify-between">
+                    <span className="text-base font-bold text-white font-mono">praondeeuvou.ia.br</span>
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold">
+                      Locaweb
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 pt-1">
+                    O domínio onde os usuários vão entrar.
+                  </p>
+                </div>
+
+                <div className="p-4 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-1.5">
+                  <span className="text-[11px] font-bold text-amber-400 uppercase tracking-wider block">
+                    Link do Aplicativo na Nuvem (Google Cloud)
+                  </span>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-mono text-slate-300 truncate mr-2" title="https://ais-pre-qs2o4mzsw3wxjtqbewcb3i-856757906261.us-east1.run.app">
+                      ais-pre-qs2o4mzsw3wxjtqbewcb3i-...
+                    </span>
+                    <a
+                      href="https://ais-pre-qs2o4mzsw3wxjtqbewcb3i-856757906261.us-east1.run.app"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-2 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 text-xs font-bold flex items-center gap-1 transition-colors shrink-0"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>Abrir</span>
+                    </a>
+                  </div>
+                  <p className="text-xs text-slate-400 pt-1">
+                    Servidor com banco SQLite e sincronização ativa.
+                  </p>
+                </div>
+              </div>
+
+              {/* Opções de Arquivo para a Locaweb */}
+              <div className="space-y-4">
+                <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                  <FileCode className="w-4 h-4 text-indigo-400" />
+                  <span>Escolha como colocar na Locaweb</span>
+                </h4>
+
+                {/* OPÇÃO 1: TELA COM DOMÍNIO */}
+                <div className="p-5 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                      <div className="inline-flex items-center gap-2 px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700 text-xs font-bold mb-2">
+                        <span>Opção 1</span>
+                      </div>
+                      <h5 className="text-base font-bold text-white">Tela Integrada (Mantém praondeeuvou.ia.br no PC/Android)</h5>
+                      <p className="text-xs text-slate-300 mt-1 max-w-xl">
+                        Mantém o endereço do seu domínio em navegadores compatíveis e redireciona automaticamente no iPhone, Safari e Instagram para evitar erro de bloqueio de cookie.
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap sm:flex-col gap-2 shrink-0">
+                      <a
+                        href="/api/locaweb/download"
+                        download="index.html"
+                        className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs flex items-center justify-center gap-2 border border-slate-700 transition-all cursor-pointer"
+                      >
+                        <Download className="w-4 h-4" />
+                        <span>Baixar index.html</span>
+                      </a>
+
+                      <a
+                        href="/site-locaweb/index.html"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs flex items-center justify-center gap-1.5 border border-slate-700 transition-colors"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        <span>Testar Prévia</span>
+                      </a>
+                    </div>
+                  </div>
+
+                  {/* Botão de Copiar Código */}
+                  <div className="pt-2 border-t border-slate-800 flex items-center justify-between">
+                    <span className="text-[11px] text-slate-400">
+                      Prefere colar o código direto no editor da Locaweb?
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        fetch('/site-locaweb/index.html')
+                          .then((r) => r.text())
+                          .then((code) => {
+                            navigator.clipboard.writeText(code);
+                            setCopiedPwaCode(true);
+                            setTimeout(() => setCopiedPwaCode(false), 3000);
+                          });
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      {copiedPwaCode ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-emerald-400" />
+                          <span className="text-emerald-300 font-bold">Código Copiado!</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5" />
+                          <span>Copiar Código do Arquivo</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* OPÇÃO 2: REDIRECIONAMENTO DIRETO (RECOMENDADO) */}
+                <div className="p-5 rounded-2xl bg-gradient-to-b from-indigo-950/30 to-slate-900 border-2 border-indigo-500/40 space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                      <div className="inline-flex items-center gap-2 px-2.5 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-xs font-bold mb-2">
+                        <span>⭐ Opção 2 (Recomendada — evita bloqueio de cookie e ativa ícone PWA)</span>
+                      </div>
+                      <h5 className="text-base font-bold text-white">Redirecionamento Direto para o Aplicativo</h5>
+                      <p className="text-xs text-slate-300 mt-1 max-w-xl">
+                        Abre o aplicativo direto sem iframe (evitando o erro de security cookie no iPhone/Instagram) e permite gravar o ícone PWA no celular em 1 toque.
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap sm:flex-col gap-2 shrink-0">
+                      <a
+                        href="/api/locaweb/download-direct"
+                        download="index.html"
+                        className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/30 transition-all cursor-pointer"
+                      >
+                        <Download className="w-4 h-4" />
+                        <span>Baixar index.html (Direto)</span>
+                      </a>
+                    </div>
+                  </div>
+
+                  <div className="pt-2 border-t border-slate-800 flex items-center justify-between">
+                    <span className="text-[11px] text-slate-400">
+                      Código simples com Meta Refresh + JavaScript.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        fetch('/site-locaweb/index-redirecionamento-direto.html')
+                          .then((r) => r.text())
+                          .then((code) => {
+                            navigator.clipboard.writeText(code);
+                            setCopiedDirectCode(true);
+                            setTimeout(() => setCopiedDirectCode(false), 3000);
+                          });
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      {copiedDirectCode ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-emerald-400" />
+                          <span className="text-emerald-300 font-bold">Código Copiado!</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5" />
+                          <span>Copiar Código</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Passo a Passo Mastigado na Locaweb */}
+              <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
+                <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-amber-400" />
+                  <span>Passo a Passo: Como colocar o arquivo na Locaweb</span>
+                </h4>
+
+                <div className="space-y-3">
+                  <div className="flex gap-3 text-xs text-slate-300">
+                    <span className="w-6 h-6 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 flex items-center justify-center font-bold shrink-0">
+                      1
+                    </span>
+                    <div>
+                      <strong className="text-white">Baixe o arquivo:</strong> Clique no botão azul acima <em>"Baixar index.html (PWA)"</em>. Ele vai salvar um arquivo chamado <code className="text-indigo-300 font-mono">index.html</code> no seu computador.
+                    </div>
+                  </div>
+
+                  <div className="flex gap-3 text-xs text-slate-300">
+                    <span className="w-6 h-6 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 flex items-center justify-center font-bold shrink-0">
+                      2
+                    </span>
+                    <div>
+                      <strong className="text-white">Acesse sua Hospedagem na Locaweb:</strong> Entre na Central do Cliente da Locaweb com seu login e senha, clique em <strong>Hospedagem de Sites</strong> e escolha o site do domínio <strong>praondeeuvou.ia.br</strong>.
+                    </div>
+                  </div>
+
+                  <div className="flex gap-3 text-xs text-slate-300">
+                    <span className="w-6 h-6 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 flex items-center justify-center font-bold shrink-0">
+                      3
+                    </span>
+                    <div>
+                      <strong className="text-white">Abra o Gerenciador de Arquivos:</strong> No painel da hospedagem, clique em <strong>Gerenciador de Arquivos</strong> (ou acesse por FTP). Entre na pasta principal do site, que geralmente se chama <code className="text-amber-300 font-mono">public_html</code> (ou <code className="text-amber-300 font-mono">web</code>).
+                    </div>
+                  </div>
+
+                  <div className="flex gap-3 text-xs text-slate-300">
+                    <span className="w-6 h-6 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 flex items-center justify-center font-bold shrink-0">
+                      4
+                    </span>
+                    <div>
+                      <strong className="text-white">Envie o arquivo:</strong> Clique em <strong>Enviar Arquivo (Upload)</strong> e selecione o <code className="text-indigo-300 font-mono">index.html</code>. Se já existir um arquivo de boas-vindas padrão da Locaweb, pode substituir por este.
+                    </div>
+                  </div>
+
+                  <div className="flex gap-3 text-xs text-slate-300">
+                    <span className="w-6 h-6 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center justify-center font-bold shrink-0">
+                      ✓
+                    </span>
+                    <div>
+                      <strong className="text-emerald-300">Tudo pronto!</strong> Agora abra seu navegador (ou no celular) e digite <strong className="text-white">praondeeuvou.ia.br</strong>. Seu aplicativo vai carregar direto!
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           )}

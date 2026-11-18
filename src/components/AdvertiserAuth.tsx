@@ -150,20 +150,62 @@ export const AdvertiserAuth: React.FC<AdvertiserAuthProps> = ({
 
     try {
       // 1. Consulta mandatória e direta no banco de dados SQLite (tabela anunciantes)
-      const res = await fetch('/api/advertisers/check', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: cleanEmail }),
-      });
+      let data: any = null;
 
-      if (!res.ok) {
-        setIsCheckingEmail(false);
-        setLoginError('Não foi possível verificar o e-mail no servidor. Tente novamente.');
-        return;
+      const performCheck = async () => {
+        // Tentativa 1: POST /api/advertisers/check
+        try {
+          const res = await fetch('/api/advertisers/check', {
+            method: 'POST',
+            headers: { 
+              'Content-Type': 'application/json',
+              'Accept': 'application/json',
+            },
+            body: JSON.stringify({ email: cleanEmail }),
+          });
+
+          if (res.ok) {
+            const text = await res.text();
+            if (text && text.trim().startsWith('{')) {
+              return JSON.parse(text);
+            }
+          }
+        } catch (postErr) {
+          console.warn('[AdvertiserAuth] Falha no POST check, tentando GET:', postErr);
+        }
+
+        // Tentativa 2: GET /api/advertisers/check
+        try {
+          const getRes = await fetch(`/api/advertisers/check?email=${encodeURIComponent(cleanEmail)}`, {
+            headers: { 'Accept': 'application/json' },
+          });
+          if (getRes.ok) {
+            const getText = await getRes.text();
+            if (getText && getText.trim().startsWith('{')) {
+              return JSON.parse(getText);
+            }
+          }
+        } catch (getErr) {
+          console.warn('[AdvertiserAuth] Falha no GET check:', getErr);
+        }
+
+        return null;
+      };
+
+      data = await performCheck();
+
+      // Se falhou por instabilidade momentânea, tenta novamente uma vez após 400ms
+      if (!data) {
+        await new Promise((r) => setTimeout(r, 400));
+        data = await performCheck();
       }
 
-      const data = await res.json();
       setIsCheckingEmail(false);
+
+      if (!data || typeof data.exists !== 'boolean') {
+        setLoginError('Não foi possível verificar o e-mail no servidor no momento. Por favor, tente novamente em alguns instantes.');
+        return;
+      }
 
       if (data && data.exists && data.advertiser) {
         // E-mail EXISTE no cadastro de anunciantes!
@@ -179,8 +221,9 @@ export const AdvertiserAuth: React.FC<AdvertiserAuthProps> = ({
         setNewEmail(cleanEmail);
       }
     } catch (err: any) {
+      console.error('Erro de login do anunciante:', err);
       setIsCheckingEmail(false);
-      setLoginError('Erro de conexão ao consultar o cadastro no banco de dados. Tente novamente.');
+      setLoginError('Erro de conexão ao consultar o cadastro no banco de dados. Verifique sua conexão e tente novamente.');
     }
   };
 

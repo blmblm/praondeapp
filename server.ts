@@ -1,544 +1,1352 @@
+import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
-import { fileURLToPath } from 'url';
-import { createServer as createViteServer } from 'vite';
-import {
-  getDatabase,
-  executeSqlQuery,
-  getDatabaseSchema,
-  syncEventsRelations,
-  getCategoryTableName,
-  ensureCategoryTable,
-  ensureAllCategoryTables,
-  saveEventToCategoryTable,
-  saveUserEvent,
-  deleteEventFromCategoryTables,
-  deleteEventsFromCategoryTables,
-  createEventosTable,
-  dropEventosTable,
-  rebuildUnifiedEventsView,
-  updateEventUrlInAllTables,
-} from './server/database.js';
-import { createMercadoPagoPixPayment, checkMercadoPagoPaymentStatus } from './server/mercadopago.js';
-import { parseSymplaEventUrl } from './server/symplaParser.js';
-import { discoverAllRhythmsBatch, searchSymplaLiveEvents, fetchAllSymplaLiveEvents, RhythmBatchItem, normalizeStateToUF } from './server/symplaDiscover.js';
+import { Readable } from 'stream';
+import { execSync } from 'child_process';
 import cron from 'node-cron';
+import { GoogleGenAI, Type } from '@google/genai';
+
+import { securityFirewall, createRateLimiter } from './server/security/firewall.ts';
+import {
+  sanitizePromptInput,
+  detectPromptInjection,
+  getGeocodeCacheKey,
+  getCachedGeocode,
+  setCachedGeocode,
+  canCallGemini,
+  recordGeminiApiFailure,
+  withGeminiTimeout,
+} from './server/security/geminiProtection.ts';
+import { createMercadoPagoPixPayment, checkMercadoPagoPaymentStatus } from './server/mercadopago.ts';
+import { parseSymplaEventUrl } from './server/symplaParser.ts';
+import {
+  discoverAllRhythmsBatch,
+  searchSymplaLiveEvents,
+  fetchAllSymplaLiveEvents,
+} from './server/symplaDiscover.ts';
+import { parseTicket360EventUrl } from './server/ticket360Parser.ts';
+import {
+  searchTicket360LiveEvents,
+  discoverAllTicket360RhythmsBatch,
+  fetchAllTicket360LiveEvents,
+  hasValidTicket360Image,
+} from './server/ticket360Discover.ts';
+
+import { type AuthRequest, optionalAuth, requireAuth } from './src/middleware/auth.ts';
+import { getOrCreateUser } from './src/db/users.ts';
+import {
+  BRAZIL_CITY_COORDINATES,
+  isCleanImage,
+  isCleanVideo,
+  normalizeCityKey,
+} from './src/db/mediaHelpers.ts';
+import {
+  addFavoriteRecord,
+  addIgnoredWordRecord,
+  containsIgnoredWords,
+  createCategoryRecord,
+  createCidadeRecord,
+  createSupervisorRecord,
+  deleteAllCidadesRecords,
+  deleteCategoryRecord,
+  deleteCidadeRecord,
+  deleteIgnoredWordRecord,
+  deleteSupervisorRecord,
+  findAdvertiserByEmail,
+  getAdvertisersList,
+  getCategoriesList,
+  getCidadesList,
+  getFavoritesList,
+  getIgnoredWordsList,
+  getSupervisorsList,
+  removeFavoriteRecord,
+  resolveCategoryRecord,
+  syncIgnoredWordsBatch,
+  updateSupervisorRecord,
+  upsertAdvertiserRecord,
+  verifySupervisorByPassword,
+} from './src/db/catalogRepo.ts';
+import {
+  approveEventRecordPg,
+  deleteAllEventsPg,
+  deleteEventByIdPg,
+  deleteEventsBatchPg,
+  getDeletedEventIdsPg,
+  getEventoImageRowPg,
+  getEventoPosterByIdPg,
+  getRawEventosPg,
+  liberateAllEventsPg,
+  listEventsPg,
+  setEventLiberadoNPg,
+  syncEventsRelationsPg,
+  updateEventCategoryPg,
+  updateEventUrlPg,
+  upsertEventPg,
+} from './src/db/eventsRepo.ts';
+import {
+  batchDeleteImportedPg,
+  batchImportedCategoryPg,
+  checkDuplicateEventStatusPg,
+  clearImportedEventsPg,
+  countQuarantinePg,
+  deleteImportedEventPg,
+  getPendingQuarantineIdsPg,
+  insertSingleUserQuarantinePg,
+  listImportedEventsPg,
+  patchImportedCategoryPg,
+  updateImportedEventPg,
+  upsertImportedEventsPg,
+} from './src/db/quarantineRepo.ts';
+import {
+  clearEstatisticasPg,
+  getEstatisticasPg,
+  getPixConfigPg,
+  getPixPaymentWithSponsor,
+  insertPixPaymentRecord,
+  listSponsorsPg,
+  markPixNotificationSentPg,
+  markPixPaymentApprovedPg,
+  registrarConsultaPg,
+  savePixConfigPg,
+  updateSponsorLiberationPg,
+  upsertSponsorForPix,
+} from './src/db/sponsorsPixRepo.ts';
+import {
+  executePostgresSqlQuery,
+  getCleanupStatusPg,
+  getPostgresSchemaInfo,
+  runPostgresCleanup,
+} from './src/db/adminSqlRepo.ts';
+import {
+  getMediaFilePg,
+  getVideoMimeType,
+  normalizeMediaFilename,
+  saveMediaFilePg,
+} from './src/db/mediaRepo.ts';
+
+const ai = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY,
+  httpOptions: {
+    headers: {
+      'User-Agent': 'aistudio-build',
+    },
+  },
+});
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
-// Configura limite amplo para suportar uploads de imagens (base64) e cadastros completos
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(securityFirewall);
 
-// Initialize SQLite database
-const db = getDatabase();
+const geocodeRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 25,
+  routeName: 'geocode',
+  message: 'Muitas consultas de endereço. Aguarde alguns segundos.',
+});
 
-// ==================== REST API ROUTES ====================
+const pixCreateRateLimiter = createRateLimiter({
+  windowMs: 5 * 60 * 1000,
+  maxRequests: 12,
+  routeName: 'pix-create',
+  message: 'Muitas tentativas de criação de Pix. Por favor, aguarde alguns instantes.',
+});
 
-app.get('/api/health', (req, res) => {
+const adminRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 40,
+  routeName: 'admin',
+  message: 'Limite de requisições administrativas excedido.',
+});
+
+// ==================== UPLOADS & MEDIA ROUTES ====================
+
+let UPLOADS_DIR = path.join(process.cwd(), 'uploads');
+try {
+  const testVideos = path.join(UPLOADS_DIR, 'videos');
+  if (!fs.existsSync(testVideos)) {
+    fs.mkdirSync(testVideos, { recursive: true });
+  }
+  const writeProbe = path.join(UPLOADS_DIR, '.upload_write_test');
+  fs.writeFileSync(writeProbe, 'ok');
+  fs.unlinkSync(writeProbe);
+} catch {
+  UPLOADS_DIR = path.join('/tmp', 'uploads');
+  try {
+    fs.mkdirSync(path.join(UPLOADS_DIR, 'videos'), { recursive: true });
+  } catch {}
+}
+
+const UPLOADS_VIDEOS_DIR = path.join(UPLOADS_DIR, 'videos');
+const UPLOADS_IMAGES_DIR = path.join(UPLOADS_DIR, 'images');
+try {
+  fs.mkdirSync(UPLOADS_IMAGES_DIR, { recursive: true });
+  fs.mkdirSync(UPLOADS_VIDEOS_DIR, { recursive: true });
+} catch {}
+
+app.get(['/uploads/images/:filename', '/api/uploads/images/:filename', '/api/image/:filename'], async (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+
+  let filename = (req.params.filename || '').split('?')[0];
+  const directPath = path.join(UPLOADS_IMAGES_DIR, filename);
+  if (fs.existsSync(directPath)) return res.sendFile(directPath);
+
+  const pubPath = path.join(process.cwd(), 'public', 'uploads', 'images', filename);
+  if (fs.existsSync(pubPath)) return res.sendFile(pubPath);
+
+  const baseName = filename.replace(/\.[a-zA-Z0-9]+$/, '');
+  for (const ext of ['.jpg', '.jpeg', '.png', '.webp', '.avif']) {
+    const alt1 = path.join(UPLOADS_IMAGES_DIR, `${baseName}${ext}`);
+    if (fs.existsSync(alt1)) return res.sendFile(alt1);
+    const alt2 = path.join(process.cwd(), 'public', 'uploads', 'images', `${baseName}${ext}`);
+    if (fs.existsSync(alt2)) return res.sendFile(alt2);
+  }
+
+  try {
+    const row = await getEventoImageRowPg([baseName, filename]);
+    const base64Candidate =
+      row?.imagem_url?.startsWith('data:image/')
+        ? row.imagem_url
+        : row?.url?.startsWith('data:image/')
+          ? row.url
+          : null;
+
+    if (base64Candidate) {
+      const match = base64Candidate.match(/^data:image\/([a-zA-Z0-9\-\+\.]+);base64,(.+)$/);
+      if (match?.[2]) {
+        const rawMime = match[1].toLowerCase();
+        const mime = rawMime.includes('png') ? 'image/png' : rawMime.includes('webp') ? 'image/webp' : 'image/jpeg';
+        const buf = Buffer.from(match[2], 'base64');
+        try {
+          fs.mkdirSync(UPLOADS_IMAGES_DIR, { recursive: true });
+          fs.writeFileSync(directPath, buf);
+        } catch {}
+        res.setHeader('Content-Type', mime);
+        return res.send(buf);
+      }
+    }
+  } catch (err) {
+    console.warn('[Image Route] Erro na auto-recuperação:', err);
+  }
+
+  next();
+});
+
+app.get(['/api/image-base64/:filename', '/api/image-data/:filename'], async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  const filename = path.basename((req.params.filename || '').split('?')[0]);
+  const baseName = filename.replace(/\.[a-zA-Z0-9]+$/, '');
+
+  for (const ext of ['', '.jpg', '.jpeg', '.png', '.webp', '.avif']) {
+    const currentName = ext ? `${baseName}${ext}` : filename;
+    const candidates = [
+      path.join(UPLOADS_IMAGES_DIR, currentName),
+      path.join(process.cwd(), 'public', 'uploads', 'images', currentName),
+      path.join(process.cwd(), 'uploads', 'images', currentName),
+    ];
+    for (const cand of candidates) {
+      if (fs.existsSync(cand) && fs.statSync(cand).isFile()) {
+        const fileBuf = fs.readFileSync(cand);
+        const resolvedExt = path.extname(cand).toLowerCase().replace('.', '') || 'jpeg';
+        const mime = resolvedExt === 'png' ? 'image/png' : resolvedExt === 'webp' ? 'image/webp' : 'image/jpeg';
+        return res.json({
+          success: true,
+          base64: `data:${mime};base64,${fileBuf.toString('base64')}`,
+          mime,
+        });
+      }
+    }
+  }
+
+  try {
+    const evRow = await getEventoImageRowPg([baseName, filename]);
+    const dbUrl = (evRow?.imagem_url || evRow?.url || '').trim();
+    if (dbUrl.startsWith('data:image/')) {
+      return res.json({
+        success: true,
+        base64: dbUrl,
+        mime: dbUrl.includes('image/png') ? 'image/png' : dbUrl.includes('image/svg') ? 'image/svg+xml' : 'image/jpeg',
+      });
+    }
+  } catch {}
+
+  return res.status(404).json({ success: false, error: 'Imagem não encontrada' });
+});
+
+app.get('/api/event-poster/:id', async (req, res) => {
+  try {
+    const id = String(req.params.id || '').trim();
+    if (!id) return res.status(400).end();
+
+    const cacheHeader = req.query.v ? 'public, max-age=86400' : 'public, max-age=600';
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Cache-Control', cacheHeader);
+
+    const evRow = await getEventoPosterByIdPg(id);
+    const candidates = [evRow?.imagem_url, evRow?.url];
+
+    for (const raw of candidates) {
+      if (!raw || typeof raw !== 'string') continue;
+      const trimmed = raw.trim();
+      if (trimmed.startsWith('data:image/')) {
+        const match = trimmed.match(/^data:(image\/[a-zA-Z0-9\+\-\.]+);base64,(.+)$/s);
+        if (match && match[2]) {
+          const mime = match[1] === 'image/jpg' ? 'image/jpeg' : match[1];
+          const buf = Buffer.from(match[2], 'base64');
+          if (buf.length > 0) {
+            res.setHeader('Content-Type', mime);
+            res.setHeader('Content-Length', buf.length);
+            return res.status(200).end(buf);
+          }
+        }
+      }
+    }
+
+    const baseId = path.basename(id);
+    const diskNames: string[] = [];
+    for (const raw of candidates) {
+      if (raw && (raw.startsWith('/uploads/images/') || raw.startsWith('./uploads/images/'))) {
+        diskNames.push(path.basename(raw.split('?')[0]));
+      }
+    }
+    for (const ext of ['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'svg']) {
+      diskNames.push(`${baseId}.${ext}`);
+    }
+
+    for (const name of diskNames) {
+      const diskPaths = [
+        path.join(UPLOADS_IMAGES_DIR, name),
+        path.join(process.cwd(), 'public', 'uploads', 'images', name),
+        path.join(process.cwd(), 'uploads', 'images', name),
+        path.join('/tmp', 'uploads', 'images', name),
+      ];
+      for (const cand of diskPaths) {
+        if (fs.existsSync(cand) && fs.statSync(cand).isFile() && fs.statSync(cand).size > 0) {
+          const ext = path.extname(cand).toLowerCase().replace('.', '') || 'jpeg';
+          const mime =
+            ext === 'png'
+              ? 'image/png'
+              : ext === 'webp'
+                ? 'image/webp'
+                : ext === 'gif'
+                  ? 'image/gif'
+                  : ext === 'svg'
+                    ? 'image/svg+xml'
+                    : ext === 'avif'
+                      ? 'image/avif'
+                      : 'image/jpeg';
+          res.setHeader('Content-Type', mime);
+          return res.sendFile(cand);
+        }
+      }
+    }
+
+    for (const raw of candidates) {
+      if (!raw || typeof raw !== 'string') continue;
+      const trimmed = raw.trim();
+      if (
+        (trimmed.startsWith('https://') || trimmed.startsWith('http://')) &&
+        !trimmed.includes('images.unsplash.com/photo-1514525253161-7a46d19cd819') &&
+        !isCleanVideo(trimmed)
+      ) {
+        return res.redirect(302, trimmed);
+      }
+    }
+
+    return res.status(404).end();
+  } catch {
+    return res.status(404).end();
+  }
+});
+
+function extractPosterFromVideoDisk(videoDiskPath: string, posterBaseName: string): string {
+  try {
+    const cleanBase = posterBaseName.replace(/[^a-zA-Z0-9_\-]/g, '_');
+    const posterPath = path.join(UPLOADS_IMAGES_DIR, `${cleanBase}-poster.jpg`);
+    for (const ts of ['00:00:02', '00:00:05', '00:00:01', '00:00:00']) {
+      try {
+        execSync(`ffmpeg -ss ${ts} -i "${videoDiskPath}" -vframes 1 -q:v 2 "${posterPath}" -y`, {
+          timeout: 8000,
+          stdio: 'ignore',
+        });
+        if (fs.existsSync(posterPath) && fs.statSync(posterPath).size > 500) {
+          const posterBuf = fs.readFileSync(posterPath);
+          try {
+            fs.unlinkSync(posterPath);
+          } catch {}
+          return `data:image/jpeg;base64,${posterBuf.toString('base64')}`;
+        }
+      } catch {}
+    }
+  } catch {}
+  return '';
+}
+
+function sendVideoBufferWithRange(
+  req: express.Request,
+  res: express.Response,
+  buf: Buffer,
+  mimeType: string
+) {
+  const total = buf.length;
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Content-Type', mimeType || 'video/mp4');
+
+  const rangeHeader = req.headers.range;
+  if (rangeHeader && /^bytes=/i.test(rangeHeader)) {
+    const rangeSpec = rangeHeader.replace(/^bytes=/i, '').split(',')[0].trim();
+    const parts = rangeSpec.split('-');
+    let start: number;
+    let end: number;
+
+    if (parts[0] === '') {
+      // Suffix range: bytes=-500
+      const suffixLen = parseInt(parts[1] || '0', 10);
+      if (isNaN(suffixLen) || suffixLen <= 0) {
+        res.setHeader('Content-Range', `bytes */${total}`);
+        return res.status(416).end();
+      }
+      start = Math.max(0, total - suffixLen);
+      end = total - 1;
+    } else {
+      start = parseInt(parts[0], 10);
+      end = parts[1] ? parseInt(parts[1], 10) : total - 1;
+    }
+
+    if (isNaN(start) || isNaN(end) || start < 0 || start >= total || start > end) {
+      res.setHeader('Content-Range', `bytes */${total}`);
+      return res.status(416).end();
+    }
+
+    end = Math.min(end, total - 1);
+    const chunkSize = end - start + 1;
+    res.status(206);
+    res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
+    res.setHeader('Content-Length', chunkSize);
+    if (req.method === 'HEAD') {
+      return res.end();
+    }
+    return res.end(buf.subarray(start, end + 1));
+  }
+
+  res.setHeader('Content-Length', total);
+  if (req.method === 'HEAD') {
+    return res.status(200).end();
+  }
+  return res.status(200).end(buf);
+}
+
+app.get(['/uploads/videos/:filename', '/api/uploads/videos/:filename', '/api/video/:filename'], async (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+
+  const cleanName = normalizeMediaFilename(req.params.filename || '');
+  if (!cleanName) return next();
+
+  const diskCandidates = [
+    path.join(UPLOADS_VIDEOS_DIR, cleanName),
+    path.join(process.cwd(), 'uploads', 'videos', cleanName),
+    path.join(process.cwd(), 'public', 'uploads', 'videos', cleanName),
+    path.join('/tmp', 'uploads', 'videos', cleanName),
+  ];
+
+  for (const cand of diskCandidates) {
+    try {
+      if (fs.existsSync(cand) && fs.statSync(cand).isFile() && fs.statSync(cand).size > 0) {
+        res.setHeader('Content-Type', getVideoMimeType(cleanName));
+        res.setHeader('Accept-Ranges', 'bytes');
+        return res.sendFile(cand);
+      }
+    } catch {}
+  }
+
+  try {
+    const dbMedia = await getMediaFilePg(cleanName);
+    if (dbMedia && dbMedia.data.length > 0) {
+      try {
+        fs.mkdirSync(UPLOADS_VIDEOS_DIR, { recursive: true });
+        fs.writeFileSync(path.join(UPLOADS_VIDEOS_DIR, cleanName), dbMedia.data);
+      } catch {}
+      return sendVideoBufferWithRange(req, res, dbMedia.data, dbMedia.mimeType);
+    }
+  } catch (err) {
+    console.warn('[Video Route] Erro ao recuperar vídeo do Cloud SQL:', err);
+  }
+
+  return next();
+});
+
+app.use(
+  '/uploads',
+  (req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    next();
+  },
+  express.static(UPLOADS_DIR)
+);
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
+app.use('/uploads', express.static(path.join(process.cwd(), 'public', 'uploads')));
+app.use('/uploads', express.static(path.join('/tmp', 'uploads')));
+app.use('/uploads', (_req, res) => {
+  res.status(404).json({ error: 'Arquivo de mídia não encontrado neste servidor' });
+});
+app.use(express.static(path.join(process.cwd(), 'public')));
+
+app.post('/api/upload/video', async (req, res) => {
+  try {
+    const { data, eventId } = req.body;
+    if (!data || typeof data !== 'string') {
+      return res.status(400).json({ error: 'Nenhum dado de vídeo recebido' });
+    }
+    const cleanData = data.trim();
+    if (!cleanData.startsWith('data:video/')) {
+      return res.json({ success: true, videoUrl: cleanData });
+    }
+    const id = String(eventId || `vid-${Date.now()}`).replace(/[^a-zA-Z0-9_\-]/g, '_');
+    const matches = cleanData.match(/^data:video\/([a-zA-Z0-9\-\+]+);base64,(.+)$/);
+    const rawSubtype = (matches?.[1] || 'mp4').toLowerCase();
+    const ext = rawSubtype.includes('webm')
+      ? 'webm'
+      : rawSubtype.includes('quicktime') || rawSubtype.includes('mov')
+        ? 'mov'
+        : rawSubtype.includes('ogg')
+          ? 'ogg'
+          : 'mp4';
+    const base64Data = matches?.[2] || cleanData.split(',')[1];
+    if (!base64Data) {
+      return res.status(400).json({ error: 'Conteúdo Base64 de vídeo inválido' });
+    }
+    const fileName = `${id}.${ext}`;
+    const vidBuf = Buffer.from(base64Data, 'base64');
+    if (vidBuf.length > 85 * 1024 * 1024) {
+      return res.status(413).json({ error: 'O vídeo ultrapassa o limite máximo de 80MB.' });
+    }
+
+    const mimeType = getVideoMimeType(fileName, `video/${rawSubtype}`);
+    await saveMediaFilePg(fileName, vidBuf, mimeType);
+
+    const filePath = path.join(UPLOADS_VIDEOS_DIR, fileName);
+    try {
+      fs.mkdirSync(UPLOADS_VIDEOS_DIR, { recursive: true });
+      fs.writeFileSync(filePath, vidBuf);
+    } catch {}
+
+    const imageUrl = fs.existsSync(filePath) ? extractPosterFromVideoDisk(filePath, id) : '';
+    const videoUrl = `/uploads/videos/${fileName}`;
+    res.json({ success: true, videoUrl, imageUrl });
+  } catch (err: any) {
+    console.error('Erro no upload de vídeo:', err);
+    res.status(500).json({ error: err.message || 'Erro ao processar arquivo de vídeo' });
+  }
+});
+
+app.post('/api/upload/video-stream', (req, res) => {
+  try {
+    const rawFilename = (req.headers['x-filename'] as string) || `vid-${Date.now()}.mp4`;
+    const sanitized = normalizeMediaFilename(rawFilename) || `vid-${Date.now()}.mp4`;
+    const hasKnownExt = /\.(mp4|webm|mov|m4v|3gp|ogg)$/i.test(sanitized);
+    const finalFilename = hasKnownExt ? sanitized : `${sanitized}.mp4`;
+    const mimeType = getVideoMimeType(finalFilename, req.headers['content-type'] as string);
+
+    fs.mkdirSync(UPLOADS_VIDEOS_DIR, { recursive: true });
+    const targetPath = path.join(UPLOADS_VIDEOS_DIR, finalFilename);
+    const writeStream = fs.createWriteStream(targetPath);
+
+    req.pipe(writeStream);
+
+    writeStream.on('finish', async () => {
+      try {
+        const stat = fs.statSync(targetPath);
+        if (stat.size <= 0) {
+          return res.status(400).json({ error: 'Arquivo de vídeo vazio recebido.' });
+        }
+        if (stat.size > 85 * 1024 * 1024) {
+          try {
+            fs.unlinkSync(targetPath);
+          } catch {}
+          return res.status(413).json({ error: 'O vídeo ultrapassa o limite máximo de 80MB.' });
+        }
+
+        const vidBuf = fs.readFileSync(targetPath);
+        await saveMediaFilePg(finalFilename, vidBuf, mimeType);
+
+        const baseName = finalFilename.replace(/\.[^.]+$/, '');
+        const imageUrl = extractPosterFromVideoDisk(targetPath, baseName);
+        const videoUrl = `/uploads/videos/${finalFilename}`;
+
+        return res.json({ success: true, videoUrl, imageUrl, sizeBytes: stat.size });
+      } catch (err: any) {
+        console.error('Erro ao persistir vídeo no Cloud SQL (video-stream):', err);
+        return res.status(500).json({ error: err.message || 'Erro ao persistir vídeo no banco de dados' });
+      }
+    });
+
+    writeStream.on('error', (err) => {
+      return res.status(500).json({ error: err.message || 'Erro ao gravar arquivo de vídeo no servidor' });
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Falha no upload' });
+  }
+});
+
+app.post('/api/upload/video-chunk', express.raw({ type: '*/*', limit: '15mb' }), async (req, res) => {
+  try {
+    const rawUploadId = String(req.headers['x-upload-id'] || '').replace(/[^a-zA-Z0-9_\-]/g, '');
+    const chunkIndex = parseInt(String(req.headers['x-chunk-index'] ?? '-1'), 10);
+    const totalChunks = parseInt(String(req.headers['x-total-chunks'] ?? '0'), 10);
+    const rawFilename = String(req.headers['x-filename'] || `vid-${Date.now()}.mp4`);
+    const providedMime = String(req.headers['x-mime-type'] || 'video/mp4');
+
+    if (!rawUploadId || isNaN(chunkIndex) || isNaN(totalChunks) || totalChunks < 1 || totalChunks > 64 || chunkIndex < 0 || chunkIndex >= totalChunks) {
+      return res.status(400).json({ error: 'Metadados de chunk inválidos' });
+    }
+
+    const chunkBuf = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || '');
+    if (!chunkBuf || chunkBuf.length === 0) {
+      return res.status(400).json({ error: 'Bloco de vídeo vazio' });
+    }
+
+    const sanitized = normalizeMediaFilename(rawFilename) || `vid-${Date.now()}.mp4`;
+    const hasKnownExt = /\.(mp4|webm|mov|m4v|3gp|ogg)$/i.test(sanitized);
+    const finalFilename = hasKnownExt ? sanitized : `${sanitized}.mp4`;
+    const mimeType = getVideoMimeType(finalFilename, providedMime);
+
+    const chunksRoot = path.join(UPLOADS_VIDEOS_DIR, '.chunks');
+    const uploadDir = path.join(chunksRoot, rawUploadId);
+    fs.mkdirSync(uploadDir, { recursive: true });
+
+    // Limpeza oportunista de sessões temporárias expiradas (> 1 hora)
+    try {
+      const nowMs = Date.now();
+      for (const entry of fs.readdirSync(chunksRoot)) {
+        if (entry === rawUploadId) continue;
+        const entryPath = path.join(chunksRoot, entry);
+        const st = fs.statSync(entryPath);
+        if (st.isDirectory() && nowMs - st.mtimeMs > 60 * 60 * 1000) {
+          fs.rmSync(entryPath, { recursive: true, force: true });
+        }
+      }
+    } catch {}
+
+    const chunkFilePath = path.join(uploadDir, `chunk-${String(chunkIndex).padStart(5, '0')}.part`);
+    fs.writeFileSync(chunkFilePath, chunkBuf);
+
+    // Verifica se todos os blocos 0..totalChunks-1 já foram recebidos
+    let allPresent = true;
+    for (let i = 0; i < totalChunks; i++) {
+      const expected = path.join(uploadDir, `chunk-${String(i).padStart(5, '0')}.part`);
+      if (!fs.existsSync(expected)) {
+        allPresent = false;
+        break;
+      }
+    }
+
+    if (!allPresent) {
+      return res.json({ success: true, completed: false, chunkIndex, totalChunks });
+    }
+
+    const parts: Buffer[] = [];
+    let totalBytes = 0;
+    for (let i = 0; i < totalChunks; i++) {
+      const partBuf = fs.readFileSync(path.join(uploadDir, `chunk-${String(i).padStart(5, '0')}.part`));
+      totalBytes += partBuf.length;
+      if (totalBytes > 85 * 1024 * 1024) {
+        fs.rmSync(uploadDir, { recursive: true, force: true });
+        return res.status(413).json({ error: 'O vídeo ultrapassa o limite máximo de 80MB.' });
+      }
+      parts.push(partBuf);
+    }
+
+    const fullBuffer = Buffer.concat(parts);
+    try {
+      fs.rmSync(uploadDir, { recursive: true, force: true });
+    } catch {}
+
+    await saveMediaFilePg(finalFilename, fullBuffer, mimeType);
+
+    const targetPath = path.join(UPLOADS_VIDEOS_DIR, finalFilename);
+    try {
+      fs.mkdirSync(UPLOADS_VIDEOS_DIR, { recursive: true });
+      fs.writeFileSync(targetPath, fullBuffer);
+    } catch {}
+
+    const baseName = finalFilename.replace(/\.[^.]+$/, '');
+    const imageUrl = fs.existsSync(targetPath) ? extractPosterFromVideoDisk(targetPath, baseName) : '';
+    const videoUrl = `/uploads/videos/${finalFilename}`;
+
+    return res.json({
+      success: true,
+      completed: true,
+      videoUrl,
+      imageUrl,
+      sizeBytes: fullBuffer.length,
+    });
+  } catch (err: any) {
+    console.error('Erro no upload em partes (video-chunk):', err);
+    return res.status(500).json({ error: err.message || 'Erro ao montar vídeo no servidor' });
+  }
+});
+
+// Cache em memória para miniaturas de links externos de vídeo (evita múltiplas buscas na rede social)
+const videoThumbnailCache = new Map<string, { buf: Buffer; contentType: string; expiresAt: number }>();
+
+function isBlockedPrivateHostname(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  return (
+    h === 'localhost' ||
+    h === '127.0.0.1' ||
+    h === '0.0.0.0' ||
+    h === '::1' ||
+    h.startsWith('10.') ||
+    h.startsWith('192.168.') ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(h) ||
+    h.endsWith('.local') ||
+    h.endsWith('.internal')
+  );
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs = 6000): Promise<globalThis.Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function cleanExtractedUrl(raw: string): string {
+  return raw
+    .replace(/\\\//g, '/')
+    .replace(/\\u0026/g, '&')
+    .replace(/&amp;/g, '&')
+    .replace(/\\$/, '')
+    .trim();
+}
+
+const FB_NAV_HEADERS = {
+  'User-Agent':
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+  'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+  'Sec-Fetch-Dest': 'document',
+  'Sec-Fetch-Mode': 'navigate',
+  'Sec-Fetch-Site': 'none',
+};
+
+function extractFacebookVideoId(urlOrHtml: string): string | null {
+  const m =
+    urlOrHtml.match(/\/reel\/(\d{8,})/i) ||
+    urlOrHtml.match(/\/videos\/(?:[^/\s"']+\/)?(\d{8,})/i) ||
+    urlOrHtml.match(/[?&]v=(\d{8,})/i);
+  return m?.[1] || null;
+}
+
+async function fetchFacebookWatchPageHtml(videoUrl: string): Promise<string | null> {
+  let vidId = extractFacebookVideoId(videoUrl);
+  if (!vidId) {
+    try {
+      const r = await fetchWithTimeout(videoUrl, { headers: FB_NAV_HEADERS, redirect: 'follow' }, 7000);
+      if (r.ok) {
+        const html = await r.text();
+        if (html.includes('browser_native_hd_url') || html.includes('browser_native_sd_url')) {
+          return html;
+        }
+        vidId = extractFacebookVideoId(r.url) || extractFacebookVideoId(html);
+      }
+    } catch {}
+  }
+  if (!vidId) return null;
+  try {
+    const r = await fetchWithTimeout(
+      `https://www.facebook.com/watch/?v=${vidId}`,
+      { headers: FB_NAV_HEADERS, redirect: 'follow' },
+      8000
+    );
+    if (r.ok) {
+      return await r.text();
+    }
+  } catch {}
+  return null;
+}
+
+async function resolveVideoThumbnailImageUrl(videoUrl: string): Promise<string | null> {
+  const browserHeaders = {
+    'User-Agent': FB_NAV_HEADERS['User-Agent'],
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+  };
+
+  // 1. YouTube
+  const ytMatch = videoUrl.match(
+    /(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|shorts\/|live\/))([\w-]{11})/i
+  );
+  if (ytMatch?.[1]) {
+    return `https://img.youtube.com/vi/${ytMatch[1]}/hqdefault.jpg`;
+  }
+
+  // 2. Vimeo oEmbed
+  if (/vimeo\.com/i.test(videoUrl)) {
+    try {
+      const r = await fetchWithTimeout(`https://vimeo.com/api/oembed.json?url=${encodeURIComponent(videoUrl)}`);
+      if (r.ok) {
+        const j: any = await r.json();
+        if (j?.thumbnail_url) return String(j.thumbnail_url);
+      }
+    } catch {}
+  }
+
+  // 3. TikTok oEmbed
+  if (/tiktok\.com/i.test(videoUrl)) {
+    try {
+      const r = await fetchWithTimeout(`https://www.tiktok.com/oembed?url=${encodeURIComponent(videoUrl)}`);
+      if (r.ok) {
+        const j: any = await r.json();
+        if (j?.thumbnail_url) return String(j.thumbnail_url);
+      }
+    } catch {}
+  }
+
+  // 4. Facebook (plugin video.php -> fallback post.php -> fallback watch/?v=ID)
+  if (/facebook\.com|fb\.watch|fb\.com/i.test(videoUrl)) {
+    const candidates = [
+      `https://www.facebook.com/plugins/video.php?href=${encodeURIComponent(videoUrl)}&show_text=0&width=500`,
+      `https://www.facebook.com/plugins/post.php?href=${encodeURIComponent(videoUrl)}&show_text=true&width=500`,
+    ];
+    for (const pluginUrl of candidates) {
+      try {
+        const r = await fetchWithTimeout(pluginUrl, { headers: browserHeaders }, 7000);
+        if (!r.ok) continue;
+        const html = await r.text();
+        const matches = html.match(/https?:\\?\/\\?\/[^"'\s<>]+?(?:\.jpg|\.jpeg|\.png|\.webp)[^"'\s<>]*/gi) || [];
+        const cleaned = matches
+          .map(cleanExtractedUrl)
+          .filter(
+            (u) =>
+              (u.includes('fbcdn.net') || u.includes('scontent')) &&
+              !u.includes('s40x40') &&
+              !u.includes('s60x60') &&
+              !u.includes('p50x50') &&
+              !u.includes('static.xx') &&
+              !u.includes('emoji')
+          );
+        const videoPoster = cleaned.find((u) => u.includes('t15.5256-10')) || cleaned[0];
+        if (videoPoster) return videoPoster;
+      } catch {}
+    }
+
+    const watchHtml = await fetchFacebookWatchPageHtml(videoUrl);
+    if (watchHtml) {
+      const prefThumb = watchHtml.match(/"preferred_thumbnail":\{[^}]*"image":\{"uri":"([^"]+)"/);
+      if (prefThumb?.[1]) {
+        return cleanExtractedUrl(prefThumb[1]);
+      }
+      const ogWatch =
+        watchHtml.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
+        watchHtml.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
+      if (ogWatch?.[1]) {
+        return cleanExtractedUrl(ogWatch[1]);
+      }
+    }
+  }
+
+  // 5. Instagram embed
+  const instaMatch = videoUrl.match(/instagram\.com\/(?:reel|p)\/([A-Za-z0-9_-]+)/i);
+  if (instaMatch?.[1]) {
+    try {
+      const r = await fetchWithTimeout(
+        `https://www.instagram.com/p/${instaMatch[1]}/embed/captioned/`,
+        { headers: browserHeaders },
+        7000
+      );
+      if (r.ok) {
+        const html = await r.text();
+        const matches = html.match(/https?:\\?\/\\?\/[^"'\s<>]+?(?:\.jpg|\.jpeg|\.png|\.webp)[^"'\s<>]*/gi) || [];
+        const cleaned = matches
+          .map(cleanExtractedUrl)
+          .filter(
+            (u) =>
+              (u.includes('cdninstagram.com') || u.includes('fbcdn.net')) &&
+              !u.includes('s150x150') &&
+              !u.includes('44x44') &&
+              !u.includes('static')
+          );
+        if (cleaned[0]) return cleaned[0];
+      }
+    } catch {}
+  }
+
+  // 6. Generic og:image / twitter:image fallback
+  try {
+    const r = await fetchWithTimeout(videoUrl, { headers: browserHeaders }, 6000);
+    if (r.ok) {
+      const html = await r.text();
+      const ogMatch =
+        html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
+        html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i) ||
+        html.match(/<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i);
+      if (ogMatch?.[1]) {
+        return cleanExtractedUrl(ogMatch[1]);
+      }
+    }
+  } catch {}
+
+  return null;
+}
+
+app.get('/api/video-thumbnail', async (req, res) => {
+  try {
+    const rawUrl = String(req.query.url || '').trim();
+    if (!rawUrl) return res.status(400).end();
+
+    let parsedInput: URL;
+    try {
+      parsedInput = new URL(rawUrl);
+    } catch {
+      return res.status(400).end();
+    }
+
+    if ((parsedInput.protocol !== 'https:' && parsedInput.protocol !== 'http:') || isBlockedPrivateHostname(parsedInput.hostname)) {
+      return res.status(400).end();
+    }
+
+    const cached = videoThumbnailCache.get(rawUrl);
+    if (cached && cached.expiresAt > Date.now()) {
+      res.setHeader('Content-Type', cached.contentType);
+      res.setHeader('Cache-Control', 'public, max-age=1800');
+      return res.send(cached.buf);
+    }
+
+    const imageUrl = await resolveVideoThumbnailImageUrl(rawUrl);
+    if (!imageUrl) {
+      return res.status(404).end();
+    }
+
+    let parsedImgUrl: URL;
+    try {
+      parsedImgUrl = new URL(imageUrl);
+    } catch {
+      return res.status(404).end();
+    }
+    if ((parsedImgUrl.protocol !== 'https:' && parsedImgUrl.protocol !== 'http:') || isBlockedPrivateHostname(parsedImgUrl.hostname)) {
+      return res.status(404).end();
+    }
+
+    const imgResp = await fetchWithTimeout(
+      imageUrl,
+      {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+        },
+      },
+      7000
+    );
+
+    if (!imgResp.ok) {
+      return res.status(404).end();
+    }
+
+    const contentType = imgResp.headers.get('content-type') || 'image/jpeg';
+    if (!contentType.toLowerCase().startsWith('image/')) {
+      return res.status(404).end();
+    }
+
+    const buf = Buffer.from(await imgResp.arrayBuffer());
+    if (buf.length === 0 || buf.length > 5 * 1024 * 1024) {
+      return res.status(404).end();
+    }
+
+    if (videoThumbnailCache.size >= 100) {
+      const oldestKey = videoThumbnailCache.keys().next().value;
+      if (oldestKey) videoThumbnailCache.delete(oldestKey);
+    }
+    videoThumbnailCache.set(rawUrl, {
+      buf,
+      contentType,
+      expiresAt: Date.now() + 30 * 60 * 1000,
+    });
+
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'public, max-age=1800');
+    return res.send(buf);
+  } catch {
+    return res.status(404).end();
+  }
+});
+
+// Cache em memória de URLs progressivas MP4 extraídas de links públicos de redes sociais
+const socialVideoStreamCache = new Map<string, { mp4Url: string; expiresAt: number }>();
+
+async function resolveSocialVideoStreamUrl(videoUrl: string): Promise<string | null> {
+  const browserHeaders = {
+    'User-Agent': FB_NAV_HEADERS['User-Agent'],
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+  };
+
+  // Facebook Reel / Video / Watch: tenta plugin oficial primeiro, depois fallback via watch/?v=ID (contorna bloqueio de embed de música/terceiros)
+  if (/facebook\.com|fb\.watch|fb\.com/i.test(videoUrl)) {
+    try {
+      const pluginUrl = `https://www.facebook.com/plugins/video.php?href=${encodeURIComponent(videoUrl)}&show_text=0&width=500`;
+      const r = await fetchWithTimeout(pluginUrl, { headers: browserHeaders }, 7000);
+      if (r.ok) {
+        const html = await r.text();
+        const matches = html.match(/https?:\\?\/\\?\/video[^"'\s<>]+?\.mp4[^"'\s<>]*/gi) || [];
+        const cleaned = matches
+          .map((s) => cleanExtractedUrl(s).replace(/\\u0025/g, '%').split('\\u003C')[0])
+          .filter((u) => u.includes('fbcdn.net'));
+        // Prioriza stream progressivo completo (áudio + vídeo juntos), evitando faixas dash só de vídeo
+        const progressive =
+          cleaned.find((u) => u.includes('sve_hd')) ||
+          cleaned.find((u) => u.includes('sve_sd')) ||
+          cleaned.find((u) => u.includes('xpv_progressive') && !u.includes('dash'));
+        if (progressive) return progressive;
+      }
+    } catch {}
+
+    const watchHtml = await fetchFacebookWatchPageHtml(videoUrl);
+    if (watchHtml) {
+      const nativeMatch =
+        watchHtml.match(/"browser_native_hd_url":"([^"]+)"/) ||
+        watchHtml.match(/"browser_native_sd_url":"([^"]+)"/) ||
+        watchHtml.match(/"playable_url_quality_hd":"([^"]+)"/) ||
+        watchHtml.match(/"playable_url":"([^"]+)"/);
+      if (nativeMatch?.[1]) {
+        return cleanExtractedUrl(nativeMatch[1]).replace(/\\u0025/g, '%');
+      }
+    }
+  }
+
+  // Instagram Reel / Post embed
+  const instaMatch = videoUrl.match(/instagram\.com\/(?:reel|p)\/([A-Za-z0-9_-]+)/i);
+  if (instaMatch?.[1]) {
+    try {
+      const r = await fetchWithTimeout(
+        `https://www.instagram.com/p/${instaMatch[1]}/embed/captioned/`,
+        { headers: browserHeaders },
+        7000
+      );
+      if (r.ok) {
+        const html = await r.text();
+        const matches = html.match(/https?:\\?\/\\?\/[^"'\s<>]+?\.mp4[^"'\s<>]*/gi) || [];
+        const cleaned = matches
+          .map((s) => cleanExtractedUrl(s).replace(/\\u0025/g, '%').split('\\u003C')[0])
+          .filter((u) => u.includes('cdninstagram.com') || u.includes('fbcdn.net'));
+        if (cleaned[0]) return cleaned[0];
+      }
+    } catch {}
+  }
+
+  return null;
+}
+
+app.get('/api/video-stream-proxy', async (req, res) => {
+  try {
+    const rawUrl = String(req.query.url || '').trim();
+    if (!rawUrl) return res.status(400).end();
+
+    let parsedInput: URL;
+    try {
+      parsedInput = new URL(rawUrl);
+    } catch {
+      return res.status(400).end();
+    }
+    if ((parsedInput.protocol !== 'https:' && parsedInput.protocol !== 'http:') || isBlockedPrivateHostname(parsedInput.hostname)) {
+      return res.status(400).end();
+    }
+
+    let mp4Url: string | null = null;
+    const cached = socialVideoStreamCache.get(rawUrl);
+    if (cached && cached.expiresAt > Date.now()) {
+      mp4Url = cached.mp4Url;
+    } else {
+      mp4Url = await resolveSocialVideoStreamUrl(rawUrl);
+      if (mp4Url) {
+        if (socialVideoStreamCache.size >= 100) {
+          const oldest = socialVideoStreamCache.keys().next().value;
+          if (oldest) socialVideoStreamCache.delete(oldest);
+        }
+        socialVideoStreamCache.set(rawUrl, {
+          mp4Url,
+          expiresAt: Date.now() + 25 * 60 * 1000,
+        });
+      }
+    }
+
+    if (!mp4Url) {
+      return res.status(404).end();
+    }
+
+    let parsedMp4Url: URL;
+    try {
+      parsedMp4Url = new URL(mp4Url);
+    } catch {
+      return res.status(404).end();
+    }
+    if ((parsedMp4Url.protocol !== 'https:' && parsedMp4Url.protocol !== 'http:') || isBlockedPrivateHostname(parsedMp4Url.hostname)) {
+      return res.status(404).end();
+    }
+
+    const upstreamHeaders: Record<string, string> = {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    };
+    if (typeof req.headers.range === 'string' && req.headers.range.trim()) {
+      upstreamHeaders.Range = req.headers.range.trim();
+    }
+
+    const upstreamResp = await fetchWithTimeout(mp4Url, { headers: upstreamHeaders }, 15000);
+    if (!upstreamResp.ok && upstreamResp.status !== 206) {
+      socialVideoStreamCache.delete(rawUrl);
+      return res.status(404).end();
+    }
+
+    res.status(upstreamResp.status);
+    const contentType = upstreamResp.headers.get('content-type') || 'video/mp4';
+    res.setHeader('Content-Type', contentType);
+    const contentLength = upstreamResp.headers.get('content-length');
+    if (contentLength) res.setHeader('Content-Length', contentLength);
+    const contentRange = upstreamResp.headers.get('content-range');
+    if (contentRange) res.setHeader('Content-Range', contentRange);
+    res.setHeader('Accept-Ranges', upstreamResp.headers.get('accept-ranges') || 'bytes');
+    res.setHeader('Cache-Control', 'public, max-age=1200');
+
+    if (!upstreamResp.body) {
+      return res.end();
+    }
+    Readable.fromWeb(upstreamResp.body as any).pipe(res);
+  } catch {
+    return res.status(404).end();
+  }
+});
+
+// ==================== HEALTH & LOCAWEB ====================
+
+app.get(['/health', '/_health', '/api/health'], (_req, res) => {
   res.json({
     status: 'ok',
-    database: 'SQLite 3 (nativo)',
-    file: 'praondeeu.db',
+    database: 'Cloud SQL PostgreSQL (Drizzle ORM)',
+    uptime: process.uptime(),
     time: new Date().toISOString(),
   });
 });
 
-// Coordenadas padrão de apoio para cidades brasileiras (fallback seguro)
-const BRAZIL_CITY_COORDINATES: Record<string, { latitude: string; longitude: string }> = {
-  'santo andre': { latitude: '-23.6575', longitude: '-46.5312' },
-  'sao paulo': { latitude: '-23.5505', longitude: '-46.6333' },
-  'sao bernardo do campo': { latitude: '-23.6944', longitude: '-46.5654' },
-  'sao caetano do sul': { latitude: '-23.6229', longitude: '-46.5547' },
-  'diadema': { latitude: '-23.6865', longitude: '-46.6234' },
-  'maua': { latitude: '-23.6687', longitude: '-46.4614' },
-  'ribeirao pires': { latitude: '-23.7142', longitude: '-46.4137' },
-  'rio de janeiro': { latitude: '-22.9068', longitude: '-43.1729' },
-  'belo horizonte': { latitude: '-19.9167', longitude: '-43.9345' },
-  'curitiba': { latitude: '-25.4284', longitude: '-49.2733' },
-  'porto alegre': { latitude: '-30.0346', longitude: '-51.2177' },
-  'salvador': { latitude: '-12.9777', longitude: '-38.5016' },
-  'recife': { latitude: '-8.0476', longitude: '-34.8770' },
-  'fortaleza': { latitude: '-3.7172', longitude: '-38.5433' },
-  'brasilia': { latitude: '-15.7975', longitude: '-47.8919' },
-  'campinas': { latitude: '-22.9099', longitude: '-47.0626' },
-  'santos': { latitude: '-23.9608', longitude: '-46.3336' },
-  'sorocaba': { latitude: '-23.5015', longitude: '-47.4526' },
-  'sao jose dos campos': { latitude: '-23.2237', longitude: '-45.9009' },
-  'ribeirao preto': { latitude: '-21.1704', longitude: '-47.8103' },
-  'osasco': { latitude: '-23.5329', longitude: '-46.7919' },
-  'guarulhos': { latitude: '-23.4542', longitude: '-46.5333' },
-  'barueri': { latitude: '-23.5111', longitude: '-46.8764' },
-  'cotia': { latitude: '-23.6036', longitude: '-46.9189' },
-  'mogi das cruzes': { latitude: '-23.5208', longitude: '-46.1854' },
-};
+app.get('/api/locaweb/download', (_req, res) => {
+  const filePath = path.join(process.cwd(), 'public', 'site-locaweb', 'index.html');
+  if (fs.existsSync(filePath)) res.download(filePath, 'index.html');
+  else res.status(404).send('Arquivo não encontrado');
+});
 
-function normalizeCityKey(str: string): string {
-  return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
-}
+app.get('/api/locaweb/download-direct', (_req, res) => {
+  const filePath = path.join(process.cwd(), 'public', 'site-locaweb', 'index-redirecionamento-direto.html');
+  if (fs.existsSync(filePath)) res.download(filePath, 'index.html');
+  else res.status(404).send('Arquivo não encontrado');
+});
 
-// 1. Listar Eventos do SQLite com Alta Performance e Tabelas Dedicadas por Categoria
-app.get('/api/events', (req, res) => {
+// ==================== AUTH (FIREBASE + CLOUD SQL) ====================
+
+app.get('/api/auth/me', requireAuth, async (req: AuthRequest, res) => {
   try {
-    const { category, city, estado, state, search, status } = req.query;
-    let sql = '';
-    const params: any[] = [];
-
-    const hasCategoryFilter = Boolean(category && category !== 'Todos' && category !== 'Todas' && category !== 'Categorias');
-    const catClean = hasCategoryFilter ? String(category).trim() : null;
-    let categoryTableName: string | null = null;
-
-    if (catClean) {
-      const candidateTable = getCategoryTableName(catClean);
-      try {
-        const tableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?;").get(candidateTable);
-        if (tableExists) {
-          categoryTableName = candidateTable;
-        } else {
-          const resEnsure = ensureCategoryTable(db, catClean);
-          categoryTableName = resEnsure.tableName;
-        }
-      } catch {
-        const resEnsure = ensureCategoryTable(db, catClean);
-        categoryTableName = resEnsure.tableName;
-      }
+    if (!req.user?.uid) {
+      return res.status(401).json({ error: 'Usuário não autenticado' });
     }
-
-    if (categoryTableName) {
-      // Consulta com índice dedicada diretamente na tabela da categoria selecionada
-      sql = `
-        SELECT 
-          e.*,
-          COALESCE(c.nome, e.categoria) AS categoria_oficial_nome,
-          c.descricao AS categoria_descricao,
-          c.ativa AS categoria_ativa,
-          a.nome AS anunciante_nome,
-          a.email AS anunciante_email,
-          a.telefone AS anunciante_telefone,
-          a.verificado AS anunciante_verificado,
-          est.nome AS estado_nome_completo,
-          est.regiao AS estado_regiao
-        FROM ${categoryTableName} e
-        LEFT JOIN categorias c ON (
-          e.categoria_id = c.id 
-          OR LOWER(TRIM(e.categoria)) = LOWER(TRIM(c.nome))
-          OR (LOWER(TRIM(e.categoria)) IN ('show', 'shows') AND LOWER(TRIM(c.nome)) IN ('show', 'shows'))
-        )
-        LEFT JOIN anunciantes a ON e.anunciante_id = a.id
-        LEFT JOIN estado est ON (
-          e.estado_id = est.id 
-          OR UPPER(TRIM(e.estado)) = UPPER(TRIM(est.estado))
-          OR UPPER(TRIM(e.estado)) = UPPER(TRIM(est.nome))
-          OR UPPER(TRIM(e.cidade)) = UPPER(TRIM(est.nome))
-        )
-        WHERE 1=1
-      `;
-    } else {
-      // Consulta padrão diretamente na tabela física 'eventos' unificada
-      sql = `
-        SELECT 
-          e.*,
-          COALESCE(c.nome, e.categoria) AS categoria_oficial_nome,
-          c.descricao AS categoria_descricao,
-          c.ativa AS categoria_ativa,
-          a.nome AS anunciante_nome,
-          a.email AS anunciante_email,
-          a.telefone AS anunciante_telefone,
-          a.verificado AS anunciante_verificado,
-          est.nome AS estado_nome_completo,
-          est.regiao AS estado_regiao
-        FROM eventos e
-        LEFT JOIN categorias c ON (
-          e.categoria_id = c.id 
-          OR LOWER(TRIM(e.categoria)) = LOWER(TRIM(c.nome))
-        )
-        LEFT JOIN anunciantes a ON e.anunciante_id = a.id
-        LEFT JOIN estado est ON (
-          e.estado_id = est.id 
-          OR UPPER(TRIM(e.estado)) = UPPER(TRIM(est.estado))
-          OR UPPER(TRIM(e.estado)) = UPPER(TRIM(est.nome))
-          OR UPPER(TRIM(e.cidade)) = UPPER(TRIM(est.nome))
-        )
-        WHERE 1=1
-      `;
-    }
-    if (city && city !== 'Todas' && city !== 'Cidades') {
-      sql += ' AND e.cidade = ?';
-      params.push(String(city));
-    }
-    // Estado evento igual estado informado
-    const estadoParam = estado || state;
-    if (estadoParam && estadoParam !== 'Todos' && estadoParam !== 'Todas') {
-      let rawVal = String(estadoParam).trim();
-      let ufVal = rawVal;
-      let nomeVal = '';
-
-      if (/^\d+$/.test(rawVal)) {
-        try {
-          const estRow = db.prepare('SELECT id, nome, estado FROM estado WHERE id = ?').get(rawVal) as any;
-          if (estRow) {
-            ufVal = estRow.estado || '';
-            nomeVal = estRow.nome || '';
-          }
-        } catch (e) {
-          // ignore
-        }
-      } else {
-        try {
-          const estRow = db.prepare('SELECT id, nome, estado FROM estado WHERE UPPER(estado) = ? OR UPPER(nome) = ? LIMIT 1').get(rawVal.toUpperCase(), rawVal.toUpperCase()) as any;
-          if (estRow) {
-            ufVal = estRow.estado || '';
-            nomeVal = estRow.nome || '';
-          } else {
-            const mappedUf = normalizeStateToUF(rawVal);
-            if (mappedUf && mappedUf !== rawVal) {
-              nomeVal = rawVal;
-              ufVal = mappedUf;
-            }
-          }
-        } catch (e) {
-          // ignore
-        }
-      }
-
-      if (ufVal && nomeVal) {
-        sql += ' AND (UPPER(TRIM(e.estado)) = ? OR UPPER(TRIM(e.estado)) = ? OR UPPER(TRIM(est.nome)) = ?)';
-        params.push(ufVal.toUpperCase(), nomeVal.toUpperCase(), nomeVal.toUpperCase());
-      } else if (ufVal) {
-        sql += ' AND (UPPER(TRIM(e.estado)) = ? OR UPPER(TRIM(est.nome)) = ?)';
-        params.push(ufVal.toUpperCase(), ufVal.toUpperCase());
-      } else if (nomeVal) {
-        sql += ' AND (UPPER(TRIM(e.estado)) = ? OR UPPER(TRIM(est.nome)) = ?)';
-        params.push(nomeVal.toUpperCase(), nomeVal.toUpperCase());
-      }
-    }
-    if (search) {
-      sql += ' AND (e.titulo LIKE ? OR e.descricao LIKE ? OR e.local_nome LIKE ? OR e.categoria LIKE ? OR e.organizador LIKE ?)';
-      const term = `%${search}%`;
-      params.push(term, term, term, term, term);
-    }
-    if (status) {
-      sql += ' AND e.status = ?';
-      params.push(status);
-    }
-    if (req.query.liberado) {
-      sql += ' AND UPPER(e.liberado) = ?';
-      params.push(String(req.query.liberado).toUpperCase());
-    }
-    // Filtrar somente eventos com imagem ou com vídeo/url caso solicitado
-    if (req.query.has_image === 'true' || req.query.com_imagem === 'true') {
-      sql += ` AND (
-        (e.imagem_url IS NOT NULL AND (e.imagem_url LIKE 'http://%' OR e.imagem_url LIKE 'https://%' OR e.imagem_url LIKE 'data:image/%'))
-        OR (e.video_url IS NOT NULL AND TRIM(e.video_url) != '' AND e.video_url != '[video_local_sqlite]')
-        OR (e.url IS NOT NULL AND TRIM(e.url) != '' AND e.url != '[video_local_sqlite]')
-      )`;
-    }
-    // Data evento igual ou maior data informada
-    if (req.query.data_min || req.query.date) {
-      sql += ' AND e.data_evento >= ?';
-      params.push(req.query.data_min || req.query.date);
-    } else if (req.query.data_atual === 'true' || req.query.somente_futuros === 'true') {
-      const today = new Date().toISOString().split('T')[0];
-      sql += ' AND e.data_evento >= ?';
-      params.push(today);
-    }
-
-    // No índice será categoria, estado, data do evento
-    // Nas consultas por data, prioriza data_evento ASC para trazer os eventos imediatamente posteriores ou iguais à data
-    const orderBy = req.query.order_by;
-    if (orderBy === 'criado_em' || orderBy === 'recentes') {
-      sql += ' ORDER BY e.criado_em DESC, e.id DESC';
-    } else if (orderBy === 'data' || req.query.date || req.query.data_min || req.query.data_atual === 'true') {
-      sql += ' ORDER BY e.data_evento ASC, e.horario ASC, e.id ASC';
-    } else if (orderBy === 'id') {
-      sql += ' ORDER BY e.id ASC, e.categoria ASC, e.estado ASC, e.data_evento ASC';
-    } else {
-      sql += ' ORDER BY e.data_evento ASC, e.horario ASC, e.id ASC';
-    }
-
-    // Coordenadas do solicitante para cálculo de proximidade geográfica (Haversine)
-    const rawUserLat = req.query.user_lat ?? req.query.lat;
-    const rawUserLng = req.query.user_lng ?? req.query.lng;
-    const userLat = rawUserLat !== undefined && rawUserLat !== '' ? parseFloat(String(rawUserLat)) : undefined;
-    const userLng = rawUserLng !== undefined && rawUserLng !== '' ? parseFloat(String(rawUserLng)) : undefined;
-    const hasValidUserCoords = userLat !== undefined && userLng !== undefined && !isNaN(userLat) && !isNaN(userLng);
-    const isProximityRequested = (req.query.mais_proximos === 'true' || req.query.order_by === 'proximidade') && hasValidUserCoords;
-
-    // Nas consultas, limitar para mostrar 20 eventos após ou igual a data solicitada (ou conforme limite informado)
-    const hasDateQuery = Boolean(req.query.date || req.query.data_min || req.query.data_atual === 'true' || req.query.somente_futuros === 'true');
-    const rawLimit = req.query.limit ? parseInt(String(req.query.limit), 10) : undefined;
-    const limitCount = rawLimit !== undefined && !isNaN(rawLimit) ? rawLimit : (hasDateQuery || isProximityRequested ? 20 : undefined);
-
-    if (limitCount && limitCount > 0) {
-      // Quando ordenado por proximidade do solicitante, busca margem mais ampla para ordenar antes de cortar em 20
-      const sqlLimit = isProximityRequested ? 300 : limitCount * 3;
-      sql += ` LIMIT ${sqlLimit}`;
-    }
-
-    let rows = db.prepare(sql).all(...params) as any[];
-
-    // Fallback: se buscou em tabela de categoria específica e não retornou registros, mas havia termo de busca (search), tenta na tabela geral eventos
-    if (rows.length === 0 && categoryTableName && search) {
-      try {
-        const fallbackSql = sql.replace(new RegExp(`FROM\\s+${categoryTableName}\\s+e`, 'i'), 'FROM eventos e');
-        const fallbackRows = db.prepare(fallbackSql).all(...params) as any[];
-        if (fallbackRows.length > 0) {
-          rows = fallbackRows;
-        }
-      } catch (fbErr) {
-        console.warn('Erro no fallback de busca em eventos:', fbErr);
-      }
-    }
-
-    // Função para calcular distância Haversine em km entre duas coordenadas
-    const calculateDistanceKm = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
-      const R = 6371; // Raio da Terra em km
-      const dLat = ((lat2 - lat1) * Math.PI) / 180;
-      const dLon = ((lon2 - lon1) * Math.PI) / 180;
-      const a =
-        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-        Math.cos((lat1 * Math.PI) / 180) *
-          Math.cos((lat2 * Math.PI) / 180) *
-          Math.sin(dLon / 2) *
-          Math.sin(dLon / 2);
-      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-      return Math.round(R * c * 10) / 10;
-    };
-
-    // Map database snake_case / columns to EventItem format com dados relacionais integrados e distância
-    const events = rows.map((r) => {
-      let latVal = r.latitude;
-      let lngVal = r.longitude;
-
-      // Fallback para coordenadas da cidade se o evento não tiver coordenadas gravadas
-      if ((!latVal || !lngVal) && r.cidade) {
-        const normCity = normalizeCityKey(r.cidade);
-        const cityCoord = BRAZIL_CITY_COORDINATES[normCity];
-        if (cityCoord) {
-          latVal = cityCoord.latitude;
-          lngVal = cityCoord.longitude;
-        }
-      }
-
-      let distanceKm: number | undefined = undefined;
-      if (hasValidUserCoords && latVal && lngVal) {
-        const evLat = parseFloat(String(latVal));
-        const evLng = parseFloat(String(lngVal));
-        if (!isNaN(evLat) && !isNaN(evLng)) {
-          distanceKm = calculateDistanceKm(userLat!, userLng!, evLat, evLng);
-        }
-      }
-
-      let rawVideoUrl = String(r.video_url || r.video_utl || r.Video_url || r.videoUrl || '').trim();
-      let rawUrl = String(r.url || r.Url || '').trim();
-
-      if (rawVideoUrl === '[video_local_sqlite]') rawVideoUrl = '';
-      if (rawUrl === '[video_local_sqlite]') rawUrl = '';
-
-      // Se ainda não tem o vídeo real, tenta recuperar da tabela autônoma eventos
-      if (!rawVideoUrl && (!rawUrl || !rawUrl.startsWith('data:video/'))) {
-        try {
-          const evFallback = db.prepare('SELECT video_url, url FROM eventos WHERE id = ? LIMIT 1;').get(r.id) as any;
-          if (evFallback) {
-            const fbVid = String(evFallback.video_url || '').trim();
-            const fbUrl = String(evFallback.url || '').trim();
-            if (fbVid && fbVid !== '[video_local_sqlite]') rawVideoUrl = fbVid;
-            else if (fbUrl && fbUrl !== '[video_local_sqlite]' && (fbUrl.startsWith('data:video/') || fbUrl.includes('.mp4'))) rawVideoUrl = fbUrl;
-          }
-        } catch {}
-      }
-
-      const isUrlVideo = Boolean(
-        rawUrl && (
-          rawUrl.startsWith('data:video/') ||
-          rawUrl.startsWith('data:application/octet-stream') ||
-          rawUrl.startsWith('blob:') ||
-          /\.(mp4|webm|ogg|mov|m4v)($|\?|#)/i.test(rawUrl) ||
-          /video\/mp4/i.test(rawUrl) ||
-          rawUrl.includes('youtube.com') ||
-          rawUrl.includes('youtu.be') ||
-          rawUrl.includes('facebook.com') ||
-          rawUrl.includes('fb.watch') ||
-          rawUrl.includes('fb.') ||
-          rawUrl.includes('instagram.com') ||
-          rawUrl.includes('tiktok.com') ||
-          rawUrl.includes('vimeo.com')
-        )
-      );
-      const isRawVideoUrlVideo = Boolean(rawVideoUrl);
-      const resolvedVideoUrl = rawVideoUrl || (isUrlVideo ? rawUrl : undefined);
-      const isVideo = Boolean(resolvedVideoUrl || isUrlVideo || isRawVideoUrlVideo);
-
-      return {
-        id: r.id,
-        title: r.titulo,
-        description: r.descricao || '',
-        category: r.categoria,
-        categoryId: r.categoria_id ?? undefined,
-        categoryOfficialName: r.categoria_oficial_nome || r.categoria,
-        categoryDescription: r.categoria_descricao || undefined,
-        advertiserId: r.anunciante_id || undefined,
-        advertiserName: r.anunciante_nome || undefined,
-        advertiserEmail: r.anunciante_email || undefined,
-        advertiserPhone: r.anunciante_telefone || undefined,
-        advertiserVerified: Boolean(r.anunciante_verificado),
-        estadoId: r.estado_id ?? undefined,
-        estadoNomeCompleto: r.estado_nome_completo || undefined,
-        regiao: r.estado_regiao || undefined,
-        date: r.data_evento,
-        time: r.horario,
-        endDate: r.data_evento,
-        endTime: r.horario_fim || undefined,
-        locationName: r.local_nome,
-        address: r.endereco,
-        city: r.cidade,
-        state: r.estado,
-        stateName: r.estado_nome_completo || r.estado,
-        latitude: latVal || undefined,
-        longitude: lngVal || undefined,
-        distanceKm,
-        liberado: r.liberado !== null && r.liberado !== undefined ? r.liberado : '',
-        isFree: Boolean(r.is_gratuito),
-        price: r.preco ?? undefined,
-        priceDetails: r.detalhes_preco || undefined,
-        imageUrl: r.imagem_url || '',
-        mediaType: isVideo ? 'video' : 'image',
-        videoUrl: resolvedVideoUrl || (isVideo ? rawUrl : undefined),
-        video_url: resolvedVideoUrl || (isVideo ? rawUrl : undefined),
-        video_utl: resolvedVideoUrl || (isVideo ? rawUrl : undefined),
-        url: rawUrl || resolvedVideoUrl || r.imagem_url || undefined,
-        Url: rawUrl || resolvedVideoUrl || r.imagem_url || undefined,
-        organizer: r.organizador,
-        contact: r.contato || undefined,
-        tags: r.tags ? JSON.parse(r.tags) : [],
-        featured: Boolean(r.destaque),
-        status: r.status || 'em_analise',
-        createdAt: r.criado_em,
-      };
+    const dbUser = await getOrCreateUser(
+      req.user.uid,
+      req.user.email || '',
+      req.user.name || null
+    );
+    res.json({
+      success: true,
+      user: {
+        id: dbUser.id,
+        uid: dbUser.uid,
+        email: dbUser.email,
+        displayName: dbUser.displayName,
+        role: dbUser.role,
+      },
     });
-
-    const isValidImageUrl = (url?: string | null): boolean => {
-      if (!url || typeof url !== 'string') return false;
-      const t = url.trim();
-      return t.startsWith('http://') || t.startsWith('https://') || t.startsWith('data:image/');
-    };
-
-    // Deduplicação para não trazer eventos repetidos na tela de consulta
-    const seenEventKeys = new Set<string>();
-    const uniqueEvents: typeof events = [];
-    for (const ev of events) {
-      if (!ev) continue;
-      if ((req.query.has_image === 'true' || req.query.com_imagem === 'true') && !isValidImageUrl(ev.imageUrl) && !ev.videoUrl && !ev.url) {
-        continue;
-      }
-      const idKey = (ev.id || '').trim().toLowerCase();
-      const normTitle = (ev.title || '')
-        .trim()
-        .toLowerCase()
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .replace(/[^\w\s]/gi, '')
-        .replace(/\s+/g, ' ');
-      const dateKey = (ev.date || '').split('T')[0].trim();
-      const normCity = (ev.city || '')
-        .trim()
-        .toLowerCase()
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '');
-
-      const semanticKey = `${normTitle}__${dateKey}__${normCity}`;
-      const titleDateKey = `${normTitle}__${dateKey}`;
-
-      if (idKey && seenEventKeys.has(`id:${idKey}`)) {
-        continue;
-      }
-      if (normTitle && dateKey && (seenEventKeys.has(`sem:${semanticKey}`) || seenEventKeys.has(`td:${titleDateKey}`))) {
-        continue;
-      }
-
-      if (idKey) seenEventKeys.add(`id:${idKey}`);
-      if (normTitle && dateKey) {
-        seenEventKeys.add(`sem:${semanticKey}`);
-        seenEventKeys.add(`td:${titleDateKey}`);
-      }
-      uniqueEvents.push(ev);
-    }
-
-    // Ordenação: Estado (UF), Categoria, Data do evento, e depois Proximidade geográfica (distância)
-    if (isProximityRequested) {
-      uniqueEvents.sort((a, b) => {
-        // 1. Estado (UF) - Ordem alfabética (SP, RJ, etc.)
-        const stateA = a.state || '';
-        const stateB = b.state || '';
-        const cmpState = stateA.localeCompare(stateB, 'pt-BR');
-        if (cmpState !== 0) return cmpState;
-
-        // 2. Categoria - Ordem alfabética
-        const catA = a.category || '';
-        const catB = b.category || '';
-        const cmpCat = catA.localeCompare(catB, 'pt-BR');
-        if (cmpCat !== 0) return cmpCat;
-
-        // 3. Data do evento - Cronológica (mais próximos na data)
-        const dateA = a.date || '';
-        const dateB = b.date || '';
-        const cmpDate = dateA.localeCompare(dateB);
-        if (cmpDate !== 0) return cmpDate;
-
-        // 4. Proximidade geográfica (distância)
-        const distA = typeof a.distanceKm === 'number' ? a.distanceKm : 999999;
-        const distB = typeof b.distanceKm === 'number' ? b.distanceKm : 999999;
-        if (distA !== distB) {
-          return distA - distB;
-        }
-
-        // 5. Horário
-        return (a.time || '').localeCompare(b.time || '');
-      });
-    }
-
-    // Limita estritamente a 20 registros conforme solicitado
-    const finalEvents = (limitCount && limitCount > 0)
-      ? uniqueEvents.slice(0, limitCount)
-      : uniqueEvents.slice(0, 20);
-
-    res.json(finalEvents);
   } catch (error: any) {
-    console.error('Erro ao listar eventos:', error);
-    res.status(500).json({ error: error.message || 'Erro ao consultar eventos' });
+    console.error('Erro em /api/auth/me:', error);
+    res.status(500).json({ error: error.message || 'Falha ao carregar perfil do usuário' });
   }
 });
 
-// Helper: Obter coordenadas geográficas (latitude e longitude) a partir do endereço do evento
-async function fetchGeocodeCoordinates(
-  address?: string, 
-  city?: string, 
-  state?: string, 
+// ==================== MÉTRICAS DE CONSULTAS ====================
+
+app.all('/api/consultas/registrar', async (req, res) => {
+  try {
+    const nowEst = new Date();
+    const yearEst = nowEst.getFullYear();
+    const monthEst = nowEst.getMonth() + 1;
+    const rawEstado = String(req.body?.estado || req.query?.estado || 'SP').trim().toUpperCase();
+    const estadoFiltro = !rawEstado || rawEstado === 'TODOS' || rawEstado === 'TODAS' ? 'SP' : rawEstado;
+
+    const totalAtual = await registrarConsultaPg(yearEst, monthEst, estadoFiltro);
+    res.json({
+      success: true,
+      message: 'Consulta registrada com sucesso',
+      total_consultas: totalAtual,
+      ano: yearEst,
+      mes: monthEst,
+      estado: estadoFiltro,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ==================== GEOCODING ====================
+
+async function fetchGeocodeCoordinatesWithGemini(
+  address?: string,
+  city?: string,
+  state?: string,
   locationName?: string
-): Promise<{ latitude: string; longitude: string; displayName?: string } | null> {
-  const cleanAddress = (address || '').trim();
-  const cleanCity = (city || '').trim();
+): Promise<{
+  latitude: string;
+  longitude: string;
+  displayName?: string;
+  isFallback?: boolean;
+  addressResolved?: boolean;
+} | null> {
+  if (!process.env.GEMINI_API_KEY) return null;
+
+  const cleanAddress = sanitizePromptInput(address, 120);
+  const cleanCity = sanitizePromptInput(city, 60);
+  const cleanState = sanitizePromptInput(state, 40);
+  const cleanLocation = sanitizePromptInput(locationName, 80);
+
+  if (
+    detectPromptInjection(address || '') ||
+    detectPromptInjection(locationName || '') ||
+    detectPromptInjection(city || '')
+  ) {
+    return null;
+  }
+
+  const cacheKey = getGeocodeCacheKey(cleanAddress, cleanCity, cleanState, cleanLocation);
+  const cachedResult = getCachedGeocode(cacheKey);
+  if (cachedResult) return cachedResult;
+
+  const check = canCallGemini();
+  if (!check.allowed) return null;
+
+  try {
+    const prompt = `You are a precise geolocation service for Brazilian addresses.
+Inputs:
+- Street Address & Number: ${cleanAddress || 'Not provided'}
+- City: ${cleanCity || 'Not provided'}
+- State: ${cleanState || 'Not provided'}
+- Location/Establishment Name: ${cleanLocation || 'Not provided'}
+
+Return JSON:
+{
+  "latitude": "string",
+  "longitude": "string",
+  "displayName": "string",
+  "addressResolved": boolean
+}`;
+
+    const geminiCall = ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: prompt,
+      config: {
+        maxOutputTokens: 250,
+        temperature: 0.1,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            latitude: { type: Type.STRING },
+            longitude: { type: Type.STRING },
+            displayName: { type: Type.STRING },
+            addressResolved: { type: Type.BOOLEAN },
+          },
+          required: ['latitude', 'longitude', 'displayName', 'addressResolved'],
+        },
+      },
+    });
+
+    const response = await withGeminiTimeout(geminiCall, 8000);
+    const text = response.text?.trim() || '';
+    if (text) {
+      const data = JSON.parse(text);
+      if (data.latitude && data.longitude) {
+        const resolvedData = {
+          latitude: String(data.latitude),
+          longitude: String(data.longitude),
+          displayName: String(data.displayName || `${cleanAddress}, ${cleanCity}`),
+          addressResolved: Boolean(data.addressResolved),
+        };
+        setCachedGeocode(cacheKey, resolvedData);
+        return {
+          ...resolvedData,
+          isFallback: !resolvedData.addressResolved,
+        };
+      }
+    }
+  } catch (err: any) {
+    recordGeminiApiFailure(err.status || err.statusCode);
+  }
+  return null;
+}
+
+async function fetchGeocodeCoordinates(
+  address?: string,
+  city?: string,
+  state?: string,
+  locationName?: string
+): Promise<{
+  latitude: string;
+  longitude: string;
+  displayName?: string;
+  isFallback?: boolean;
+  addressResolved?: boolean;
+} | null> {
+  let cleanAddress = (address || '').trim().replace(/,(\d)/g, ', $1');
+  let cleanCity = (city || '')
+    .trim()
+    .replace(/\s+km\s*\d+/i, '')
+    .replace(/\s+bairro\s+\w+/i, '')
+    .replace(/\s+-\s+.*$/, '');
   const cleanState = (state || '').trim();
   const cleanLocation = (locationName || '').trim();
 
+  if (cleanCity) {
+    const cityIdx = cleanAddress.toLowerCase().lastIndexOf(cleanCity.toLowerCase());
+    if (cityIdx !== -1 && cityIdx >= cleanAddress.length - cleanCity.length - 15) {
+      cleanAddress = cleanAddress.substring(0, cityIdx).trim();
+    }
+  }
+  cleanAddress = cleanAddress.replace(/[,-\s/\\|]+$/, '').trim();
+
   if (!cleanAddress && !cleanCity && !cleanLocation) return null;
 
-  // Montar consultas em ordem de especificidade para o endereço
   const queries = [
-    cleanAddress && cleanCity && cleanState ? `${cleanAddress}, ${cleanCity}, ${cleanState}, Brasil` : '',
-    cleanAddress && cleanCity ? `${cleanAddress}, ${cleanCity}, Brasil` : '',
-    cleanAddress.includes('-') && cleanCity ? `${cleanAddress.split('-')[0].trim()}, ${cleanCity}, Brasil` : '',
-    cleanLocation && cleanCity ? `${cleanLocation}, ${cleanCity}, Brasil` : '',
-    cleanAddress ? `${cleanAddress}, Brasil` : '',
-    cleanCity && cleanState ? `${cleanCity}, ${cleanState}, Brasil` : '',
-    cleanCity ? `${cleanCity}, Brasil` : '',
-  ].filter(Boolean);
+    { q: cleanAddress && cleanCity && cleanState ? `${cleanAddress}, ${cleanCity}, ${cleanState}, Brasil` : '', isAddress: true },
+    { q: cleanAddress && cleanCity ? `${cleanAddress}, ${cleanCity}, Brasil` : '', isAddress: true },
+    { q: cleanAddress.includes('-') && cleanCity ? `${cleanAddress.split('-')[0].trim()}, ${cleanCity}, Brasil` : '', isAddress: true },
+    { q: cleanLocation && cleanCity ? `${cleanLocation}, ${cleanCity}, Brasil` : '', isAddress: false },
+    { q: cleanAddress ? `${cleanAddress}, Brasil` : '', isAddress: true },
+    { q: cleanCity && cleanState ? `${cleanCity}, ${cleanState}, Brasil` : '', isAddress: false },
+    { q: cleanCity ? `${cleanCity}, Brasil` : '', isAddress: false },
+  ].filter((item) => item.q);
 
-  for (const q of queries) {
+  for (const item of queries) {
     try {
-      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=1`;
+      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(item.q)}&limit=1`;
       const response = await fetch(url, {
         headers: { 'User-Agent': 'PraOndeEuVouApp/1.0 (geocoding-service)' },
       });
@@ -549,22 +1357,25 @@ async function fetchGeocodeCoordinates(
           latitude: String(data[0].lat),
           longitude: String(data[0].lon),
           displayName: data[0].display_name,
+          isFallback: !item.isAddress,
+          addressResolved: item.isAddress,
         };
       }
-    } catch (err) {
-      console.warn('Falha na tentativa de geocodificação para query:', q, err);
-    }
+    } catch {}
   }
 
-  // Fallback baseado na cidade se a rua exata não retornou
+  const geminiCoords = await fetchGeocodeCoordinatesWithGemini(cleanAddress, cleanCity, cleanState, cleanLocation);
+  if (geminiCoords) return geminiCoords;
+
   if (cleanCity) {
-    const cityKey = normalizeCityKey(cleanCity);
-    const fallback = BRAZIL_CITY_COORDINATES[cityKey];
+    const fallback = BRAZIL_CITY_COORDINATES[normalizeCityKey(cleanCity)];
     if (fallback) {
       return {
         latitude: fallback.latitude,
         longitude: fallback.longitude,
         displayName: `${cleanCity} - ${cleanState || 'Brasil'} (Centro da cidade)`,
+        isFallback: true,
+        addressResolved: false,
       };
     }
   }
@@ -572,15 +1383,14 @@ async function fetchGeocodeCoordinates(
   return null;
 }
 
-// Endpoint dedicado de geocodificação para consulta em tempo real no formulário
-app.get('/api/geocode', async (req, res) => {
+app.get('/api/geocode', geocodeRateLimiter, async (req, res) => {
   try {
-    const address = String(req.query.address || '');
-    const city = String(req.query.city || '');
-    const state = String(req.query.state || '');
-    const locationName = String(req.query.locationName || '');
-
-    const coords = await fetchGeocodeCoordinates(address, city, state, locationName);
+    const coords = await fetchGeocodeCoordinates(
+      String(req.query.address || ''),
+      String(req.query.city || ''),
+      String(req.query.state || ''),
+      String(req.query.locationName || '')
+    );
     if (!coords) {
       return res.status(404).json({ error: 'Endereço não localizado para geocodificação' });
     }
@@ -590,22 +1400,31 @@ app.get('/api/geocode', async (req, res) => {
   }
 });
 
-// Consulta direta e autônoma à tabela 'eventos' (100% desvinculada de outras tabelas)
-app.get('/api/eventos', (req, res) => {
+// ==================== EVENTOS (CLOUD SQL POSTGRESQL) ====================
+
+app.get('/api/events', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   try {
-    const rows = db.prepare('SELECT * FROM eventos ORDER BY criado_em DESC;').all();
-    res.json({
-      success: true,
-      total: rows.length,
-      eventos: rows
-    });
+    const events = await listEventsPg(req.query as Record<string, any>);
+    res.json(events);
+  } catch (error: any) {
+    console.error('Erro ao listar eventos:', error);
+    res.status(500).json({ error: error.message || 'Erro ao consultar eventos' });
+  }
+});
+
+app.get('/api/eventos', async (_req, res) => {
+  try {
+    const rows = await getRawEventosPg();
+    res.json({ success: true, total: rows.length, eventos: rows });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// 2. Inserir ou Atualizar Evento no SQLite (INSERT / UPDATE eventos) com geocodificação automática
-app.post('/api/events', async (req, res) => {
+app.post(['/api/events', '/api/eventos'], async (req, res) => {
   try {
     const body = req.body;
     const id = body.id || `evt-${Date.now()}`;
@@ -615,453 +1434,300 @@ app.post('/api/events', async (req, res) => {
     let latitude = body.latitude ? String(body.latitude) : null;
     let longitude = body.longitude ? String(body.longitude) : null;
 
-    // As coordenadas do evento são baseadas no endereço do evento.
-    // Se o cliente não enviou latitude/longitude, tenta resolver.
     if ((!latitude || !longitude) && (body.address || body.city || body.locationName)) {
       try {
         const geocoded = await fetchGeocodeCoordinates(body.address, body.city, body.state, body.locationName);
         if (geocoded) {
           latitude = geocoded.latitude;
           longitude = geocoded.longitude;
-          console.log(`[Geocoding] Endereço "${body.address || body.locationName}, ${body.city}" geocodificado com sucesso: Lat ${latitude}, Lon ${longitude}`);
         }
-      } catch (geoErr) {
-        console.warn('[Geocoding] Não foi possível geolocalizar automaticamente pelo endereço:', geoErr);
-      }
+      } catch {}
     }
 
-    // Resolver categoria_id se informado ou buscar pelo nome da categoria
-    let categoriaId: number | null = body.categoryId ? Number(body.categoryId) : null;
-    if (categoriaId) {
+    const catResolved = await resolveCategoryRecord(
+      body.category || 'Shows',
+      body.categoryId ? Number(body.categoryId) : null,
+      true
+    );
+
+    let finalVideoUrl = body.videoUrl || body.video_url || null;
+    let finalUrl = body.url || null;
+    let savedVideoDiskPath: string | null = null;
+
+    if (finalVideoUrl && finalVideoUrl.startsWith('data:video/')) {
       try {
-        const catCheck = db.prepare('SELECT id, nome FROM categorias WHERE id = ? LIMIT 1;').get(categoriaId) as any;
-        if (catCheck) {
-          categoriaId = catCheck.id;
-          if (!body.category) {
-            body.category = catCheck.nome;
-          }
-        } else {
-          categoriaId = null;
+        const matches = finalVideoUrl.match(/^data:video\/([a-zA-Z0-9\-\+]+);base64,(.+)$/);
+        const rawSubtype = (matches?.[1] || 'mp4').toLowerCase();
+        const ext = rawSubtype.includes('webm')
+          ? 'webm'
+          : rawSubtype.includes('quicktime') || rawSubtype.includes('mov')
+            ? 'mov'
+            : rawSubtype.includes('ogg')
+              ? 'ogg'
+              : 'mp4';
+        const base64Data = matches?.[2] || finalVideoUrl.split(',')[1];
+        if (base64Data) {
+          const fileName = `${id}.${ext}`;
+          const vidBuf = Buffer.from(base64Data, 'base64');
+          await saveMediaFilePg(fileName, vidBuf, getVideoMimeType(fileName, `video/${rawSubtype}`));
+          const filePath = path.join(UPLOADS_VIDEOS_DIR, fileName);
+          try {
+            fs.mkdirSync(UPLOADS_VIDEOS_DIR, { recursive: true });
+            fs.writeFileSync(filePath, vidBuf);
+            savedVideoDiskPath = filePath;
+          } catch {}
+          finalVideoUrl = `/uploads/videos/${fileName}`;
+          if (finalUrl?.startsWith('data:video/')) finalUrl = finalVideoUrl;
         }
-      } catch (err) {
-        console.warn('Erro ao checar categoria_id:', err);
+      } catch (vidErr) {
+        console.warn('Aviso ao persistir data:video/ no Cloud SQL:', vidErr);
       }
     }
 
-    if (!categoriaId && body.category) {
+    let finalImageUrl = body.imageUrl || body.image || body.imagem_url || body.imagem || '';
+    const rawIncomingBase64 =
+      typeof finalImageUrl === 'string' && finalImageUrl.startsWith('data:image/')
+        ? finalImageUrl
+        : typeof finalUrl === 'string' && finalUrl.startsWith('data:image/')
+          ? finalUrl
+          : '';
+
+    if (finalImageUrl && finalImageUrl.startsWith('data:image/')) {
       try {
-        // 1. Busca exata (case-insensitive)
-        let catRow = db.prepare('SELECT id, nome FROM categorias WHERE nome = ? COLLATE NOCASE LIMIT 1;').get(body.category) as any;
-        
-        // 2. Busca normalizada (ex: "Baile e Nostalgia" vs "Baile Nostalgia")
-        if (!catRow) {
-          const allCats = db.prepare('SELECT id, nome FROM categorias;').all() as any[];
-          const normalize = (txt: string) => (txt || '').toLowerCase().replace(/\s+e\s+/g, ' ').replace(/[^a-z0-9]/g, '').trim();
-          const target = normalize(body.category);
-          catRow = allCats.find((c) => normalize(c.nome) === target);
+        const matches = finalImageUrl.match(/^data:image\/([a-zA-Z0-9\-\+\.]+);base64,(.+)$/);
+        const rawFormat = matches?.[1]?.toLowerCase() || 'jpg';
+        const ext = rawFormat.includes('png')
+          ? 'png'
+          : rawFormat.includes('webp')
+            ? 'webp'
+            : rawFormat.includes('gif')
+              ? 'gif'
+              : rawFormat.includes('svg')
+                ? 'svg'
+                : rawFormat.includes('avif')
+                  ? 'avif'
+                  : 'jpg';
+        const base64Data = matches?.[2] || finalImageUrl.split(',')[1];
+        if (base64Data) {
+          const fileName = `${id}.${ext}`;
+          const buf = Buffer.from(base64Data, 'base64');
+          try {
+            fs.mkdirSync(UPLOADS_IMAGES_DIR, { recursive: true });
+            fs.writeFileSync(path.join(UPLOADS_IMAGES_DIR, fileName), buf);
+          } catch {}
+          finalImageUrl = rawIncomingBase64 || `data:image/${ext};base64,${base64Data}`;
         }
+      } catch {}
+    }
 
-        if (catRow) {
-          categoriaId = catRow.id;
-          body.category = catRow.nome;
-        } else {
-          // Se não existir, insere automaticamente na tabela de categorias
-          const insertCat = db.prepare('INSERT OR IGNORE INTO categorias (nome, ativa) VALUES (?, 1);');
-          const resCat = insertCat.run(body.category);
-          if (resCat.lastInsertRowid) {
-            categoriaId = Number(resCat.lastInsertRowid);
-          } else {
-            const recheck = db.prepare('SELECT id FROM categorias WHERE nome = ? COLLATE NOCASE LIMIT 1;').get(body.category) as any;
-            if (recheck) categoriaId = recheck.id;
-          }
+    if (!finalImageUrl && !rawIncomingBase64 && finalVideoUrl) {
+      if (finalVideoUrl.includes('youtu.be') || finalVideoUrl.includes('youtube.com')) {
+        const ytMatch = finalVideoUrl.match(
+          /(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|shorts\/|live\/))([\w-]{11})/i
+        );
+        if (ytMatch?.[1]) {
+          finalImageUrl = `https://img.youtube.com/vi/${ytMatch[1]}/hqdefault.jpg`;
         }
-      } catch (err) {
-        console.warn('Erro ao associar categoria_id:', err);
+      } else if (savedVideoDiskPath || finalVideoUrl.startsWith('/uploads/videos/')) {
+        try {
+          const videoDiskPath = savedVideoDiskPath || path.join(UPLOADS_VIDEOS_DIR, path.basename(finalVideoUrl));
+          const posterPath = path.join(UPLOADS_IMAGES_DIR, `${id}.jpg`);
+          execSync(`ffmpeg -ss 00:00:01 -i "${videoDiskPath}" -vframes 1 -q:v 2 "${posterPath}" -y`, {
+            timeout: 8000,
+            stdio: 'ignore',
+          });
+          if (fs.existsSync(posterPath) && fs.statSync(posterPath).size > 500) {
+            finalImageUrl = `data:image/jpeg;base64,${fs.readFileSync(posterPath).toString('base64')}`;
+          }
+        } catch {}
       }
     }
 
-    // 1. Salva de forma prioritária e direta na tabela autônoma e desvinculada 'eventos'
-    saveUserEvent(db, {
+    if (!finalUrl && finalImageUrl) {
+      finalUrl = rawIncomingBase64 || finalImageUrl;
+    }
+
+    const eventTitle = body.title || body.titulo || 'Evento';
+    const eventDesc = body.description || body.descricao || '';
+    const eventDate = body.date || body.data_evento || new Date().toISOString().split('T')[0];
+    const eventTime = body.time || body.horario || '19:00';
+    const eventEndTime = body.endTime || body.horario_fim || null;
+    const eventLocation = body.locationName || body.local_nome || 'Local a definir';
+    const eventAddress = body.address || body.endereco || '';
+    const eventCity = body.city || body.cidade || 'São Paulo';
+    const eventState = body.state || body.estado || 'SP';
+    const eventOrganizer = body.organizer || body.organizador || '';
+    const rawContact = body.contact || body.contato || '';
+    const eventContact = rawContact.startsWith('data:image/') ? '' : rawContact;
+    const eventPrice =
+      body.price !== undefined && body.price !== null && !isNaN(Number(body.price)) ? Number(body.price) : 0;
+    const eventIsFree = body.isFree ? 1 : 0;
+    const rawPriceDetails = body.priceDetails || body.detalhes_preco || '';
+    const eventPriceDetails = rawPriceDetails.includes('data:image/')
+      ? eventIsFree
+        ? 'Entrada Franca'
+        : 'Consulte valores'
+      : rawPriceDetails || (eventIsFree ? 'Entrada Franca' : '');
+    const eventAdvertiserId = body.advertiserId || body.anunciante_id || null;
+    const cleanLiberado =
+      body.liberado !== undefined && body.liberado !== null && String(body.liberado).trim() !== ''
+        ? String(body.liberado).trim().toUpperCase()
+        : 'N';
+    const cleanStatus = cleanLiberado === 'S' ? 'aprovado' : body.status || 'em_analise';
+    const cleanTicketLink = finalUrl && !finalUrl.startsWith('data:image/') ? finalUrl : finalImageUrl || '';
+
+    if (cleanLiberado !== 'S') {
+      await insertSingleUserQuarantinePg({
+        id,
+        origem: 'anunciante',
+        url_origem: cleanTicketLink,
+        titulo: eventTitle,
+        descricao: eventDesc,
+        categoria: catResolved.nome,
+        categoria_id: catResolved.id,
+        data_evento: eventDate,
+        horario: eventTime,
+        horario_fim: eventEndTime,
+        local_nome: eventLocation,
+        endereco: eventAddress,
+        cidade: eventCity,
+        estado: eventState,
+        latitude: latitude || null,
+        longitude: longitude || null,
+        imagem_url: finalImageUrl || '',
+        organizador: eventOrganizer,
+        preco: eventPrice,
+        is_gratuito: eventIsFree,
+        detalhes_preco: eventPriceDetails,
+        link_ingressos: cleanTicketLink,
+        status: 'quarentena',
+        criado_em: createdAt,
+        video_url: finalVideoUrl || null,
+        url: cleanTicketLink || null,
+        anunciante_id: eventAdvertiserId,
+      });
+    }
+
+    await upsertEventPg({
       id,
-      advertiserId: body.advertiserId || body.anunciante_id || null,
-      categoria_id: categoriaId,
-      category: body.category || 'Geral',
-      title: body.title,
-      description: body.description || '',
-      date: body.date,
-      time: body.time,
-      endTime: body.endTime || null,
-      locationName: body.locationName,
-      address: body.address,
-      city: body.city,
-      state: body.state,
+      anunciante_id: eventAdvertiserId,
+      categoria_id: catResolved.id,
+      categoria: catResolved.nome,
+      titulo: eventTitle,
+      descricao: eventDesc,
+      data_evento: eventDate,
+      horario: eventTime,
+      horario_fim: eventEndTime,
+      local_nome: eventLocation,
+      endereco: eventAddress,
+      cidade: eventCity,
+      estado: eventState,
       latitude,
       longitude,
-      liberado: body.liberado !== undefined && body.liberado !== null && body.liberado !== '' ? body.liberado : 'N',
-      isFree: body.isFree ? 1 : 0,
-      price: body.price || 0,
-      priceDetails: body.priceDetails || '',
-      imageUrl: body.imageUrl || '',
-      videoUrl: body.videoUrl || body.video_url || null,
-      url: body.url || body.videoUrl || body.video_url || null,
-      mediaType: body.mediaType || (body.videoUrl || body.video_url ? 'video' : 'image'),
-      organizer: body.organizer,
-      contact: body.contact || '',
+      liberado: cleanLiberado,
+      is_gratuito: eventIsFree,
+      preco: eventPrice,
+      detalhes_preco: eventPriceDetails,
+      imagem_url: rawIncomingBase64 || finalImageUrl || null,
+      video_url: finalVideoUrl || null,
+      url:
+        finalVideoUrl ||
+        rawIncomingBase64 ||
+        finalImageUrl ||
+        (finalUrl && !finalUrl.startsWith('data:image/') ? finalUrl : null) ||
+        null,
+      organizador: eventOrganizer,
+      contato: eventContact,
       tags: tagsString,
       destaque: body.featured ? 1 : 0,
-      status: body.status || 'em_analise',
-      createdAt
+      status: cleanStatus,
+      criado_em: createdAt,
     });
-    console.log(`[Database] Evento ${id} salvo com sucesso na tabela eventos!`);
 
-    // 2. Sincronização secundária com a tabela dedicada da categoria (em try/catch isolado para nunca impedir o salvamento em eventos)
-    try {
-      saveEventToCategoryTable(db, {
-        id,
-        advertiserId: body.advertiserId || body.anunciante_id || null,
-        categoria_id: categoriaId,
-        category: body.category || 'Geral',
-        title: body.title,
-        description: body.description || '',
-        date: body.date,
-        time: body.time,
-        endTime: body.endTime || null,
-        locationName: body.locationName,
-        address: body.address,
-        city: body.city,
-        state: body.state,
-        latitude,
-        longitude,
-        liberado: body.liberado !== undefined && body.liberado !== null && body.liberado !== '' ? body.liberado : 'N',
-        isFree: body.isFree ? 1 : 0,
-        price: body.price || 0,
-        priceDetails: body.priceDetails || '',
-        imageUrl: body.imageUrl || '',
-        videoUrl: body.videoUrl || body.video_url || null,
-        url: body.url || body.videoUrl || body.video_url || null,
-        mediaType: body.mediaType || (body.videoUrl || body.video_url ? 'video' : 'image'),
-        organizer: body.organizer,
-        contact: body.contact || '',
-        tags: tagsString,
-        featured: body.featured ? 1 : 0,
-        status: body.status || 'em_analise',
-        createdAt
-      });
-    } catch (errCat) {
-      console.warn('[Database] Aviso ao sincronizar com tabela dedicada de categoria:', errCat);
-    }
-
-    // Apaga registro da tabela quarentena (eventos_importados) imediatamente após a inclusão na tabela eventos
-    try {
-      db.prepare(`
-        DELETE FROM eventos_importados 
-        WHERE id = ? 
-           OR id = ?
-           OR (link_ingressos = ? AND link_ingressos != '') 
-           OR (url_origem = ? AND url_origem != '') 
-           OR (titulo = ? COLLATE NOCASE AND titulo != '');
-      `).run(id, (body as any).quarantineId || id, body.contact || '', body.contact || '', body.title || '');
-    } catch (cleanQuarErr) {
-      console.warn('Erro ao limpar quarentena após inclusão na tabela eventos:', cleanQuarErr);
-    }
-
-    const savedEvent = {
+    res.status(201).json({
       ...body,
       id,
-      categoryId: categoriaId ?? undefined,
+      categoryId: catResolved.id,
+      category: catResolved.nome,
+      title: eventTitle,
+      description: eventDesc,
+      date: eventDate,
+      time: eventTime,
+      endTime: eventEndTime,
+      locationName: eventLocation,
+      address: eventAddress,
+      city: eventCity,
+      state: eventState,
       latitude,
       longitude,
-      liberado: body.liberado !== undefined && body.liberado !== null && body.liberado !== '' ? body.liberado : 'N',
+      liberado: cleanLiberado,
+      status: cleanStatus,
+      videoUrl: finalVideoUrl || null,
+      imageUrl: rawIncomingBase64 || finalImageUrl || '',
+      url:
+        finalVideoUrl ||
+        rawIncomingBase64 ||
+        finalImageUrl ||
+        (finalUrl && !finalUrl.startsWith('data:image/') ? finalUrl : null) ||
+        null,
+      advertiserId: eventAdvertiserId,
       createdAt,
-      status: body.status || 'em_analise',
-    };
-
-    res.status(201).json(savedEvent);
+      price: eventPrice,
+      isFree: eventIsFree === 1,
+      priceDetails: eventPriceDetails,
+      organizer: eventOrganizer,
+      contact: eventContact,
+      mediaType: finalVideoUrl || body.mediaType === 'video' ? 'video' : 'image',
+    });
   } catch (error: any) {
-    console.error('Erro ao cadastrar/atualizar evento no SQLite:', error);
-    res.status(500).json({ error: error.message || 'Erro ao inserir no banco SQLite' });
+    console.error('Erro ao cadastrar/atualizar evento:', error);
+    res.status(500).json({ error: error.message || 'Erro ao gravar evento' });
   }
 });
 
-// Alias em português para compatibilidade total (/api/eventos -> /api/events)
-app.post('/api/eventos', (req, res, next) => {
-  req.url = '/api/events';
-  (app as any)._router.handle(req, res, next);
-});
-
-app.get('/api/eventos', (req, res, next) => {
-  req.url = '/api/events' + (req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '');
-  (app as any)._router.handle(req, res, next);
-});
-
-// Endpoint para liberar todos os eventos no SQLite (liberado = 'S')
-app.post('/api/events/liberar-todos', (req, res) => {
+app.post('/api/events/liberar-todos', async (req, res) => {
   try {
     const { category } = req.body || {};
-    let totalUpdated = 0;
-    if (category && category !== 'Todas') {
-      try {
-        const { tableName } = ensureCategoryTable(db, category);
-        const updRes = db.prepare(`UPDATE ${tableName} SET liberado = 'S', status = 'aprovado';`).run();
-        totalUpdated += updRes.changes;
-        db.prepare("UPDATE eventos SET liberado = 'S', status = 'aprovado' WHERE LOWER(TRIM(categoria)) = LOWER(TRIM(?));").run(category);
-      } catch {}
-    } else {
-      const catTables = db.prepare(`
-        SELECT name FROM sqlite_master 
-        WHERE type='table' AND name LIKE 'eventos_%' AND name != 'eventos_importados';
-      `).all() as { name: string }[];
-      for (const t of catTables) {
-        try {
-          const updRes = db.prepare(`UPDATE ${t.name} SET liberado = 'S', status = 'aprovado';`).run();
-          totalUpdated += updRes.changes;
-        } catch {}
-      }
-      try {
-        db.prepare("UPDATE eventos SET liberado = 'S', status = 'aprovado';").run();
-      } catch {}
-    }
-
-    // Transfere e libera todos os eventos que estão na Quarentena (eventos_importados)
-    // para a tabela da respectiva categoria com liberado = 'S', e exclui definitivamente da quarentena
-    let promotedFromQuarantine = 0;
-    try {
-      let quarSql = "SELECT * FROM eventos_importados WHERE 1=1";
-      const quarParams: any[] = [];
-      if (category && category !== 'Todas') {
-        quarSql += " AND (categoria = ? OR categoria_id IN (SELECT id FROM categorias WHERE nome = ?))";
-        quarParams.push(category, category);
-      }
-      const quarantineItems = db.prepare(quarSql).all(...quarParams) as any[];
-
-      for (const item of quarantineItems) {
-        let latitude = item.latitude;
-        let longitude = item.longitude;
-        if (!latitude || !longitude) {
-          if (item.cidade) {
-            const cityKey = normalizeCityKey(item.cidade);
-            const fallback = BRAZIL_CITY_COORDINATES[cityKey];
-            if (fallback) {
-              latitude = fallback.latitude;
-              longitude = fallback.longitude;
-            }
-          }
-        }
-
-        let categoriaId = item.categoria_id;
-        if (!categoriaId && item.categoria) {
-          try {
-            const cat = db.prepare('SELECT id, nome FROM categorias WHERE nome = ? COLLATE NOCASE LIMIT 1;').get(item.categoria) as any;
-            if (cat) categoriaId = cat.id;
-          } catch {}
-        }
-
-        let officialId = `evt-sympla-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-        try {
-          const existing = db.prepare('SELECT id FROM v_eventos_completos WHERE LOWER(TRIM(titulo)) = LOWER(TRIM(?)) AND data_evento = ? LIMIT 1;').get(item.titulo, item.data_evento) as any;
-          if (existing && existing.id) {
-            officialId = existing.id;
-          }
-        } catch {}
-
-        saveEventToCategoryTable(db, {
-          id: officialId,
-          advertiserId: null,
-          categoryId: categoriaId || null,
-          category: item.categoria || 'Show',
-          title: item.titulo,
-          description: item.descricao || '',
-          date: item.data_evento,
-          time: item.horario,
-          endTime: item.horario_fim || null,
-          locationName: item.local_nome,
-          address: item.endereco,
-          city: item.cidade,
-          state: item.estado,
-          latitude: latitude || null,
-          longitude: longitude || null,
-          liberado: 'S',
-          isFree: item.is_gratuito === 1,
-          price: item.preco || 0,
-          priceDetails: item.detalhes_preco || '',
-          imageUrl: item.imagem_url || '',
-          videoUrl: item.video_url || null,
-          url: item.url || item.video_url || null,
-          organizer: item.organizador || 'Produção',
-          contact: item.link_ingressos || '',
-          tags: JSON.stringify(['Sympla', item.categoria || 'Show']),
-          featured: 0,
-          status: 'aprovado',
-          createdAt: new Date().toISOString()
-        });
-
-        db.prepare('DELETE FROM eventos_importados WHERE id = ?;').run(item.id);
-        promotedFromQuarantine++;
-      }
-
-      // APAGAR TODOS OS REGISTROS DA QUARENTENA CONFORME SOLICITADO
-      db.prepare('DELETE FROM eventos_importados;').run();
-    } catch (cleanErr) {
-      console.warn('Erro ao limpar quarentena no liberar-todos:', cleanErr);
-    } finally {
-      // Garantia absoluta de esvaziamento total da tabela eventos_importados
-      try {
-        db.prepare('DELETE FROM eventos_importados;').run();
-      } catch (errFinally) {
-        console.error('Falha ao limpar quarentena no finally:', errFinally);
-      }
-    }
-
-    return res.json({
+    const { totalUpdated, promotedFromQuarantine } = await liberateAllEventsPg(category);
+    res.json({
       success: true,
       updatedCount: totalUpdated,
       promotedFromQuarantine,
-      message: `${totalUpdated} evento(s) liberado(s) com sucesso nas tabelas de categorias e quarentena esvaziada.`
+      message: `${totalUpdated} evento(s) liberado(s) com sucesso no Cloud SQL e quarentena esvaziada.`,
     });
   } catch (err: any) {
-    console.error('Erro ao liberar todos os eventos:', err);
-    return res.status(500).json({ error: err.message || 'Erro ao liberar todos os eventos' });
+    res.status(500).json({ error: err.message || 'Erro ao liberar todos os eventos' });
   }
 });
 
-// Atualizar Evento existente diretamente pelo ID (PUT /api/events/:id)
 app.put('/api/events/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const body = req.body;
 
-    // Se for atualização de status de liberação e/ou URL
-    if (body.liberado !== undefined && !body.title) {
-      const targetUrl = body.url || body.videoUrl;
-      const isVideo = body.urlType === 'video' || (targetUrl && (targetUrl.startsWith('data:video/') || targetUrl.includes('youtube') || targetUrl.includes('youtu.be') || targetUrl.includes('facebook') || targetUrl.includes('fb.') || targetUrl.includes('.mp4') || targetUrl.includes('.webm') || targetUrl.includes('vimeo')));
-
-      // Na tela liberar evento, gravar o campo URL no arquivo de lançamento quando for vídeo (ou imagem)
-      if (targetUrl) {
-        try {
-          updateEventUrlInAllTables(db, id, targetUrl, isVideo ? 'video' : body.urlType);
-        } catch (uErr) {
-          console.warn('Erro ao atualizar URL no PUT liberado:', uErr);
-        }
-      } else {
-        // Se a URL não veio explícita no body, busca da tabela eventos ou tabelas de categorias e sincroniza
-        try {
-          const row = db.prepare(`
-            SELECT video_url, url, imagem_url FROM eventos WHERE id = ?
-            UNION ALL
-            SELECT video_url, url, imagem_url FROM v_eventos_completos WHERE id = ?
-            LIMIT 1;
-          `).get(id, id) as any;
-          if (row && (row.video_url || row.url)) {
-            const vid = row.video_url || row.url;
-            const isVidRow = vid && (vid.startsWith('data:video/') || vid.includes('youtube') || vid.includes('youtu.be') || vid.includes('facebook') || vid.includes('fb.') || vid.includes('.mp4') || vid.includes('.webm') || vid.includes('vimeo'));
-            if (isVidRow) {
-              updateEventUrlInAllTables(db, id, vid, 'video');
-            }
-          }
-        } catch {}
-      }
-
-      let updated = false;
-      const catTables = db.prepare(`
-        SELECT name FROM sqlite_master 
-        WHERE type='table' AND name LIKE 'eventos_%' AND name != 'eventos_importados';
-      `).all() as { name: string }[];
-      for (const t of catTables) {
-        const info = db.prepare(`UPDATE ${t.name} SET liberado = ? WHERE id = ?;`).run(body.liberado, id);
-        if (info.changes > 0) {
-          updated = true;
-          break;
-        }
-      }
-      try {
-        db.prepare('UPDATE eventos SET liberado = ?, status = ? WHERE id = ?;').run(
-          body.liberado,
-          body.liberado === 'S' ? 'aprovado' : (body.status || 'em_analise'),
-          id
-        );
-      } catch {}
-
-      if (!updated) {
-        // Se o evento ainda não estava em nenhuma tabela de categoria, tenta copiar da tabela eventos
-        try {
-          const evtRow = db.prepare('SELECT * FROM eventos WHERE id = ? LIMIT 1;').get(id) as any;
-          if (evtRow) {
-            saveEventToCategoryTable(db, {
-              ...evtRow,
-              liberado: body.liberado,
-              videoUrl: evtRow.video_url,
-              url: evtRow.url || evtRow.video_url,
-            });
-            updated = true;
-          }
-        } catch {}
-      }
-
-      if (!updated) {
-        // Se ainda assim não encontrou, verifica se está na quarentena para importar com todos os dados
-        const quarItem = db.prepare('SELECT * FROM eventos_importados WHERE id = ?').get(id) as any;
-        if (quarItem) {
-          saveEventToCategoryTable(db, {
-            id: quarItem.id,
-            category: quarItem.categoria || 'Shows',
-            categoryId: quarItem.categoria_id || null,
-            title: quarItem.titulo || `Evento ${id}`,
-            description: quarItem.descricao || '',
-            date: quarItem.data_evento || '2026-09-20',
-            time: quarItem.horario || '20:00',
-            endTime: quarItem.horario_fim || null,
-            locationName: quarItem.local_nome || 'Local a definir',
-            address: quarItem.endereco || '',
-            city: quarItem.cidade || 'São Paulo',
-            state: quarItem.estado || 'SP',
-            latitude: quarItem.latitude || null,
-            longitude: quarItem.longitude || null,
-            liberado: body.liberado,
-            isFree: quarItem.is_gratuito || 0,
-            price: quarItem.preco || 0,
-            priceDetails: quarItem.detalhes_preco || '',
-            imageUrl: body.imageUrl || quarItem.imagem_url || '',
-            videoUrl: body.videoUrl || quarItem.video_url || null,
-            url: body.url || quarItem.url || quarItem.video_url || quarItem.imagem_url || null,
-            organizer: quarItem.organizador || '',
-            contact: quarItem.link_ingressos || '',
-            tags: ['Sympla', quarItem.categoria || 'Shows'],
-            featured: 0,
-            status: 'aprovado'
-          });
-        }
-      }
-
-      // Se liberado = 'S', apaga da quarentena para não ficar pendente
-      if (body.liberado === 'S') {
-        try {
-          const evtRow = db.prepare('SELECT titulo, contato FROM v_eventos_completos WHERE id = ? LIMIT 1;').get(id) as any;
-          if (evtRow) {
-            db.prepare(`
-              DELETE FROM eventos_importados 
-              WHERE id = ? 
-                 OR (link_ingressos = ? AND link_ingressos != '') 
-                 OR (url_origem = ? AND url_origem != '') 
-                 OR (titulo = ? COLLATE NOCASE AND titulo != '');
-            `).run(id, evtRow.contato || '', evtRow.contato || '', evtRow.titulo || '');
-          } else {
-            db.prepare('DELETE FROM eventos_importados WHERE id = ?;').run(id);
-          }
-        } catch (quarErr) {
-          console.warn('Erro ao remover da quarentena no PUT /api/events/:id:', quarErr);
-        }
-      }
-
-      return res.json({
-        success: true,
+    if (body.liberado === 'S' && !body.title) {
+      const approvedEvent = await approveEventRecordPg(
         id,
-        liberado: body.liberado,
-      });
+        {
+          category: body.category,
+          categoryId: body.categoryId ? Number(body.categoryId) : undefined,
+          videoUrl: body.videoUrl,
+          url: body.url,
+          imageUrl: body.imageUrl,
+          urlType: body.urlType,
+        },
+        fetchGeocodeCoordinates
+      );
+      return res.json({ success: true, id, liberado: 'S', event: approvedEvent });
+    }
+
+    if (body.liberado === 'N' && !body.title) {
+      await setEventLiberadoNPg(id, body.status || 'em_analise');
+      return res.json({ success: true, id, liberado: 'N' });
     }
 
     let latitude = body.latitude || null;
     let longitude = body.longitude || null;
-
     if (!latitude || !longitude) {
       const geocoded = await fetchGeocodeCoordinates(body.address, body.city, body.state);
       if (geocoded) {
@@ -1070,132 +1736,53 @@ app.put('/api/events/:id', async (req, res) => {
       }
     }
 
-    let categoriaId: number | null = body.categoryId ? Number(body.categoryId) : null;
-    if (categoriaId) {
-      const check = db.prepare('SELECT id, nome FROM categorias WHERE id = ? LIMIT 1;').get(categoriaId) as any;
-      if (check && !body.category) body.category = check.nome;
-      if (!check) categoriaId = null;
-    }
+    const catResolved = await resolveCategoryRecord(
+      body.category || 'Shows',
+      body.categoryId ? Number(body.categoryId) : null,
+      true
+    );
 
-    if (!categoriaId && body.category) {
-      try {
-        let catRow = db.prepare('SELECT id, nome FROM categorias WHERE nome = ? COLLATE NOCASE LIMIT 1;').get(body.category) as any;
-        if (!catRow) {
-          const allCats = db.prepare('SELECT id, nome FROM categorias;').all() as any[];
-          const normalize = (txt: string) => (txt || '').toLowerCase().replace(/\s+e\s+/g, ' ').replace(/[^a-z0-9]/g, '').trim();
-          catRow = allCats.find((c) => normalize(c.nome) === normalize(body.category));
-        }
-        if (catRow) {
-          categoriaId = catRow.id;
-          body.category = catRow.nome;
-        }
-      } catch (err) {
-        console.warn('Erro ao associar categoria_id no PUT:', err);
-      }
-    }
-
-    const { tableName: activeCatTable } = saveEventToCategoryTable(db, {
+    await upsertEventPg({
       id,
-      advertiserId: body.advertiserId || null,
-      categoryId: categoriaId,
-      category: body.category || 'Shows',
-      title: body.title,
-      description: body.description || '',
-      date: body.date,
-      time: body.time,
-      endTime: body.endTime || null,
-      locationName: body.locationName,
-      address: body.address,
-      city: body.city,
-      state: body.state,
+      anunciante_id: body.advertiserId || null,
+      categoria_id: catResolved.id,
+      categoria: catResolved.nome,
+      titulo: body.title,
+      descricao: body.description || '',
+      data_evento: body.date,
+      horario: body.time,
+      horario_fim: body.endTime || null,
+      local_nome: body.locationName,
+      endereco: body.address,
+      cidade: body.city,
+      estado: body.state,
       latitude,
       longitude,
       liberado: body.liberado || 'S',
-      isFree: body.isFree ? 1 : 0,
-      price: body.price || 0,
-      priceDetails: body.priceDetails || '',
-      imageUrl: body.imageUrl || '',
-      videoUrl: body.videoUrl || body.video_url || null,
+      is_gratuito: body.isFree ? 1 : 0,
+      preco: body.price || 0,
+      detalhes_preco: body.priceDetails || '',
+      imagem_url: body.imageUrl || null,
+      video_url: body.videoUrl || body.video_url || null,
       url: body.url || body.videoUrl || body.imageUrl || null,
-      organizer: body.organizer,
-      contact: body.contact || '',
-      tags: body.tags || [],
-      featured: body.featured ? 1 : 0,
-      status: body.status || 'aprovado'
+      organizador: body.organizer,
+      contato: body.contact || '',
+      tags: typeof body.tags === 'string' ? body.tags : JSON.stringify(body.tags || []),
+      destaque: body.featured ? 1 : 0,
+      status: body.status || 'aprovado',
+      criado_em: body.createdAt || new Date().toISOString(),
     });
 
-    // Se o evento mudou de categoria, remove de outras tabelas para não duplicar
-    try {
-      const otherTables = db.prepare(`
-        SELECT name FROM sqlite_master 
-        WHERE type='table' AND name LIKE 'eventos_%' AND name != 'eventos_importados' AND name != ?;
-      `).all(activeCatTable) as { name: string }[];
-      for (const ot of otherTables) {
-        db.prepare(`DELETE FROM ${ot.name} WHERE id = ?;`).run(id);
-      }
-    } catch {}
-
-    // Se liberado = 'S', apaga da quarentena para garantir que não permaneça listado
     if ((body.liberado || 'S') === 'S') {
-      try {
-        db.prepare(`
-          DELETE FROM eventos_importados 
-          WHERE id = ? 
-             OR (link_ingressos = ? AND link_ingressos != '') 
-             OR (url_origem = ? AND url_origem != '') 
-             OR (LOWER(TRIM(titulo)) = LOWER(TRIM(?)) AND titulo != '');
-        `).run(id, body.contact || '', body.contact || '', body.title || '');
-      } catch (cleanQuarErr) {
-        console.warn('Erro ao limpar quarentena no PUT /api/events/:id:', cleanQuarErr);
-      }
+      await deleteImportedEventPg(id, true).catch(() => {});
     }
 
-    try {
-      saveUserEvent(db, {
-        id,
-        anunciante_id: body.advertiserId || null,
-        categoria_id: categoriaId,
-        categoria: body.category,
-        titulo: body.title,
-        descricao: body.description || '',
-        data_evento: body.date,
-        horario: body.time,
-        horario_fim: body.endTime || null,
-        local_nome: body.locationName,
-        endereco: body.address,
-        cidade: body.city,
-        estado: body.state,
-        latitude,
-        longitude,
-        liberado: body.liberado || 'S',
-        is_gratuito: body.isFree ? 1 : 0,
-        preco: body.price || 0,
-        detalhes_preco: body.priceDetails || '',
-        imagem_url: body.imageUrl || '',
-        video_url: body.videoUrl || body.video_url || null,
-        url: body.url || body.videoUrl || body.imageUrl || null,
-        organizador: body.organizer,
-        contato: body.contact || '',
-        tags: typeof body.tags === 'string' ? body.tags : JSON.stringify(body.tags || []),
-        destaque: body.featured ? 1 : 0,
-        status: body.status || 'aprovado',
-        criado_em: body.createdAt || new Date().toISOString()
-      });
-    } catch {}
-
-    res.json({
-      success: true,
-      id,
-      latitude,
-      longitude,
-      liberado: body.liberado || 'S',
-    });
+    res.json({ success: true, id, latitude, longitude, liberado: body.liberado || 'S' });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Atualizar apenas a Categoria de um Evento (conferência na tela de análise/liberação)
 app.patch('/api/events/:id/category', async (req, res) => {
   try {
     const { id } = req.params;
@@ -1203,274 +1790,169 @@ app.patch('/api/events/:id/category', async (req, res) => {
     if (!category || typeof category !== 'string') {
       return res.status(400).json({ error: 'Categoria não informada' });
     }
-
-    const cleanCat = category.trim();
-
-    // 1. Verifica se o evento está na quarentena
-    const quarItem = db.prepare('SELECT * FROM eventos_importados WHERE id = ?;').get(id) as any;
-    if (quarItem) {
-      let targetCatId = categoryId ? Number(categoryId) : null;
-      if (!targetCatId) {
-        const catRow = db.prepare('SELECT id, nome FROM categorias WHERE nome = ? COLLATE NOCASE LIMIT 1;').get(cleanCat) as any;
-        if (catRow) targetCatId = catRow.id;
-      }
-      db.prepare('UPDATE eventos_importados SET categoria = ?, categoria_id = ? WHERE id = ?;').run(cleanCat, targetCatId, id);
-      return res.json({ success: true, id, category: cleanCat, isQuarantine: true });
-    }
-
-    // 2. Se está nas tabelas oficiais de categoria
-    const existing = db.prepare('SELECT * FROM v_eventos_completos WHERE id = ? LIMIT 1;').get(id) as any;
-    if (!existing) {
+    const result = await updateEventCategoryPg(id, category.trim(), categoryId ? Number(categoryId) : undefined);
+    if (!result.found) {
       return res.status(404).json({ error: 'Evento não encontrado' });
     }
-
-    let targetCatId = categoryId ? Number(categoryId) : existing.categoria_id;
-    if (!targetCatId) {
-      const catRow = db.prepare('SELECT id, nome FROM categorias WHERE nome = ? COLLATE NOCASE LIMIT 1;').get(cleanCat) as any;
-      if (catRow) targetCatId = catRow.id;
-    }
-
-    const { tableName: activeCatTable } = saveEventToCategoryTable(db, {
-      id: existing.id,
-      anunciante_id: existing.anunciante_id || null,
-      categoria_id: targetCatId || null,
-      categoria: cleanCat,
-      titulo: existing.titulo,
-      descricao: existing.descricao || '',
-      data_evento: existing.data_evento,
-      horario: existing.horario,
-      horario_fim: existing.horario_fim || null,
-      local_nome: existing.local_nome,
-      endereco: existing.endereco,
-      cidade: existing.cidade,
-      estado: existing.estado,
-      latitude: existing.latitude,
-      longitude: existing.longitude,
-      liberado: existing.liberado || 'S',
-      is_gratuito: existing.is_gratuito === 1,
-      preco: existing.preco || 0,
-      detalhes_preco: existing.detalhes_preco || '',
-      imagem_url: existing.imagem_url || '',
-      video_url: existing.video_url || null,
-      url: existing.url || existing.video_url || null,
-      organizador: existing.organizador || '',
-      contato: existing.contato || '',
-      tags: existing.tags || [],
-      destaque: existing.destaque === 1,
-      status: existing.status || 'aprovado'
-    });
-
-    // Remove das outras tabelas de categoria para evitar duplicidades
-    try {
-      const otherTables = db.prepare(`
-        SELECT name FROM sqlite_master 
-        WHERE type='table' AND name LIKE 'eventos_%' AND name != 'eventos_importados' AND name != ?;
-      `).all(activeCatTable) as { name: string }[];
-      for (const ot of otherTables) {
-        db.prepare(`DELETE FROM ${ot.name} WHERE id = ?;`).run(id);
-      }
-    } catch (cleanErr) {
-      console.warn('Erro ao limpar tabelas antigas após mudança de categoria:', cleanErr);
-    }
-
-    // Sincroniza atualização no Firestore
-    try {
-      const { db: fDb } = await import('./src/lib/firebase.js');
-      const { doc, updateDoc } = await import('firebase/firestore');
-      await updateDoc(doc(fDb, 'eventos', id), { category: cleanCat, categoria: cleanCat });
-    } catch {}
-
     res.json({
       success: true,
       id,
-      category: cleanCat,
-      tableName: activeCatTable
+      category: result.category,
+      isQuarantine: result.isQuarantine,
+      tableName: 'eventos',
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Atualizar o campo URL de um Evento (conferência na tela de análise/liberação nas tabelas correspondentes)
 app.patch('/api/events/:id/url', async (req, res) => {
   try {
     const { id } = req.params;
     const { url, urlType, videoUrl, imageUrl } = req.body;
-    const targetUrl = url !== undefined && url !== null ? url : (videoUrl || imageUrl);
+    const targetUrl = url !== undefined && url !== null ? url : videoUrl || imageUrl;
     if (targetUrl === undefined || targetUrl === null) {
       return res.status(400).json({ error: 'Campo URL não informado' });
     }
-
-    const result = updateEventUrlInAllTables(db, id, String(targetUrl).trim(), urlType);
-
-    // Sincroniza atualização no Firestore se disponível
-    try {
-      const { db: fDb } = await import('./src/lib/firebase.js');
-      const { doc, updateDoc } = await import('firebase/firestore');
-      const firestoreUpdate: any = { url: result.url };
-      if (result.videoUrl) {
-        firestoreUpdate.videoUrl = result.videoUrl;
-        firestoreUpdate.mediaType = 'video';
-      }
-      if (result.imageUrl) {
-        firestoreUpdate.imageUrl = result.imageUrl;
-      }
-      await updateDoc(doc(fDb, 'eventos', id), firestoreUpdate);
-    } catch {}
-
+    const result = await updateEventUrlPg(
+      id,
+      String(targetUrl).trim(),
+      urlType,
+      imageUrl ? String(imageUrl).trim() : null
+    );
     res.json({
       success: true,
       ...result,
-      message: `Campo URL atualizado com sucesso nas tabelas correspondentes: ${result.updatedTables.join(', ')}`
+      message: `Campo URL atualizado com sucesso em: ${result.updatedTables.join(', ')}`,
     });
   } catch (error: any) {
-    console.error('Erro ao atualizar campo URL:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// 3. Excluir Evento (unitário ou todos)
-app.delete('/api/events', (req, res) => {
+app.delete('/api/events', async (_req, res) => {
   try {
-    const delFav = db.prepare('DELETE FROM favoritos;').run();
-    const deletedCount = deleteEventsFromCategoryTables(db);
-    res.json({ success: true, changes: deletedCount, favoritesDeleted: delFav.changes });
+    const result = await deleteAllEventsPg();
+    res.json({ success: true, ...result });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.post('/api/events/batch-delete', (req, res) => {
+app.post('/api/events/batch-delete', async (req, res) => {
   try {
     const { ids, scope, category } = req.body;
-    let deletedCount = 0;
-
-    if (Array.isArray(ids) && ids.length > 0) {
-      const placeholders = ids.map(() => '?').join(',');
-      try {
-        db.prepare(`DELETE FROM favoritos WHERE evento_id IN (${placeholders});`).run(...ids);
-      } catch {}
-      deletedCount = deleteEventsFromCategoryTables(db, { ids });
-    } else if (scope === 'pending') {
-      deletedCount = deleteEventsFromCategoryTables(db, { category, pendingOnly: true });
-    } else if (scope === 'all') {
-      try {
-        db.prepare('DELETE FROM favoritos;').run();
-      } catch {}
-      deletedCount = deleteEventsFromCategoryTables(db);
-    }
-
-    res.json({ success: true, count: deletedCount });
+    const count = await deleteEventsBatchPg({ ids, scope, category });
+    res.json({ success: true, count });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.delete('/api/events/:id', (req, res) => {
+app.delete('/api/events/:id', async (req, res) => {
   try {
-    const { id } = req.params;
-    try {
-      db.prepare('DELETE FROM favoritos WHERE evento_id = ?;').run(id);
-    } catch {}
-    const deletedCount = deleteEventFromCategoryTables(db, id);
-    res.json({ success: true, changes: deletedCount });
+    const changes = await deleteEventByIdPg(req.params.id);
+    res.json({ success: true, changes });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Sincronização em Lote de Eventos (Firestore/Client -> SQLite)
-app.post('/api/events/sync-batch', (req, res) => {
+app.post('/api/events/sync-batch', async (req, res) => {
   try {
-    const { events } = req.body;
-    if (!Array.isArray(events) || events.length === 0) {
+    const { events: items } = req.body;
+    if (!Array.isArray(items) || items.length === 0) {
       return res.json({ success: true, count: 0 });
     }
-
+    const deletedSet = new Set(await getDeletedEventIdsPg());
     let totalSynced = 0;
-    for (const item of events) {
-      if (!item || !item.id) continue;
-
-      let incomingVid = item.videoUrl || item.video_url || null;
-      let incomingUrl = item.url || item.videoUrl || item.video_url || null;
-
-      if (incomingVid === '[video_local_sqlite]') incomingVid = null;
-      if (incomingUrl === '[video_local_sqlite]') incomingUrl = null;
-
-      // Se o vídeo não veio ou veio nulo, preserva o que já existe no SQLite
-      if (!incomingVid || !incomingUrl) {
-        try {
-          const rowEx = db.prepare('SELECT video_url, url FROM eventos WHERE id = ? LIMIT 1;').get(item.id) as any;
-          if (rowEx) {
-            const exVid = (rowEx.video_url && rowEx.video_url !== '[video_local_sqlite]') ? rowEx.video_url : null;
-            const exUrl = (rowEx.url && rowEx.url !== '[video_local_sqlite]') ? rowEx.url : null;
-            if (!incomingVid && exVid) incomingVid = exVid;
-            if (!incomingUrl && (exUrl || exVid)) incomingUrl = exUrl || exVid;
-          }
-        } catch {}
-      }
-
-      const eventPayload = {
+    for (const item of items) {
+      if (!item?.id || deletedSet.has(item.id)) continue;
+      const cat = await resolveCategoryRecord(item.category || 'Shows', item.categoryId, false);
+      await upsertEventPg({
         id: item.id,
-        advertiserId: item.advertiserId || null,
-        categoryId: item.categoryId || null,
-        category: item.category || 'Shows',
-        title: item.title || 'Evento',
-        description: item.description || '',
-        date: item.date || '2026-09-20',
-        time: item.time || '20:00',
-        endTime: item.endTime || null,
-        locationName: item.locationName || 'Local',
-        address: item.address || '',
-        city: item.city || 'São Paulo',
-        state: item.state || 'SP',
+        anunciante_id: item.advertiserId || null,
+        categoria_id: cat.id,
+        categoria: cat.nome,
+        titulo: item.title || 'Evento',
+        descricao: item.description || '',
+        data_evento: item.date || '2026-09-20',
+        horario: item.time || '20:00',
+        horario_fim: item.endTime || null,
+        local_nome: item.locationName || 'Local',
+        endereco: item.address || '',
+        cidade: item.city || 'São Paulo',
+        estado: item.state || 'SP',
         latitude: item.latitude ? String(item.latitude) : null,
         longitude: item.longitude ? String(item.longitude) : null,
-        liberado: item.liberado || 'S',
-        isFree: item.isFree ? 1 : 0,
-        price: item.price || 0,
-        priceDetails: item.priceDetails || '',
-        imageUrl: item.imageUrl || '',
-        videoUrl: incomingVid,
-        url: incomingUrl || incomingVid,
-        mediaType: item.mediaType || (incomingVid ? 'video' : 'image'),
-        organizer: item.organizer || '',
-        contact: item.contact || '',
-        tags: item.tags || [],
-        featured: item.featured ? 1 : 0,
-        status: item.status || 'aprovado',
-        createdAt: item.createdAt || new Date().toISOString()
-      };
-
-      saveEventToCategoryTable(db, eventPayload);
-      try {
-        saveUserEvent(db, eventPayload);
-      } catch {}
+        liberado: String(item.liberado || 'N').toUpperCase(),
+        is_gratuito: item.isFree ? 1 : 0,
+        preco: item.price || 0,
+        detalhes_preco: item.priceDetails || '',
+        imagem_url: item.imageUrl || null,
+        video_url: item.videoUrl || null,
+        url: item.url || item.videoUrl || item.imageUrl || null,
+        organizador: item.organizer || '',
+        contato: item.contact || '',
+        tags: JSON.stringify(item.tags || []),
+        destaque: item.featured ? 1 : 0,
+        status: item.status || (item.liberado === 'S' ? 'aprovado' : 'em_analise'),
+        criado_em: item.createdAt || new Date().toISOString(),
+      });
       totalSynced++;
     }
-
-    // Apaga da quarentena eventos que foram sincronizados e incluídos nas tabelas de categorias
-    try {
-      db.prepare(`
-        DELETE FROM eventos_importados 
-        WHERE titulo IN (SELECT titulo FROM v_eventos_completos)
-           OR (link_ingressos IN (SELECT contato FROM v_eventos_completos WHERE contato != '') AND link_ingressos != '')
-           OR (url_origem IN (SELECT contato FROM v_eventos_completos WHERE contato != '') AND url_origem != '');
-      `).run();
-    } catch (cleanSyncErr) {
-      console.warn('Erro ao limpar quarentena no sync-batch:', cleanSyncErr);
-    }
-
     res.json({ success: true, count: totalSynced });
   } catch (error: any) {
-    console.error('Erro ao sincronizar eventos em lote:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ==================== ROTAS DE IMPORTAÇÃO SYMPLA & QUARENTENA ====================
+app.get('/api/events/deleted-ids', async (_req, res) => {
+  const deletedIds = await getDeletedEventIdsPg();
+  res.json({ deletedIds });
+});
 
-// 1. Parser da URL da Sympla (extrai dados em tempo real)
+app.post('/api/ignored-words/sync-batch', async (req, res) => {
+  try {
+    const { words } = req.body;
+    if (!Array.isArray(words)) {
+      return res.status(400).json({ error: 'Array "words" é obrigatório' });
+    }
+    const count = await syncIgnoredWordsBatch(words);
+    res.json({ success: true, count });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/advertisers/sync-batch', async (req, res) => {
+  try {
+    const { advertisers: list } = req.body;
+    if (!Array.isArray(list)) {
+      return res.status(400).json({ error: 'Array "advertisers" é obrigatório' });
+    }
+    for (const adv of list) {
+      if (!adv?.email) continue;
+      await upsertAdvertiserRecord({
+        id: adv.id,
+        name: adv.name,
+        email: adv.email,
+        phone: adv.phone,
+        cpf: adv.cpf,
+        city: adv.city,
+        state: adv.state,
+        verified: Boolean(adv.verified),
+        createdAt: adv.createdAt,
+      });
+    }
+    res.json({ success: true, count: list.length });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== QUARENTENA & IMPORTADORES (SYMPLA / TICKET360) ====================
+
 app.post('/api/sympla/parse', async (req, res) => {
   try {
     const { url } = req.body;
@@ -1480,622 +1962,133 @@ app.post('/api/sympla/parse', async (req, res) => {
     const parsed = await parseSymplaEventUrl(url);
     res.json({ success: true, data: parsed });
   } catch (error: any) {
-    console.error('Erro ao processar página da Sympla:', error);
     res.status(500).json({ error: error.message || 'Falha ao buscar dados do evento' });
   }
 });
 
-// 2. Listar Eventos Importados na Quarentena
-app.get('/api/imported-events', (req, res) => {
+app.get('/api/imported-events', async (req, res) => {
   try {
-    // Purga automaticamente da quarentena eventos que já foram aprovados ou incluídos na tabela oficial de eventos
-    try {
-      db.prepare(`
-        DELETE FROM eventos_importados 
-        WHERE status = 'aprovado'
-           OR id IN (SELECT id FROM v_eventos_completos)
-           OR LOWER(TRIM(titulo)) IN (SELECT LOWER(TRIM(titulo)) FROM v_eventos_completos WHERE titulo != '')
-           OR (link_ingressos IN (SELECT contato FROM v_eventos_completos WHERE contato != '') AND link_ingressos != '')
-           OR (url_origem IN (SELECT contato FROM v_eventos_completos WHERE contato != '') AND url_origem != '');
-      `).run();
-    } catch (cleanErr) {
-      console.warn('Aviso na limpeza automática de quarentena:', cleanErr);
-    }
-
     const status = req.query.status ? String(req.query.status) : 'quarentena';
-    let sql = 'SELECT * FROM eventos_importados WHERE 1=1';
-    const params: any[] = [];
-    if (status !== 'todos') {
-      sql += ' AND status = ?';
-      params.push(status);
-    }
-    // Garante que nenhum evento já presente na lista unificada de eventos seja retornado na quarentena
-    sql += `
-      AND id NOT IN (SELECT id FROM v_eventos_completos)
-      AND LOWER(TRIM(titulo)) NOT IN (SELECT LOWER(TRIM(titulo)) FROM v_eventos_completos WHERE titulo != '')
-      ORDER BY criado_em DESC
-    `;
-    const rows = db.prepare(sql).all(...params) as any[];
-
-    const items = rows.map((r) => ({
-      id: r.id,
-      origem: r.origem,
-      urlOrigem: r.url_origem,
-      title: r.titulo,
-      description: r.descricao || '',
-      category: r.categoria,
-      categoryId: r.categoria_id,
-      date: r.data_evento,
-      time: r.horario,
-      endTime: r.horario_fim || undefined,
-      locationName: r.local_nome,
-      address: r.endereco,
-      city: r.cidade,
-      state: r.estado,
-      latitude: r.latitude || undefined,
-      longitude: r.longitude || undefined,
-      imageUrl: r.imagem_url,
-      videoUrl: r.video_url || (r.url && (r.url.includes('youtube') || r.url.includes('fb.') || r.url.includes('.mp4') || r.url.startsWith('data:video/')) ? r.url : undefined),
-      url: r.url || r.video_url || r.imagem_url || r.url_origem || undefined,
-      price: r.preco,
-      isGratuito: r.is_gratuito === 1,
-      ticketUrl: r.link_ingressos,
-      status: r.status,
-      createdAt: r.criado_em,
-    }));
+    const origem = req.query.origem ? String(req.query.origem) : undefined;
+    const items = await listImportedEventsPg(status, origem);
     res.json(items);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// 3. Salvar Evento na Quarentena (Unitário ou em lote com verificação anti-duplicidade)
-app.post('/api/imported-events', (req, res) => {
+app.post('/api/imported-events', async (req, res) => {
   try {
-    const body = req.body;
-    const list = Array.isArray(body) ? body : [body];
-    const insertStmt = db.prepare(`
-      INSERT INTO eventos_importados (
-        id, origem, url_origem, titulo, descricao, categoria, categoria_id,
-        data_evento, horario, horario_fim, local_nome, endereco, cidade, estado,
-        latitude, longitude, imagem_url, organizador, preco, is_gratuito,
-        detalhes_preco, link_ingressos, status, criado_em
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        titulo = excluded.titulo,
-        descricao = excluded.descricao,
-        categoria = excluded.categoria,
-        data_evento = excluded.data_evento,
-        horario = excluded.horario,
-        horario_fim = excluded.horario_fim,
-        local_nome = excluded.local_nome,
-        endereco = excluded.endereco,
-        cidade = excluded.cidade,
-        estado = excluded.estado,
-        imagem_url = excluded.imagem_url,
-        link_ingressos = excluded.link_ingressos;
-    `);
-
-    let count = 0;
-    let skippedCount = 0;
-    const createdItems: any[] = [];
-    for (const item of list) {
-      const ticketUrl = item.ticketUrl || item.linkIngressos || item.urlOrigem || '';
-      const title = item.title || item.titulo || '';
-
-      // Verifica se já existe em eventos_importados ou no app oficial
-      const existingImported = db.prepare(
-        "SELECT id, status FROM eventos_importados WHERE ((link_ingressos = ? AND link_ingressos != '') OR (url_origem = ? AND url_origem != '') OR (titulo = ? COLLATE NOCASE AND titulo != '')) LIMIT 1;"
-      ).get(ticketUrl, ticketUrl, title) as any;
-
-      const existingOfficial = db.prepare(
-        "SELECT id FROM v_eventos_completos WHERE ((contato = ? AND contato != '') OR (titulo = ? COLLATE NOCASE AND titulo != '')) LIMIT 1;"
-      ).get(ticketUrl, title) as any;
-
-      if (existingImported || existingOfficial) {
-        skippedCount++;
-        continue;
-      }
-
-      const id = item.id || `imp-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-      insertStmt.run(
-        id,
-        item.origem || 'sympla',
-        item.urlOrigem || item.ticketUrl || '',
-        item.title || item.titulo || 'Evento Sympla',
-        item.description || item.descricao || '',
-        item.category || item.categoria || 'Shows',
-        item.categoryId || null,
-        item.date || item.dataEvento || new Date().toISOString().split('T')[0],
-        item.time || item.horario || '20:00',
-        item.endTime || item.horarioFim || null,
-        item.locationName || item.localNome || 'Local a Confirmar',
-        item.address || item.endereco || 'Endereço a Confirmar',
-        item.city || item.cidade || 'São Paulo',
-        item.state || item.estado || 'SP',
-        item.latitude || null,
-        item.longitude || null,
-        item.imageUrl || item.imagemUrl || '',
-        item.organizer || item.organizador || 'Produção',
-        item.price !== undefined && item.price !== null ? Number(item.price) : 0,
-        item.isGratuito ? 1 : 0,
-        item.priceDetails || '',
-        item.ticketUrl || item.linkIngressos || item.urlOrigem || '',
-        'quarentena',
-        new Date().toISOString()
-      );
-      count++;
-      createdItems.push({ id, ...item, status: 'quarentena' });
-    }
-
+    const list = Array.isArray(req.body) ? req.body : [req.body];
+    const result = await upsertImportedEventsPg(list, { idPrefix: 'imp' });
     res.status(201).json({
       success: true,
-      count,
-      skippedCount,
-      items: createdItems,
-      message: count > 0 
-        ? `${count} evento(s) adicionado(s) à Quarentena.`
-        : 'Este evento já havia sido importado ou já existe no sistema!'
+      count: result.addedCount,
+      skippedCount: result.skippedCount,
+      items: result.insertedItems,
+      message:
+        result.addedCount > 0
+          ? `${result.addedCount} evento(s) adicionado(s) à Quarentena.`
+          : 'Este evento já havia sido importado ou já existe no sistema!',
     });
   } catch (error: any) {
-    console.error('Erro ao inserir na quarentena:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// 4. Atualizar Evento na Quarentena (Edição pré-aprovação)
-app.put('/api/imported-events/:id', (req, res) => {
+app.put('/api/imported-events/:id', async (req, res) => {
   try {
-    const { id } = req.params;
-    const body = req.body;
-    const stmt = db.prepare(`
-      UPDATE eventos_importados SET
-        titulo = COALESCE(?, titulo),
-        descricao = COALESCE(?, descricao),
-        categoria = COALESCE(?, categoria),
-        data_evento = COALESCE(?, data_evento),
-        horario = COALESCE(?, horario),
-        horario_fim = COALESCE(?, horario_fim),
-        local_nome = COALESCE(?, local_nome),
-        endereco = COALESCE(?, endereco),
-        cidade = COALESCE(?, cidade),
-        estado = COALESCE(?, estado),
-        imagem_url = COALESCE(?, imagem_url),
-        organizador = COALESCE(?, organizador),
-        preco = COALESCE(?, preco),
-        is_gratuito = COALESCE(?, is_gratuito),
-        link_ingressos = COALESCE(?, link_ingressos)
-      WHERE id = ?;
-    `);
-    stmt.run(
-      body.title,
-      body.description,
-      body.category,
-      body.date,
-      body.time,
-      body.endTime,
-      body.locationName,
-      body.address,
-      body.city,
-      body.state,
-      body.imageUrl,
-      body.organizer,
-      body.price !== undefined ? Number(body.price) : null,
-      body.isGratuito !== undefined ? (body.isGratuito ? 1 : 0) : null,
-      body.ticketUrl,
-      id
-    );
-    res.json({ success: true, id });
+    await updateImportedEventPg(req.params.id, req.body);
+    res.json({ success: true, id: req.params.id });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-
-
-// 4b. Apagar TODOS os Registros da Quarentena
-app.post('/api/imported-events/clear', (req, res) => {
+app.post('/api/imported-events/clear', async (_req, res) => {
   try {
-    const result = db.prepare('DELETE FROM eventos_importados;').run();
-    res.json({ success: true, count: result.changes, message: 'Todos os registros da quarentena foram apagados com sucesso.' });
+    const count = await clearImportedEventsPg();
+    res.json({ success: true, count, message: 'Todos os registros da quarentena foram apagados com sucesso.' });
   } catch (error: any) {
-    console.error('Erro ao apagar todos os registros da quarentena:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-app.delete('/api/imported-events', (req, res) => {
+app.delete('/api/imported-events', async (_req, res) => {
   try {
-    const result = db.prepare('DELETE FROM eventos_importados;').run();
-    res.json({ success: true, count: result.changes, message: 'Todos os registros da quarentena foram apagados com sucesso.' });
+    const count = await clearImportedEventsPg();
+    res.json({ success: true, count, message: 'Todos os registros da quarentena foram apagados com sucesso.' });
   } catch (error: any) {
-    console.error('Erro ao apagar todos os registros da quarentena:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// 5. Excluir / Descartar Evento da Quarentena
-// Suporta descarte (soft delete: status = 'descartado') ou exclusão definitiva (hard delete: permanent=true)
-app.delete('/api/imported-events/:id', (req, res) => {
+app.delete('/api/imported-events/:id', async (req, res) => {
   try {
-    const { id } = req.params;
     const permanent = req.query.permanent === 'true';
-
-    if (permanent) {
-      const result = db.prepare('DELETE FROM eventos_importados WHERE id = ?;').run(id);
-      res.json({ success: true, id, changes: result.changes, permanent: true });
-    } else {
-      const result = db.prepare("UPDATE eventos_importados SET status = 'descartado' WHERE id = ?;").run(id);
-      res.json({ success: true, id, changes: result.changes, permanent: false });
-    }
+    const changes = await deleteImportedEventPg(req.params.id, permanent);
+    res.json({ success: true, id: req.params.id, changes, permanent });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// 6. Aprovar Evento Importado e Carregar no App Oficial (Move para a tabela 'eventos')
 app.post('/api/imported-events/:id/approve', async (req, res) => {
   try {
-    const { id } = req.params;
-    const item = db.prepare('SELECT * FROM eventos_importados WHERE id = ?;').get(id) as any;
-    if (!item) {
-      return res.status(404).json({ error: 'Evento importado não encontrado na quarentena' });
+    const body = req.body || {};
+    const approvedEvent = await approveEventRecordPg(
+      req.params.id,
+      {
+        category: body.category,
+        categoryId: body.categoryId ? Number(body.categoryId) : undefined,
+        videoUrl: body.videoUrl,
+        url: body.url,
+        imageUrl: body.imageUrl,
+        urlType: body.urlType,
+      },
+      fetchGeocodeCoordinates
+    );
+    if (!approvedEvent) {
+      return res.status(404).json({ error: 'Evento não encontrado para aprovação' });
     }
-
-    // Se uma nova categoria foi enviada no corpo da requisição (conferência de categoria na tela de análise)
-    if (req.body && req.body.category && typeof req.body.category === 'string') {
-      item.categoria = req.body.category.trim();
-      item.categoria_id = req.body.categoryId ? Number(req.body.categoryId) : null;
-      try {
-        db.prepare('UPDATE eventos_importados SET categoria = ?, categoria_id = ? WHERE id = ?;').run(item.categoria, item.categoria_id, id);
-      } catch {}
-    }
-
-    // Geocodifica latitude e longitude pelo endereço se não existir
-    let latitude = item.latitude;
-    let longitude = item.longitude;
-    if (!latitude || !longitude) {
-      try {
-        const geo = await fetchGeocodeCoordinates(item.endereco, item.cidade, item.estado, item.local_nome);
-        if (geo) {
-          latitude = geo.latitude;
-          longitude = geo.longitude;
-        }
-      } catch (gErr) {
-        console.warn('Erro ao geocodificar no approve:', gErr);
-      }
-    }
-
-    // Resolve categoria_id
-    let categoriaId = item.categoria_id;
-    if (!categoriaId && item.categoria) {
-      try {
-        const cat = db.prepare('SELECT id, nome FROM categorias WHERE nome = ? COLLATE NOCASE LIMIT 1;').get(item.categoria) as any;
-        if (cat) categoriaId = cat.id;
-      } catch (cErr) {
-        console.warn('Erro ao associar categoria no approve:', cErr);
-      }
-    }
-
-    // ID no app oficial: se já existir evento com mesmo título e data, reutiliza o ID para atualizar em vez de duplicar
-    let officialId = `evt-sympla-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-    try {
-      const existing = db.prepare('SELECT id FROM v_eventos_completos WHERE LOWER(TRIM(titulo)) = LOWER(TRIM(?)) AND data_evento = ? LIMIT 1;').get(item.titulo, item.data_evento) as any;
-      if (existing && existing.id) {
-        officialId = existing.id;
-      }
-    } catch {}
-
-    // Salva o evento diretamente na tabela da respectiva categoria
-    saveEventToCategoryTable(db, {
-      id: officialId,
-      advertiserId: null,
-      categoryId: categoriaId || null,
-      category: item.categoria || 'Shows',
-      title: item.titulo,
-      description: item.descricao || '',
-      date: item.data_evento,
-      time: item.horario,
-      endTime: item.horario_fim || null,
-      locationName: item.local_nome,
-      address: item.endereco,
-      city: item.cidade,
-      state: item.estado,
-      latitude: latitude || null,
-      longitude: longitude || null,
-      liberado: 'S',
-      isFree: item.is_gratuito === 1,
-      price: item.preco || 0,
-      priceDetails: item.detalhes_preco || (item.link_ingressos ? `Ingressos Sympla: ${item.link_ingressos}` : ''),
-      imageUrl: item.imagem_url || '',
-      videoUrl: item.video_url || null,
-      url: item.url || item.video_url || item.imagem_url || item.link_ingressos || null,
-      organizer: item.organizador || 'Produção',
-      contact: item.link_ingressos || '',
-      tags: JSON.stringify(['Sympla', item.categoria || 'Shows']),
-      featured: 0,
-      status: 'aprovado',
-      createdAt: new Date().toISOString()
-    });
-
-    try {
-      saveUserEvent(db, {
-        id: officialId,
-        anunciante_id: null,
-        categoria_id: categoriaId || null,
-        categoria: item.categoria || 'Shows',
-        titulo: item.titulo,
-        descricao: item.descricao || '',
-        data_evento: item.data_evento,
-        horario: item.horario,
-        horario_fim: item.horario_fim || null,
-        local_nome: item.local_nome,
-        endereco: item.endereco,
-        cidade: item.cidade,
-        estado: item.estado,
-        latitude: latitude || null,
-        longitude: longitude || null,
-        liberado: 'S',
-        is_gratuito: item.is_gratuito === 1,
-        preco: item.preco || 0,
-        detalhes_preco: item.detalhes_preco || (item.link_ingressos ? `Ingressos Sympla: ${item.link_ingressos}` : ''),
-        imagem_url: item.imagem_url || '',
-        video_url: item.video_url || null,
-        url: item.url || item.video_url || item.imagem_url || item.link_ingressos || null,
-        organizador: item.organizador || 'Produção',
-        contato: item.link_ingressos || '',
-        tags: JSON.stringify(['Sympla', item.categoria || 'Shows']),
-        destaque: 0,
-        status: 'aprovado',
-        criado_em: new Date().toISOString()
-      });
-    } catch {}
-
-    // Remove definitivamente o evento aprovado da quarentena
-    db.prepare('DELETE FROM eventos_importados WHERE id = ?;').run(id);
-    if (item.titulo || item.link_ingressos || item.url_origem) {
-      db.prepare(`
-        DELETE FROM eventos_importados 
-        WHERE (link_ingressos = ? AND link_ingressos != '') 
-           OR (url_origem = ? AND url_origem != '') 
-           OR (titulo = ? COLLATE NOCASE AND titulo != '');
-      `).run(item.link_ingressos || '', item.url_origem || '', item.titulo || '');
-    }
-
-    const approvedEvent = {
-      id: officialId,
-      title: item.titulo,
-      description: item.descricao,
-      category: item.categoria,
-      categoryId: categoriaId,
-      date: item.data_evento,
-      time: item.horario,
-      endDate: item.data_evento,
-      endTime: item.horario_fim,
-      locationName: item.local_nome,
-      address: item.endereco,
-      city: item.cidade,
-      state: item.estado,
-      latitude: latitude || undefined,
-      longitude: longitude || undefined,
-      imageUrl: item.imagem_url,
-      videoUrl: item.video_url || undefined,
-      url: item.url || item.video_url || item.imagem_url || item.link_ingressos || undefined,
-      mediaType: item.video_url ? 'video' : 'image',
-      organizer: item.organizador,
-      contact: item.link_ingressos,
-      price: item.preco,
-      priceDetails: item.link_ingressos ? `Ingressos: ${item.link_ingressos}` : '',
-      tags: ['Sympla', item.categoria || 'Shows'],
-      liberado: 'S' as const,
-      isFree: item.is_gratuito === 1,
-      createdAt: new Date().toISOString(),
-    };
-
-    res.json({ success: true, officialId, event: approvedEvent });
+    res.json({ success: true, officialId: approvedEvent.id, event: approvedEvent });
   } catch (error: any) {
-    console.error('Erro ao aprovar evento importado:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// 7. Aprovar TODOS os Eventos da Quarentena em Lote
-app.post('/api/imported-events/approve-all', async (req, res) => {
+app.post('/api/imported-events/approve-all', async (_req, res) => {
   try {
-    const pending = db.prepare("SELECT * FROM eventos_importados WHERE status = 'quarentena';").all() as any[];
-    if (pending.length === 0) {
-      // Garante que a quarentena esteja totalmente limpa
-      try {
-        db.prepare("DELETE FROM eventos_importados WHERE status = 'aprovado';").run();
-      } catch {}
-      return res.json({ success: true, count: 0, events: [] });
-    }
-
+    const pendingIds = await getPendingQuarantineIdsPg();
     const approvedEvents: any[] = [];
-    for (const item of pending) {
-      let latitude = item.latitude;
-      let longitude = item.longitude;
-      if (!latitude || !longitude) {
-        if (item.cidade) {
-          const cityKey = normalizeCityKey(item.cidade);
-          const fallback = BRAZIL_CITY_COORDINATES[cityKey];
-          if (fallback) {
-            latitude = fallback.latitude;
-            longitude = fallback.longitude;
-          }
-        }
-      }
-
-      let categoriaId = item.categoria_id;
-      if (!categoriaId && item.categoria) {
-        try {
-          const cat = db.prepare('SELECT id, nome FROM categorias WHERE nome = ? COLLATE NOCASE LIMIT 1;').get(item.categoria) as any;
-          if (cat) categoriaId = cat.id;
-        } catch {}
-      }
-
-      let officialId = `evt-sympla-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-      try {
-        const existing = db.prepare('SELECT id FROM v_eventos_completos WHERE LOWER(TRIM(titulo)) = LOWER(TRIM(?)) AND data_evento = ? LIMIT 1;').get(item.titulo, item.data_evento) as any;
-        if (existing && existing.id) {
-          officialId = existing.id;
-        }
-      } catch {}
-
-      try {
-        saveEventToCategoryTable(db, {
-          id: officialId,
-          advertiserId: null,
-          categoryId: categoriaId || null,
-          category: item.categoria || 'Show',
-          title: item.titulo,
-          description: item.descricao || '',
-          date: item.data_evento,
-          time: item.horario,
-          endTime: item.horario_fim || null,
-          locationName: item.local_nome,
-          address: item.endereco,
-          city: item.cidade,
-          state: item.estado,
-          latitude: latitude || null,
-          longitude: longitude || null,
-          liberado: 'S',
-          isFree: item.is_gratuito === 1,
-          price: item.preco || 0,
-          priceDetails: item.detalhes_preco || '',
-          imageUrl: item.imagem_url || '',
-          videoUrl: item.video_url || null,
-          organizer: item.organizador || 'Produção',
-          contact: item.link_ingressos || '',
-          tags: JSON.stringify(['Sympla', item.categoria || 'Show']),
-          featured: 0,
-          status: 'aprovado',
-          createdAt: new Date().toISOString()
-        });
-
-        approvedEvents.push({
-          id: officialId,
-          title: item.titulo,
-          description: item.descricao,
-          category: item.categoria || 'Categoria',
-          categoryId: categoriaId,
-          date: item.data_evento,
-          time: item.horario,
-          locationName: item.local_nome,
-          address: item.endereco,
-          city: item.cidade,
-          state: item.estado,
-          latitude: latitude || undefined,
-          longitude: longitude || undefined,
-          imageUrl: item.imagem_url,
-          videoUrl: item.video_url || undefined,
-          organizer: item.organizador,
-          contact: item.link_ingressos,
-          price: item.preco,
-          priceDetails: item.link_ingressos ? `Ingressos: ${item.link_ingressos}` : '',
-          tags: ['Sympla', item.categoria || 'Categoria'],
-          liberado: 'S' as const,
-          isFree: item.is_gratuito === 1,
-          createdAt: new Date().toISOString(),
-        });
-      } catch (insertErr) {
-        console.warn('Erro ao salvar evento na tabela de categoria no approve-all:', insertErr);
-      }
-
-      // Remove definitivamente da quarentena ao aprovar
-      try {
-        db.prepare('DELETE FROM eventos_importados WHERE id = ?;').run(item.id);
-      } catch {}
+    for (const id of pendingIds) {
+      const appEvt = await approveEventRecordPg(id, undefined, fetchGeocodeCoordinates);
+      if (appEvt) approvedEvents.push(appEvt);
     }
-
-    // Exclusão definitiva garantida de todos os itens da quarentena
-    try {
-      db.prepare("DELETE FROM eventos_importados WHERE status = 'quarentena' OR status = 'aprovado';").run();
-      db.prepare(`
-        DELETE FROM eventos_importados 
-        WHERE id IN (SELECT id FROM v_eventos_completos)
-           OR LOWER(TRIM(titulo)) IN (SELECT LOWER(TRIM(titulo)) FROM v_eventos_completos WHERE titulo != '');
-      `).run();
-    } catch (cleanQuarErr) {
-      console.warn('Aviso ao finalizar limpeza de quarentena no approve-all:', cleanQuarErr);
-    }
-
     res.json({ success: true, count: approvedEvents.length, events: approvedEvents });
   } catch (error: any) {
-    console.error('Erro ao aprovar todos os importados:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Função auxiliar para verificar se um evento contém alguma palavra ignorada no título ou descrição
-function containsIgnoredWords(title: string, description: string): boolean {
-  try {
-    const rows = db.prepare("SELECT palavra FROM palavras_ignoradas;").all() as { palavra: string }[];
-    if (!rows || rows.length === 0) return false;
-
-    const fullText = `${title || ''} ${description || ''}`.toLowerCase();
-    
-    for (const r of rows) {
-      const word = (r.palavra || '').trim().toLowerCase();
-      if (word && fullText.includes(word)) {
-        return true;
-      }
-    }
-  } catch (err) {
-    console.warn('Erro ao verificar palavras ignoradas:', err);
-  }
-  return false;
-}
-
-// 7b. Robô de Busca ao Vivo Sympla (Algolia Direct Query)
 app.get('/api/sympla/search', async (req, res) => {
   try {
     const { q, query, city, state, rhythm, limit, page } = req.query;
-    const searchTerm = String(q || query || '').trim();
-    const hitsPerPage = limit ? parseInt(String(limit), 10) : 20;
-    const pageNum = page ? parseInt(String(page), 10) : 0;
-
     const result = await searchSymplaLiveEvents({
-      query: searchTerm,
+      query: String(q || query || '').trim(),
       city: city ? String(city) : undefined,
       state: state ? String(state) : undefined,
       rhythm: rhythm ? String(rhythm) : undefined,
-      hitsPerPage,
-      page: pageNum,
+      hitsPerPage: limit ? parseInt(String(limit), 10) : 20,
+      page: page ? parseInt(String(page), 10) : 0,
     });
 
-    // Anota cada evento com o status no banco (se já foi importado, se está na quarentena, etc.)
-    const checkImportedStmt = db.prepare(
-      "SELECT id, status FROM eventos_importados WHERE ((link_ingressos = ? AND link_ingressos != '') OR (url_origem = ? AND url_origem != '') OR (titulo = ? COLLATE NOCASE AND titulo != '')) LIMIT 1;"
-    );
-    const checkOfficialStmt = db.prepare(
-      "SELECT id FROM v_eventos_completos WHERE ((contato = ? AND contato != '') OR (titulo = ? COLLATE NOCASE AND titulo != '')) LIMIT 1;"
-    );
-
-    // Filtra os resultados de acordo com a lista de palavras ignoradas antes de processar
-    const filteredRawEvents = result.events.filter(ev => !containsIgnoredWords(ev.title, ev.description || ''));
-
-    const annotatedEvents = filteredRawEvents.map((ev) => {
-      const imp = checkImportedStmt.get(ev.ticketUrl, ev.ticketUrl, ev.title) as any;
-      const off = checkOfficialStmt.get(ev.ticketUrl, ev.title) as any;
-
-      let statusInDb: 'quarentena' | 'aprovado' | 'descartado' | 'nenhum' = 'nenhum';
-      let alreadyImported = false;
-
-      if (off) {
-        statusInDb = 'aprovado';
-        alreadyImported = true;
-      } else if (imp) {
-        statusInDb = imp.status as any;
-        alreadyImported = true;
-      }
-
-      return {
-        ...ev,
-        alreadyImported,
-        statusInDb,
-      };
-    });
+    const annotatedEvents = [];
+    for (const ev of result.events) {
+      if (await containsIgnoredWords(ev.title, ev.description || '')) continue;
+      const dup = await checkDuplicateEventStatusPg(ev.ticketUrl || '', ev.title);
+      annotatedEvents.push({ ...ev, ...dup });
+    }
 
     res.json({
       success: true,
@@ -2106,129 +2099,40 @@ app.get('/api/sympla/search', async (req, res) => {
       events: annotatedEvents,
     });
   } catch (error: any) {
-    console.error('Erro na rota /api/sympla/search:', error);
     res.status(500).json({ error: error.message || 'Erro ao buscar eventos na Sympla' });
   }
 });
 
-// 7c. Importar Lote de Eventos Selecionados da Busca ao Vivo da Sympla
 app.post('/api/sympla/import-live-batch', async (req, res) => {
   try {
-    const { events, defaultCategory } = req.body;
-    if (!Array.isArray(events) || events.length === 0) {
+    const { events: items, defaultCategory } = req.body;
+    if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'Nenhum evento fornecido para importação.' });
     }
-
-    const insertStmt = db.prepare(`
-      INSERT INTO eventos_importados (
-        id, origem, url_origem, titulo, descricao, categoria, categoria_id,
-        data_evento, horario, horario_fim, local_nome, endereco, cidade, estado,
-        latitude, longitude, imagem_url, organizador, preco, is_gratuito,
-        detalhes_preco, link_ingressos, status, criado_em
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        titulo = excluded.titulo,
-        descricao = excluded.descricao,
-        categoria = excluded.categoria,
-        data_evento = excluded.data_evento,
-        horario = excluded.horario,
-        horario_fim = excluded.horario_fim,
-        local_nome = excluded.local_nome,
-        endereco = excluded.endereco,
-        cidade = excluded.cidade,
-        estado = excluded.estado,
-        imagem_url = excluded.imagem_url,
-        link_ingressos = excluded.link_ingressos;
-    `);
-
-    let addedCount = 0;
-    let skippedCount = 0;
-    const insertedItems: any[] = [];
-
-    for (const item of events) {
-      // Filtra por palavras ignoradas cadastradas no banco
-      if (containsIgnoredWords(item.title, item.description || '')) {
-        skippedCount++;
-        continue;
-      }
-
-      const chosenCategory = defaultCategory || item.rhythm || item.category || 'Shows';
-      let catId: number | null = null;
-      try {
-        const cat = db.prepare('SELECT id FROM categorias WHERE nome = ? COLLATE NOCASE LIMIT 1;').get(chosenCategory) as any;
-        if (cat) catId = cat.id;
-      } catch {}
-
-      // Verifica duplicidade
-      const existingImported = db.prepare(
-        "SELECT id, status FROM eventos_importados WHERE ((link_ingressos = ? AND link_ingressos != '') OR (url_origem = ? AND url_origem != '') OR (titulo = ? COLLATE NOCASE AND titulo != '')) LIMIT 1;"
-      ).get(item.ticketUrl, item.ticketUrl, item.title) as any;
-
-      const existingOfficial = db.prepare(
-        "SELECT id FROM v_eventos_completos WHERE ((contato = ? AND contato != '') OR (titulo = ? COLLATE NOCASE AND titulo != '')) LIMIT 1;"
-      ).get(item.ticketUrl, item.title) as any;
-
-      if (existingImported || existingOfficial) {
-        skippedCount++;
-        continue;
-      }
-
-      const id = `imp-sympla-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
-      insertStmt.run(
-        id,
-        'sympla',
-        item.ticketUrl,
-        item.title,
-        item.description || '',
-        chosenCategory,
-        catId,
-        item.date,
-        item.time || '20:00',
-        item.endTime || null,
-        item.locationName || 'Local a confirmar',
-        item.address || '',
-        item.city || 'São Paulo',
-        item.state || 'SP',
-        item.latitude || null,
-        item.longitude || null,
-        item.imageUrl,
-        item.organizer || '',
-        item.price || 0,
-        item.isGratuito ? 1 : 0,
-        item.isGratuito ? 'Gratuito' : (item.price ? `R$ ${item.price.toFixed(2)}` : 'Consulte'),
-        item.ticketUrl,
-        'quarentena',
-        new Date().toISOString()
-      );
-
-      addedCount++;
-      insertedItems.push({ id, ...item, category: chosenCategory, status: 'quarentena' });
-    }
-
-    const totalQuarantine = db.prepare("SELECT COUNT(*) as count FROM eventos_importados WHERE status = 'quarentena';").get() as any;
-
+    const resUpsert = await upsertImportedEventsPg(items, {
+      origemOverride: 'sympla',
+      idPrefix: 'imp-sympla',
+      defaultCategory,
+    });
     res.json({
       success: true,
-      addedCount,
-      skippedCount,
-      totalQuarantine: totalQuarantine ? totalQuarantine.count : 0,
-      items: insertedItems,
-      message: addedCount > 0
-        ? `${addedCount} eventos foram importados para a Quarentena com sucesso!`
-        : `Nenhum evento novo importado. Todos os ${skippedCount} eventos selecionados já constam no banco ou quarentena.`,
+      addedCount: resUpsert.addedCount,
+      skippedCount: resUpsert.skippedCount,
+      totalQuarantine: resUpsert.totalQuarantine,
+      items: resUpsert.insertedItems,
+      message:
+        resUpsert.addedCount > 0
+          ? `${resUpsert.addedCount} eventos foram importados para a Quarentena com sucesso!`
+          : `Nenhum evento novo importado. Todos os ${resUpsert.skippedCount} eventos selecionados já constam no banco ou quarentena.`,
     });
   } catch (error: any) {
-    console.error('Erro ao importar lote ao vivo da Sympla:', error);
     res.status(500).json({ error: error.message || 'Erro ao importar lote da Sympla' });
   }
 });
 
-// 7b. Importar TODOS os Eventos Encontrados em uma Busca da Sympla (Sem limite de 20 por página)
 app.post('/api/sympla/import-all-query', async (req, res) => {
   try {
     const { query, city, state, rhythm, defaultCategory, maxEvents = 600 } = req.body;
-
-    console.log(`[Sympla] Iniciando varredura completa: termo="${query || ''}", cidade="${city || ''}", estado="${state || ''}"`);
     const searchResult = await fetchAllSymplaLiveEvents({
       query,
       city,
@@ -2236,592 +2140,334 @@ app.post('/api/sympla/import-all-query', async (req, res) => {
       rhythm,
       maxEvents: Number(maxEvents) || 600,
     });
-
-    const events = searchResult.events;
-    let addedCount = 0;
-    let skippedCount = 0;
-    const insertedItems: any[] = [];
-
-    const insertStmt = db.prepare(`
-      INSERT INTO eventos_importados (
-        id, origem, url_origem, titulo, descricao, categoria, categoria_id,
-        data_evento, horario, horario_fim, local_nome, endereco, cidade, estado,
-        estado_id, latitude, longitude, imagem_url, organizador, preco, is_gratuito,
-        detalhes_preco, link_ingressos, status, criado_em
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        titulo = excluded.titulo,
-        descricao = excluded.descricao,
-        categoria = excluded.categoria,
-        categoria_id = excluded.categoria_id,
-        data_evento = excluded.data_evento,
-        horario = excluded.horario,
-        horario_fim = excluded.horario_fim,
-        local_nome = excluded.local_nome,
-        endereco = excluded.endereco,
-        cidade = excluded.cidade,
-        estado = excluded.estado,
-        estado_id = excluded.estado_id,
-        imagem_url = excluded.imagem_url,
-        link_ingressos = excluded.link_ingressos;
-    `);
-
-    for (const item of events) {
-      // Filtra por palavras ignoradas cadastradas no banco
-      if (containsIgnoredWords(item.title, item.description || '')) {
-        skippedCount++;
-        continue;
-      }
-
-      const finalCategory = defaultCategory || item.rhythm || 'Shows';
-      
-      // Resolve categoria_id
-      let catId: number | null = null;
-      try {
-        const cat = db.prepare('SELECT id FROM categorias WHERE LOWER(TRIM(nome)) = LOWER(TRIM(?)) LIMIT 1;').get(finalCategory) as any;
-        if (cat) catId = cat.id;
-      } catch {}
-
-      // Resolve estado_id
-      let estId: number | null = null;
-      try {
-        const est = db.prepare(`
-          SELECT id FROM estado 
-          WHERE UPPER(TRIM(estado)) = UPPER(TRIM(?)) OR UPPER(TRIM(nome)) = UPPER(TRIM(?)) OR UPPER(TRIM(nome)) = UPPER(TRIM(?))
-          LIMIT 1;
-        `).get(item.state || '', item.state || '', item.city || '') as any;
-        if (est) estId = est.id;
-      } catch {}
-
-      // 1. Verifica duplicidade em eventos_importados
-      const existingImported = db.prepare(
-        "SELECT id, status FROM eventos_importados WHERE ((link_ingressos = ? AND link_ingressos != '') OR (url_origem = ? AND url_origem != '') OR (titulo = ? COLLATE NOCASE AND titulo != '')) LIMIT 1;"
-      ).get(item.ticketUrl, item.ticketUrl, item.title) as any;
-
-      // 2. Verifica duplicidade no catálogo oficial do app (v_eventos_completos)
-      const existingOfficial = db.prepare(
-        "SELECT id FROM v_eventos_completos WHERE ((contato = ? AND contato != '') OR (titulo = ? COLLATE NOCASE AND titulo != '')) LIMIT 1;"
-      ).get(item.ticketUrl, item.title) as any;
-
-      if (existingImported || existingOfficial) {
-        skippedCount++;
-        continue;
-      }
-
-      const generatedId = `sympla-live-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
-      const now = new Date().toISOString();
-
-      try {
-        insertStmt.run(
-          generatedId,
-          'sympla_live',
-          item.ticketUrl || '',
-          item.title,
-          item.description || '',
-          finalCategory,
-          catId,
-          item.date,
-          item.time || '20:00',
-          item.endTime || null,
-          item.locationName || 'Local a confirmar',
-          item.address || '',
-          item.city || 'São Paulo',
-          item.state || 'SP',
-          estId,
-          item.latitude || null,
-          item.longitude || null,
-          item.imageUrl || '',
-          item.organizer || 'Organizador Sympla',
-          item.price ?? null,
-          item.isGratuito ? 1 : 0,
-          item.isGratuito ? 'Entrada Franca' : 'Conforme lote Sympla',
-          item.ticketUrl || '',
-          'quarentena',
-          now
-        );
-        addedCount++;
-        insertedItems.push({ id: generatedId, title: item.title, category: finalCategory });
-      } catch (insertErr) {
-        console.warn('Erro ao inserir item na quarentena:', insertErr);
-        skippedCount++;
-      }
-    }
-
-    const totalQuarantine = db.prepare("SELECT COUNT(*) as count FROM eventos_importados WHERE status = 'quarentena';").get() as any;
-
+    const resUpsert = await upsertImportedEventsPg(searchResult.events, {
+      origemOverride: 'sympla_live',
+      idPrefix: 'sympla-live',
+      defaultCategory,
+    });
     res.json({
       success: true,
       totalFound: searchResult.total,
-      totalProcessed: events.length,
-      addedCount,
-      skippedCount,
-      totalQuarantine: totalQuarantine ? totalQuarantine.count : 0,
-      items: insertedItems,
-      message: addedCount > 0
-        ? `Sucesso! Todos os ${addedCount} novos eventos encontrados foram importados para a Quarentena!`
-        : `Nenhum novo evento pendente. Todos os ${skippedCount} eventos encontrados nesta busca já constavam no banco ou na quarentena.`,
+      totalProcessed: searchResult.events.length,
+      addedCount: resUpsert.addedCount,
+      skippedCount: resUpsert.skippedCount,
+      totalQuarantine: resUpsert.totalQuarantine,
+      items: resUpsert.insertedItems,
+      message:
+        resUpsert.addedCount > 0
+          ? `Sucesso! Todos os ${resUpsert.addedCount} novos eventos encontrados foram importados para a Quarentena!`
+          : `Nenhum novo evento pendente. Todos os ${resUpsert.skippedCount} eventos encontrados já constavam no banco ou na quarentena.`,
     });
   } catch (error: any) {
-    console.error('Erro ao importar todos os eventos da busca Sympla:', error);
     res.status(500).json({ error: error.message || 'Erro ao importar todos os eventos da busca' });
   }
 });
 
-// 7c. Sincronizar e Integrar Relacionamento de Dados entre Eventos e Outras Tabelas
-app.post('/api/database/sync-relations', (req, res) => {
+app.post('/api/database/sync-relations', async (_req, res) => {
   try {
-    const stats = syncEventsRelations();
+    const stats = await syncEventsRelationsPg();
     res.json({
       success: true,
       ...stats,
-      message: 'Integração relacional executada com sucesso! Todas as tabelas de Eventos, Categorias, Estados e Anunciantes foram sincronizadas.',
+      message: 'Integração relacional executada com sucesso no Cloud SQL PostgreSQL!',
     });
   } catch (error: any) {
-    console.error('Erro ao sincronizar relações do banco:', error);
     res.status(500).json({ error: error.message || 'Erro ao sincronizar relações do banco' });
   }
 });
 
-// 8. Trazer Todos os Ritmos de Uma Vez da Sympla para a Quarentena
 app.post('/api/sympla/discover-all', async (req, res) => {
   try {
     const { state, city } = req.body || {};
     const discovered = await discoverAllRhythmsBatch({ state, city });
-    const insertStmt = db.prepare(`
-      INSERT INTO eventos_importados (
-        id, origem, url_origem, titulo, descricao, categoria, categoria_id,
-        data_evento, horario, horario_fim, local_nome, endereco, cidade, estado,
-        estado_id, latitude, longitude, imagem_url, organizador, preco, is_gratuito,
-        detalhes_preco, link_ingressos, status, criado_em
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        titulo = excluded.titulo,
-        descricao = excluded.descricao,
-        categoria = excluded.categoria,
-        categoria_id = excluded.categoria_id,
-        data_evento = excluded.data_evento,
-        horario = excluded.horario,
-        horario_fim = excluded.horario_fim,
-        local_nome = excluded.local_nome,
-        endereco = excluded.endereco,
-        cidade = excluded.cidade,
-        estado = excluded.estado,
-        estado_id = excluded.estado_id,
-        imagem_url = excluded.imagem_url,
-        link_ingressos = excluded.link_ingressos;
-    `);
-
-    let addedCount = 0;
-    let skippedCount = 0;
-    const insertedItems: any[] = [];
-
-    for (const item of discovered) {
-      // Filtra por palavras ignoradas cadastradas no banco
-      if (containsIgnoredWords(item.title, item.description || '')) {
-        skippedCount++;
-        continue;
-      }
-
-      // Resolve categoria_id
-      let catId: number | null = null;
-      try {
-        const cat = db.prepare('SELECT id FROM categorias WHERE nome = ? COLLATE NOCASE LIMIT 1;').get(item.rhythm) as any;
-        if (cat) catId = cat.id;
-      } catch {}
-
-      // Resolve estado_id
-      let estId: number | null = null;
-      try {
-        const est = db.prepare(`
-          SELECT id FROM estado 
-          WHERE UPPER(TRIM(estado)) = UPPER(TRIM(?)) OR UPPER(TRIM(nome)) = UPPER(TRIM(?))
-          LIMIT 1;
-        `).get(item.state || '', item.state || '') as any;
-        if (est) estId = est.id;
-      } catch {}
-
-      // 1. Verifica se já existe em eventos_importados (quarentena, já aprovado no app ou descartado)
-      const existingImported = db.prepare(
-        "SELECT id, status FROM eventos_importados WHERE ((link_ingressos = ? AND link_ingressos != '') OR (url_origem = ? AND url_origem != '') OR (titulo = ? COLLATE NOCASE AND titulo != '')) LIMIT 1;"
-      ).get(item.ticketUrl, item.ticketUrl, item.title) as any;
-
-      // 2. Verifica se já existe cadastrado no catálogo oficial do app
-      const existingOfficial = db.prepare(
-        "SELECT id FROM v_eventos_completos WHERE ((contato = ? AND contato != '') OR (titulo = ? COLLATE NOCASE AND titulo != '')) LIMIT 1;"
-      ).get(item.ticketUrl, item.title) as any;
-
-      if (existingImported || existingOfficial) {
-        skippedCount++;
-        continue;
-      }
-
-      const id = `imp-ritmo-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
-      insertStmt.run(
-        id,
-        'sympla',
-        item.ticketUrl,
-        item.title,
-        item.description,
-        item.rhythm,
-        catId,
-        item.date,
-        item.time,
-        item.endTime || null,
-        item.locationName,
-        item.address,
-        item.city,
-        item.state,
-        estId,
-        item.latitude !== undefined && item.latitude !== null ? String(item.latitude) : null,
-        item.longitude !== undefined && item.longitude !== null ? String(item.longitude) : null,
-        item.imageUrl,
-        item.organizer,
-        item.price ?? null,
-        item.isGratuito ? 1 : 0,
-        item.isGratuito ? 'Gratuito' : (item.price ? `R$ ${item.price.toFixed(2)}` : 'Consulte'),
-        item.ticketUrl,
-        'quarentena',
-        new Date().toISOString()
-      );
-      addedCount++;
-      insertedItems.push({ id, ...item, category: item.rhythm, status: 'quarentena' });
-    }
-
-    const totalQuarantine = db.prepare("SELECT COUNT(*) as count FROM eventos_importados WHERE status = 'quarentena';").get() as any;
-
+    const resUpsert = await upsertImportedEventsPg(discovered, {
+      origemOverride: 'sympla',
+      idPrefix: 'imp-ritmo',
+    });
     res.json({
       success: true,
-      addedCount,
-      skippedCount,
-      totalQuarantine: totalQuarantine ? totalQuarantine.count : 0,
-      items: insertedItems,
-      message: addedCount > 0
-        ? `${addedCount} novos eventos foram adicionados à Quarentena (${skippedCount} eventos já cadastrados foram ignorados para evitar duplicidade).`
-        : `Nenhum evento novo encontrado. Todos os ${skippedCount} eventos já estavam cadastrados no aplicativo, na quarentena ou haviam sido descartados.`,
+      addedCount: resUpsert.addedCount,
+      skippedCount: resUpsert.skippedCount,
+      totalQuarantine: resUpsert.totalQuarantine,
+      items: resUpsert.insertedItems,
+      message:
+        resUpsert.addedCount > 0
+          ? `${resUpsert.addedCount} novos eventos foram adicionados à Quarentena (${resUpsert.skippedCount} já existentes ignorados).`
+          : `Nenhum evento novo encontrado. Todos os ${resUpsert.skippedCount} eventos já estavam cadastrados.`,
     });
   } catch (error: any) {
-    console.error('Erro ao descobrir todos os ritmos:', error);
     res.status(500).json({ error: error.message || 'Erro ao importar todos os ritmos' });
   }
 });
 
-// 9. Atualizar Categoria de um Item da Quarentena Rapidamente
-app.patch('/api/imported-events/:id/category', (req, res) => {
+app.post('/api/ticket360/parse', async (req, res) => {
   try {
-    const { id } = req.params;
-    const { category } = req.body;
-    if (!category) {
-      return res.status(400).json({ error: 'Categoria é obrigatória' });
+    const { url } = req.body;
+    if (!url || typeof url !== 'string') {
+      return res.status(400).json({ error: 'URL do evento da Ticket360 é obrigatória' });
+    }
+    const parsed = await parseTicket360EventUrl(url);
+    if (!hasValidTicket360Image(parsed.imagemUrl)) {
+      return res.status(400).json({ error: 'Evento sem imagem válida no Ticket360.' });
+    }
+    res.json({ success: true, data: parsed });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Falha ao buscar dados do evento na Ticket360' });
+  }
+});
+
+app.get('/api/ticket360/search', async (req, res) => {
+  try {
+    const { q, query, city, state, rhythm, limit, page } = req.query;
+    const result = await searchTicket360LiveEvents({
+      query: String(q || query || '').trim(),
+      city: city ? String(city) : undefined,
+      state: state ? String(state) : undefined,
+      rhythm: rhythm ? String(rhythm) : undefined,
+      hitsPerPage: limit ? parseInt(String(limit), 10) : 20,
+      page: page ? parseInt(String(page), 10) : 0,
+    });
+
+    const annotatedEvents = [];
+    for (const ev of result.events) {
+      if (!hasValidTicket360Image(ev.imageUrl)) continue;
+      if (await containsIgnoredWords(ev.title, ev.description || '')) continue;
+      const dup = await checkDuplicateEventStatusPg(ev.ticketUrl || '', ev.title);
+      annotatedEvents.push({ ...ev, ...dup });
     }
 
-    let catId: number | null = null;
-    try {
-      const cat = db.prepare('SELECT id FROM categorias WHERE nome = ? COLLATE NOCASE LIMIT 1;').get(category) as any;
-      if (cat) catId = cat.id;
-    } catch {}
-
-    db.prepare(`
-      UPDATE eventos_importados 
-      SET categoria = ?, categoria_id = ?
-      WHERE id = ?;
-    `).run(category, catId, id);
-
-    res.json({ success: true, id, category, categoryId: catId });
+    res.json({
+      success: true,
+      total: result.total,
+      page: result.page,
+      pages: result.pages,
+      hitsPerPage: result.hitsPerPage,
+      events: annotatedEvents,
+    });
   } catch (error: any) {
-    console.error('Erro ao atualizar categoria do evento importado:', error);
+    res.status(500).json({ error: error.message || 'Erro ao buscar eventos na Ticket360' });
+  }
+});
+
+app.post('/api/ticket360/import-live-batch', async (req, res) => {
+  try {
+    const { events: items, defaultCategory } = req.body;
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: 'Nenhum evento fornecido para importação.' });
+    }
+    const validItems = items.filter((it) => hasValidTicket360Image(it.imageUrl));
+    const resUpsert = await upsertImportedEventsPg(validItems, {
+      origemOverride: 'ticket360',
+      idPrefix: 'imp-t360',
+      defaultCategory,
+    });
+    res.json({
+      success: true,
+      addedCount: resUpsert.addedCount,
+      skippedCount: resUpsert.skippedCount + (items.length - validItems.length),
+      totalQuarantine: resUpsert.totalQuarantine,
+      items: resUpsert.insertedItems,
+      message:
+        resUpsert.addedCount > 0
+          ? `${resUpsert.addedCount} eventos da Ticket360 importados para a Quarentena!`
+          : 'Nenhum evento novo importado.',
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Erro ao importar lote da Ticket360' });
+  }
+});
+
+app.post('/api/ticket360/import-all-query', async (req, res) => {
+  try {
+    const { query, city, state, rhythm, defaultCategory, maxEvents = 600 } = req.body;
+    const searchResult = await fetchAllTicket360LiveEvents({
+      query,
+      city,
+      state,
+      rhythm,
+      maxEvents: Number(maxEvents) || 600,
+    });
+    const validItems = searchResult.events.filter((it) => hasValidTicket360Image(it.imageUrl));
+    const resUpsert = await upsertImportedEventsPg(validItems, {
+      origemOverride: 'ticket360',
+      idPrefix: 't360-live',
+      defaultCategory,
+    });
+    res.json({
+      success: true,
+      addedCount: resUpsert.addedCount,
+      skippedCount: resUpsert.skippedCount,
+      totalQuarantine: resUpsert.totalQuarantine,
+      items: resUpsert.insertedItems,
+      message:
+        resUpsert.addedCount > 0
+          ? `${resUpsert.addedCount} novos eventos da Ticket360 adicionados à Quarentena!`
+          : 'Nenhum evento novo adicionado.',
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Erro ao importar todos da busca Ticket360' });
+  }
+});
+
+app.post('/api/ticket360/discover-all', async (req, res) => {
+  try {
+    const { state, city } = req.body || {};
+    const discovered = await discoverAllTicket360RhythmsBatch({ state, city });
+    const validItems = discovered.filter((it) => hasValidTicket360Image(it.imageUrl));
+    const resUpsert = await upsertImportedEventsPg(validItems, {
+      origemOverride: 'ticket360',
+      idPrefix: 'imp-t360-ritmo',
+    });
+    res.json({
+      success: true,
+      addedCount: resUpsert.addedCount,
+      skippedCount: resUpsert.skippedCount,
+      totalQuarantine: resUpsert.totalQuarantine,
+      items: resUpsert.insertedItems,
+      message:
+        resUpsert.addedCount > 0
+          ? `${resUpsert.addedCount} novos eventos da Ticket360 adicionados à Quarentena.`
+          : 'Nenhum evento novo encontrado.',
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Erro ao importar eventos Ticket360' });
+  }
+});
+
+app.patch('/api/imported-events/:id/category', async (req, res) => {
+  try {
+    const { category } = req.body;
+    if (!category) return res.status(400).json({ error: 'Categoria é obrigatória' });
+    const resolved = await patchImportedCategoryPg(req.params.id, category);
+    res.json({ success: true, id: req.params.id, category: resolved.nome, categoryId: resolved.id });
+  } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// 10. Atualizar Categoria em Lote para Vários Itens Selecionados
-app.post('/api/imported-events/batch-category', (req, res) => {
+app.post('/api/imported-events/batch-category', async (req, res) => {
   try {
     const { ids, category } = req.body;
     if (!Array.isArray(ids) || ids.length === 0 || !category) {
       return res.status(400).json({ error: 'IDs e Categoria são obrigatórios' });
     }
-
-    let catId: number | null = null;
-    try {
-      const cat = db.prepare('SELECT id FROM categorias WHERE nome = ? COLLATE NOCASE LIMIT 1;').get(category) as any;
-      if (cat) catId = cat.id;
-    } catch {}
-
-    const placeholders = ids.map(() => '?').join(',');
-    const stmt = db.prepare(`
-      UPDATE eventos_importados 
-      SET categoria = ?, categoria_id = ?
-      WHERE id IN (${placeholders});
-    `);
-
-    const result = stmt.run(category, catId, ...ids);
-
-    res.json({
-      success: true,
-      updatedCount: result.changes,
-      category,
-      categoryId: catId,
-    });
+    const result = await batchImportedCategoryPg(ids, category);
+    res.json({ success: true, ...result });
   } catch (error: any) {
-    console.error('Erro ao atualizar categorias em lote:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// 11. Aprovar Apenas os Itens Selecionados em Lote
 app.post('/api/imported-events/batch-approve', async (req, res) => {
   try {
     const { ids } = req.body;
     if (!Array.isArray(ids) || ids.length === 0) {
       return res.status(400).json({ error: 'IDs não informados' });
     }
-
-    const placeholders = ids.map(() => '?').join(',');
-    const items = db.prepare(`SELECT * FROM eventos_importados WHERE id IN (${placeholders});`).all(...ids) as any[];
-
     const approvedEvents: any[] = [];
-    for (const item of items) {
-      let latitude = item.latitude;
-      let longitude = item.longitude;
-      if (!latitude || !longitude) {
-        if (item.cidade) {
-          const cityKey = normalizeCityKey(item.cidade);
-          const fallback = BRAZIL_CITY_COORDINATES[cityKey];
-          if (fallback) {
-            latitude = fallback.latitude;
-            longitude = fallback.longitude;
-          }
-        }
-      }
-
-      let categoriaId = item.categoria_id;
-      if (!categoriaId && item.categoria) {
-        try {
-          const cat = db.prepare('SELECT id, nome FROM categorias WHERE nome = ? COLLATE NOCASE LIMIT 1;').get(item.categoria) as any;
-          if (cat) categoriaId = cat.id;
-        } catch {}
-      }
-
-      let officialId = `evt-sympla-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-      try {
-        const existing = db.prepare('SELECT id FROM v_eventos_completos WHERE LOWER(TRIM(titulo)) = LOWER(TRIM(?)) AND data_evento = ? LIMIT 1;').get(item.titulo, item.data_evento) as any;
-        if (existing && existing.id) {
-          officialId = existing.id;
-        }
-      } catch {}
-
-      try {
-        saveEventToCategoryTable(db, {
-          id: officialId,
-          advertiserId: null,
-          categoryId: categoriaId || null,
-          category: item.categoria || 'Show',
-          title: item.titulo,
-          description: item.descricao || '',
-          date: item.data_evento,
-          time: item.horario,
-          endTime: item.horario_fim || null,
-          locationName: item.local_nome,
-          address: item.endereco,
-          city: item.cidade,
-          state: item.estado,
-          latitude: latitude || null,
-          longitude: longitude || null,
-          liberado: 'S',
-          isFree: item.is_gratuito === 1,
-          price: item.preco || 0,
-          priceDetails: item.detalhes_preco || '',
-          imageUrl: item.imagem_url || '',
-          videoUrl: item.video_url || null,
-          organizer: item.organizador || 'Produção',
-          contact: item.link_ingressos || '',
-          tags: JSON.stringify(['Sympla', item.categoria || 'Show']),
-          featured: 0,
-          status: 'aprovado',
-          createdAt: new Date().toISOString()
-        });
-
-        approvedEvents.push({
-          id: officialId,
-          title: item.titulo,
-          description: item.descricao,
-          category: item.categoria || 'Categoria',
-          categoryId: categoriaId,
-          date: item.data_evento,
-          time: item.horario,
-          locationName: item.local_nome,
-          address: item.endereco,
-          city: item.cidade,
-          state: item.estado,
-          latitude: latitude || undefined,
-          longitude: longitude || undefined,
-          imageUrl: item.imagem_url,
-          videoUrl: item.video_url || undefined,
-          organizer: item.organizador,
-          contact: item.link_ingressos,
-          price: item.preco,
-          priceDetails: item.link_ingressos ? `Ingressos: ${item.link_ingressos}` : '',
-          tags: ['Sympla', item.categoria || 'Categoria'],
-          liberado: 'S' as const,
-          isFree: item.is_gratuito === 1,
-          createdAt: new Date().toISOString(),
-        });
-      } catch (insertErr) {
-        console.warn('Erro ao inserir evento no batch-approve:', insertErr);
-      }
-
-      // Remove definitivamente da quarentena ao aprovar
-      try {
-        db.prepare('DELETE FROM eventos_importados WHERE id = ?;').run(item.id);
-      } catch {}
+    for (const id of ids) {
+      const appEvt = await approveEventRecordPg(id, undefined, fetchGeocodeCoordinates);
+      if (appEvt) approvedEvents.push(appEvt);
     }
-
-    // Apaga definitivamente todos os registros selecionados da tabela quarentena (eventos_importados)
-    try {
-      db.prepare(`DELETE FROM eventos_importados WHERE id IN (${placeholders});`).run(...ids);
-      for (const item of items) {
-        if (item.titulo || item.link_ingressos || item.url_origem) {
-          db.prepare(`
-            DELETE FROM eventos_importados 
-            WHERE (link_ingressos = ? AND link_ingressos != '') 
-               OR (url_origem = ? AND url_origem != '') 
-               OR (titulo = ? COLLATE NOCASE AND titulo != '');
-          `).run(item.link_ingressos || '', item.url_origem || '', item.titulo || '');
-        }
-      }
-    } catch (delBatchErr) {
-      console.warn('Aviso ao apagar selecionados da quarentena:', delBatchErr);
-    }
-
     res.json({ success: true, count: approvedEvents.length, events: approvedEvents });
   } catch (error: any) {
-    console.error('Erro ao aprovar lote de selecionados:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// 12. Descartar Selecionados em Lote (suporta descarte com status = 'descartado' ou exclusão permanente)
-app.post('/api/imported-events/batch-delete', (req, res) => {
+app.post('/api/imported-events/batch-delete', async (req, res) => {
   try {
     const { ids, permanent } = req.body;
     if (!Array.isArray(ids) || ids.length === 0) {
       return res.status(400).json({ error: 'IDs não informados' });
     }
-
-    const placeholders = ids.map(() => '?').join(',');
-    const sql = permanent === true
-      ? `DELETE FROM eventos_importados WHERE id IN (${placeholders});`
-      : `UPDATE eventos_importados SET status = 'descartado' WHERE id IN (${placeholders});`;
-
-    const result = db.prepare(sql).run(...ids);
-
-    res.json({ success: true, count: result.changes, permanent: Boolean(permanent) });
+    const count = await batchDeleteImportedPg(ids, permanent === true);
+    res.json({ success: true, count, permanent: Boolean(permanent) });
   } catch (error: any) {
-    console.error('Erro ao descartar selecionados:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// 4. Anunciantes (Cadastro e Consulta)
-app.get('/api/advertisers', (req, res) => {
+// ==================== ANUNCIANTES ====================
+
+function validateCpfBackend(value: any): boolean {
+  if (!value) return false;
+  const digits = String(value).replace(/\D/g, '');
+  if (digits.length !== 11 || /^(\d)\1{10}$/.test(digits)) return false;
+  let sum1 = 0;
+  for (let i = 0; i < 9; i++) sum1 += parseInt(digits.charAt(i), 10) * (10 - i);
+  let rest1 = (sum1 * 10) % 11;
+  if (rest1 >= 10) rest1 = 0;
+  if (rest1 !== parseInt(digits.charAt(9), 10)) return false;
+  let sum2 = 0;
+  for (let i = 0; i < 10; i++) sum2 += parseInt(digits.charAt(i), 10) * (11 - i);
+  let rest2 = (sum2 * 10) % 11;
+  if (rest2 >= 10) rest2 = 0;
+  return rest2 === parseInt(digits.charAt(10), 10);
+}
+
+function formatCpfBackend(value: any): string {
+  if (!value) return '';
+  const digits = String(value).replace(/\D/g, '').slice(0, 11);
+  if (digits.length !== 11) return String(value);
+  return `${digits.slice(0, 3)}.${digits.slice(3, 6)}.${digits.slice(6, 9)}-${digits.slice(9, 11)}`;
+}
+
+app.get('/api/advertisers', async (_req, res) => {
   try {
-    const rows = db.prepare('SELECT * FROM anunciantes ORDER BY criado_em DESC;').all() as any[];
-    const advertisers = rows.map((r) => ({
-      id: r.id,
-      name: r.nome,
-      email: r.email,
-      phone: r.telefone,
-      city: r.cidade,
-      state: r.estado,
-      verified: Boolean(r.verificado),
-      createdAt: r.criado_em,
-    }));
-    res.json(advertisers);
+    res.json(await getAdvertisersList());
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Checar anunciante por e-mail
-app.all(['/api/advertisers/check', '/api/anunciantes/check'], (req, res) => {
+app.all(['/api/advertisers/check', '/api/anunciantes/check'], async (req, res) => {
   try {
     const email = (req.body?.email || req.query?.email || '').toString().trim().toLowerCase();
-    if (!email) {
-      return res.status(400).json({ error: 'E-mail não informado' });
-    }
-    const row = db.prepare(`
-      SELECT * FROM anunciantes 
-      WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))
-      LIMIT 1;
-    `).get(email) as any;
-
-    if (row) {
-      return res.json({
-        exists: true,
-        advertiser: {
-          id: row.id,
-          name: row.nome,
-          email: row.email,
-          phone: row.telefone,
-          city: row.cidade,
-          state: row.estado,
-          verified: Boolean(row.verificado),
-          createdAt: row.criado_em,
-        },
-      });
-    }
-
-    return res.json({
-      exists: false,
-      advertiser: null,
-    });
+    if (!email) return res.status(400).json({ error: 'E-mail não informado' });
+    const adv = await findAdvertiserByEmail(email);
+    res.json({ exists: Boolean(adv), advertiser: adv });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Armazenamento em memória de códigos de confirmação de anunciantes
-const advertiserVerificationCodes = new Map<string, { code: string; expiresAt: number; phone: string; name: string }>();
-// E-mails que tiveram seus códigos confirmados com sucesso para permitir o cadastro
+const advertiserVerificationCodes = new Map<
+  string,
+  { code: string; expiresAt: number; phone: string; name: string; cpf?: string }
+>();
 const confirmedEmailsForRegistration = new Set<string>();
 
-// Gerar e enviar código de confirmação
 app.post(['/api/advertisers/send-code', '/api/anunciantes/send-code'], (req, res) => {
   try {
-    const { email, phone, name } = req.body;
-    if (!email) {
-      return res.status(400).json({ error: 'E-mail é obrigatório para envio do código.' });
-    }
+    const { email, phone, name, cpf } = req.body;
+    if (!email) return res.status(400).json({ error: 'E-mail é obrigatório para envio do código.' });
     const cleanEmail = email.toString().trim().toLowerCase();
     const cleanPhone = (phone || '').toString().trim();
     const cleanName = (name || '').toString().trim() || 'Anunciante';
-    
-    // Gera código numérico aleatório de 6 dígitos
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = Date.now() + 15 * 60 * 1000; // 15 minutos de validade
+    const cleanCpf = (cpf || '').toString().trim();
 
+    if (cleanCpf && !validateCpfBackend(cleanCpf)) {
+      return res.status(400).json({ error: 'CPF informado é inválido.' });
+    }
+
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
     advertiserVerificationCodes.set(cleanEmail, {
       code,
-      expiresAt,
+      expiresAt: Date.now() + 15 * 60 * 1000,
       phone: cleanPhone,
       name: cleanName,
+      cpf: cleanCpf ? formatCpfBackend(cleanCpf) : undefined,
     });
 
     const confirmationMessage = `[Pra Onde Eu Vou]: Olá ${cleanName}! Seu código de confirmação de anunciante é: ${code}. Digite este código no aplicativo para confirmar seu cadastro. Válido por 15 minutos.`;
-
-    console.info(`\n========================================`);
-    console.info(`[MENSAGEM DE CONFIRMAÇÃO DE ANUNCIANTE]`);
-    console.info(`Para: ${cleanName} (${cleanEmail} | ${cleanPhone})`);
-    console.info(`Código Gerado: ${code}`);
-    console.info(`Mensagem: "${confirmationMessage}"`);
-    console.info(`========================================\n`);
-
     res.json({
       success: true,
       message: 'Mensagem de confirmação enviada com sucesso.',
       code,
       phone: cleanPhone,
       email: cleanEmail,
+      cpf: cleanCpf ? formatCpfBackend(cleanCpf) : undefined,
       confirmationMessage,
       expiresInMinutes: 15,
     });
@@ -2830,464 +2476,316 @@ app.post(['/api/advertisers/send-code', '/api/anunciantes/send-code'], (req, res
   }
 });
 
-// Verificar código digitado
 app.post(['/api/advertisers/verify-code', '/api/anunciantes/verify-code'], (req, res) => {
   try {
     const { email, code } = req.body;
     const cleanEmail = (email || '').toString().trim().toLowerCase();
     const cleanCode = (code || '').toString().trim().replace(/\D/g, '');
-
     if (!cleanEmail || !cleanCode) {
       return res.status(400).json({ valid: false, error: 'E-mail e código são obrigatórios.' });
     }
-
     const record = advertiserVerificationCodes.get(cleanEmail);
     if (!record) {
-      return res.status(400).json({ valid: false, error: 'Código não encontrado ou expirado. Clique em reenviar código.' });
+      return res.status(400).json({ valid: false, error: 'Código não encontrado ou expirado.' });
     }
-
     if (Date.now() > record.expiresAt) {
       advertiserVerificationCodes.delete(cleanEmail);
-      return res.status(400).json({ valid: false, error: 'Código expirado. Por favor, solicite um novo código.' });
+      return res.status(400).json({ valid: false, error: 'Código expirado.' });
     }
-
     if (record.code !== cleanCode) {
-      return res.status(400).json({ valid: false, error: 'Código incorreto. Digite o código de 6 dígitos enviado para você.' });
+      return res.status(400).json({ valid: false, error: 'Código incorreto.' });
     }
-
-    // Código validado com sucesso!
     advertiserVerificationCodes.delete(cleanEmail);
     confirmedEmailsForRegistration.add(cleanEmail);
-
-    res.json({
-      valid: true,
-      message: 'Código confirmado com sucesso!',
-      email: cleanEmail,
-    });
+    res.json({ valid: true, message: 'Código confirmado com sucesso!', email: cleanEmail });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.post(['/api/advertisers', '/api/anunciantes'], (req, res) => {
+app.post(['/api/advertisers', '/api/anunciantes'], async (req, res) => {
   try {
-    const { id, name, email, phone, city, state, verified } = req.body;
+    const { id, name, email, phone, cpf, city, state, verified } = req.body;
     const cleanEmail = (email || '').toString().trim().toLowerCase();
-
-    // REGRA DE SEGURANÇA: Somente cadastrar o anunciante após a confirmação do código enviado
     if (!confirmedEmailsForRegistration.has(cleanEmail) && !verified) {
       return res.status(403).json({
-        error: 'Somente é permitido cadastrar o anunciante após a confirmação do código enviado.'
+        error: 'Somente é permitido cadastrar o anunciante após a confirmação do código enviado.',
       });
     }
+    const rawCpf = (cpf || '').toString().trim();
+    let formattedCpf = '';
+    if (rawCpf) {
+      if (!validateCpfBackend(rawCpf)) {
+        return res.status(400).json({ error: 'CPF inválido.' });
+      }
+      formattedCpf = formatCpfBackend(rawCpf);
+    }
 
-    const advId = id || `adv-${Date.now()}`;
-    const stmt = db.prepare(`
-      INSERT OR REPLACE INTO anunciantes (id, nome, email, telefone, cidade, estado, verificado, criado_em)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?);
-    `);
-    const createdAt = new Date().toISOString();
-    stmt.run(advId, name || '', cleanEmail, phone || '', city || '', state || '', 1, createdAt);
-    
-    // Remove do conjunto temporário de confirmação após efetivação do cadastro
+    const created = await upsertAdvertiserRecord({
+      id,
+      name,
+      email: cleanEmail,
+      phone,
+      cpf: formattedCpf,
+      city,
+      state,
+      verified: true,
+    });
     confirmedEmailsForRegistration.delete(cleanEmail);
-
-    res.status(201).json({ id: advId, name, email: cleanEmail, phone, city, state, verified: true, createdAt });
+    res.status(201).json(created);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// 5. Favoritos
-app.get('/api/favorites', (req, res) => {
+// ==================== FAVORITOS ====================
+
+app.get('/api/favorites', optionalAuth, async (req: AuthRequest, res) => {
   try {
-    const rows = db.prepare('SELECT evento_id FROM favoritos WHERE usuario_id = ?;').all('default_user') as any[];
-    const ids = rows.map((r) => r.evento_id);
-    res.json(ids);
+    const uid = req.user?.uid || 'default_user';
+    res.json(await getFavoritesList(uid));
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.post('/api/favorites', (req, res) => {
+app.post('/api/favorites', optionalAuth, async (req: AuthRequest, res) => {
   try {
     const { eventId } = req.body;
-    if (!eventId) {
-      return res.status(400).json({ error: 'eventId é obrigatório' });
-    }
-    const stmt = db.prepare(`
-      INSERT OR IGNORE INTO favoritos (evento_id, usuario_id) VALUES (?, ?);
-    `);
-    stmt.run(eventId, 'default_user');
+    if (!eventId) return res.status(400).json({ error: 'eventId é obrigatório' });
+    const uid = req.user?.uid || 'default_user';
+    await addFavoriteRecord(eventId, uid);
     res.json({ success: true, eventId });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.delete('/api/favorites/:eventId', (req, res) => {
+app.delete('/api/favorites/:eventId', optionalAuth, async (req: AuthRequest, res) => {
   try {
-    const { eventId } = req.params;
-    const stmt = db.prepare('DELETE FROM favoritos WHERE evento_id = ? AND usuario_id = ?;');
-    stmt.run(eventId, 'default_user');
-    res.json({ success: true, eventId });
+    const uid = req.user?.uid || 'default_user';
+    await removeFavoriteRecord(req.params.eventId, uid);
+    res.json({ success: true, eventId: req.params.eventId });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// 6. Categorias (CRUD no SQLite)
-app.get(['/api/categories', '/api/categorias'], (req, res) => {
+// ==================== CATEGORIAS, PALAVRAS IGNORADAS, CIDADES, SUPERVISOR ====================
+
+app.get(['/api/categories', '/api/categorias'], async (_req, res) => {
   try {
-    const rows = db.prepare("SELECT * FROM categorias WHERE LOWER(TRIM(nome)) != 'categoria' ORDER BY id ASC;").all() as any[];
-    const categories = rows.map((r) => ({
-      id: r.id,
-      nome: r.nome,
-      descricao: r.descricao || '',
-      ativa: Boolean(r.ativa),
-      criadoEm: r.criado_em,
-    }));
-    res.json(categories);
+    res.json(await getCategoriesList());
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.post('/api/categories', (req, res) => {
+app.post('/api/categories', async (req, res) => {
   try {
     const { nome, descricao } = req.body;
-    if (!nome || !nome.trim()) {
-      return res.status(400).json({ error: 'Nome da categoria é obrigatório' });
-    }
-    const stmt = db.prepare(`
-      INSERT INTO categorias (nome, descricao, ativa)
-      VALUES (?, ?, 1);
-    `);
-    const result = stmt.run(nome.trim(), (descricao || '').trim());
-    const newId = Number(result.lastInsertRowid);
-
-    // Cria e inicializa a tabela dedicada para esta categoria
-    const { tableName } = ensureCategoryTable(db, nome.trim(), newId);
-
-    const newCategory = {
-      id: newId,
-      nome: nome.trim(),
-      descricao: (descricao || '').trim(),
-      tabela_nome: tableName,
-      ativa: true,
-      criadoEm: new Date().toISOString(),
-    };
-    res.status(201).json(newCategory);
+    if (!nome?.trim()) return res.status(400).json({ error: 'Nome da categoria é obrigatório' });
+    const created = await createCategoryRecord(nome, descricao);
+    res.status(201).json(created);
   } catch (error: any) {
-    if (error.message?.includes('UNIQUE')) {
+    if (error.message === 'UNIQUE_CATEGORY') {
       return res.status(409).json({ error: 'Categoria já existe' });
     }
     res.status(500).json({ error: error.message });
   }
 });
 
-// Endpoint para inspecionar e sincronizar todas as tabelas dedicadas por categoria
-app.get('/api/categories/tables', (req, res) => {
+app.get('/api/categories/tables', async (_req, res) => {
   try {
-    const result = ensureAllCategoryTables(db);
-    const tablesInfo = (result.tables || []).map((t) => {
-      const cnt = (db.prepare(`SELECT COUNT(*) as c FROM ${t};`).get() as any)?.c || 0;
-      return { table: t, count: cnt };
+    const cats = await getCategoriesList();
+    res.json({
+      success: true,
+      totalTables: 1,
+      tables: [{ table: 'eventos', count: cats.length }],
     });
-    res.json({ success: true, totalTables: result.totalTables, tables: tablesInfo });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.delete('/api/categories/:id', (req, res) => {
+app.delete('/api/categories/:id', async (req, res) => {
   try {
-    const { id } = req.params;
-    const stmt = db.prepare('DELETE FROM categorias WHERE id = ?;');
-    const result = stmt.run(id);
-    res.json({ success: true, changes: result.changes });
+    const changes = await deleteCategoryRecord(Number(req.params.id));
+    res.json({ success: true, changes });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// 6a. Palavras Ignoradas (CRUD no SQLite) para Filtro Sympla
-app.get('/api/ignored-words', (req, res) => {
+app.get('/api/ignored-words', async (_req, res) => {
   try {
-    const rows = db.prepare("SELECT * FROM palavras_ignoradas ORDER BY palavra ASC;").all() as any[];
-    const words = rows.map((r) => ({
-      id: r.id,
-      palavra: r.palavra,
-      criadoEm: r.criado_em,
-    }));
-    res.json(words);
+    res.json(await getIgnoredWordsList());
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.post('/api/ignored-words', (req, res) => {
+app.post('/api/ignored-words', async (req, res) => {
   try {
     const { palavra } = req.body;
-    if (!palavra || !palavra.trim()) {
-      return res.status(400).json({ error: 'Palavra é obrigatória' });
-    }
-    const stmt = db.prepare(`
-      INSERT INTO palavras_ignoradas (palavra)
-      VALUES (?);
-    `);
-    const result = stmt.run(palavra.trim().toLowerCase());
-    const newId = Number(result.lastInsertRowid);
-    res.status(201).json({ id: newId, palavra: palavra.trim().toLowerCase() });
+    if (!palavra?.trim()) return res.status(400).json({ error: 'Palavra é obrigatória' });
+    const created = await addIgnoredWordRecord(palavra);
+    res.status(201).json(created);
   } catch (error: any) {
-    if (error.message?.includes('UNIQUE')) {
+    if (error.message === 'UNIQUE_WORD') {
       return res.status(409).json({ error: 'Palavra já cadastrada como ignorada' });
     }
     res.status(500).json({ error: error.message });
   }
 });
 
-app.delete('/api/ignored-words/:id', (req, res) => {
+app.delete('/api/ignored-words/:id', async (req, res) => {
   try {
-    const { id } = req.params;
-    const stmt = db.prepare('DELETE FROM palavras_ignoradas WHERE id = ?;');
-    const result = stmt.run(id);
-    res.json({ success: true, changes: result.changes });
+    const changes = await deleteIgnoredWordRecord(Number(req.params.id));
+    res.json({ success: true, changes });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// 6b. Estado (Tabela estado do SQLite)
-const getEstadoHandler = (req: any, res: any) => {
+const getEstadoHandler = async (req: any, res: any) => {
   try {
-    const { estado, search } = req.query;
-    let sql = 'SELECT id, nome, estado, regiao, ativa, criado_em FROM estado WHERE ativa = 1';
-    const params: any[] = [];
-
-    if (estado && estado !== 'Todos' && estado !== 'Todas') {
-      sql += ' AND estado = ?';
-      params.push(String(estado).toUpperCase());
-    }
-
-    if (search) {
-      sql += ' AND (nome LIKE ? OR regiao LIKE ?)';
-      const term = `%${search}%`;
-      params.push(term, term);
-    }
-
-    sql += ' ORDER BY nome COLLATE NOCASE ASC;';
-
-    const rows = db.prepare(sql).all(...params) as any[];
-    const items = rows.map((r) => ({
-      id: r.id,
-      nome: r.nome,
-      estado: r.estado,
-      regiao: r.regiao || '',
-      ativa: Boolean(r.ativa),
-      criadoEm: r.criado_em,
-    }));
+    const items = await getCidadesList(
+      req.query.estado ? String(req.query.estado) : undefined,
+      req.query.search ? String(req.query.search) : undefined
+    );
     res.json(items);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 };
 
-const postEstadoHandler = (req: any, res: any) => {
+const postEstadoHandler = async (req: any, res: any) => {
   try {
-    const { nome, estado, regiao } = req.body;
-    if (!nome || !nome.trim()) {
-      return res.status(400).json({ error: 'Nome é obrigatório' });
-    }
-    const cleanNome = nome.trim();
-    const cleanEstado = (estado || 'SP').trim().toUpperCase();
-    const cleanRegiao = (regiao || '').trim();
-
-    const stmt = db.prepare(`
-      INSERT INTO estado (nome, estado, regiao, ativa)
-      VALUES (?, ?, ?, 1);
-    `);
-    const result = stmt.run(cleanNome, cleanEstado, cleanRegiao);
-    const newItem = {
-      id: Number(result.lastInsertRowid),
-      nome: cleanNome,
-      estado: cleanEstado,
-      regiao: cleanRegiao,
-      ativa: true,
-      criadoEm: new Date().toISOString(),
-    };
-    res.status(201).json(newItem);
+    const { nome, estado: est, regiao } = req.body;
+    if (!nome?.trim()) return res.status(400).json({ error: 'Nome é obrigatório' });
+    const created = await createCidadeRecord(nome, est || 'SP', regiao || 'Sudeste');
+    res.status(201).json(created);
   } catch (error: any) {
-    if (error.message?.includes('UNIQUE')) {
-      return res.status(409).json({ error: 'Registro já existe na tabela de estado' });
+    if (error.message === 'UNIQUE_CITY') {
+      return res.status(409).json({ error: 'Cidade já existe no cadastro de cidades' });
     }
     res.status(500).json({ error: error.message });
   }
 };
 
-const deleteAllEstadoHandler = (req: any, res: any) => {
+const deleteAllEstadoHandler = async (_req: any, res: any) => {
   try {
-    const stmt = db.prepare('DELETE FROM estado;');
-    const result = stmt.run();
-    try {
-      db.prepare("DELETE FROM sqlite_sequence WHERE name = 'estado';").run();
-    } catch {}
-    res.json({ success: true, changes: result.changes });
+    const changes = await deleteAllCidadesRecords();
+    res.json({ success: true, changes });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 };
 
-const deleteSingleEstadoHandler = (req: any, res: any) => {
+const deleteSingleEstadoHandler = async (req: any, res: any) => {
   try {
-    const { id } = req.params;
-    const stmt = db.prepare('DELETE FROM estado WHERE id = ?;');
-    const result = stmt.run(id);
-    res.json({ success: true, changes: result.changes });
+    const changes = await deleteCidadeRecord(Number(req.params.id));
+    res.json({ success: true, changes });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 };
 
-// Rotas da tabela estado
-app.get('/api/estado', getEstadoHandler);
-app.post('/api/estado', postEstadoHandler);
-app.delete('/api/estado', deleteAllEstadoHandler);
-app.delete('/api/estado/:id', deleteSingleEstadoHandler);
+app.get(['/api/estado', '/api/estados', '/api/cidades'], getEstadoHandler);
+app.post(['/api/estado', '/api/estados', '/api/cidades'], postEstadoHandler);
+app.delete(['/api/estado', '/api/estados', '/api/cidades'], deleteAllEstadoHandler);
+app.delete(['/api/estado/:id', '/api/estados/:id', '/api/cidades/:id'], deleteSingleEstadoHandler);
 
-// Compatibilidade de rotas (estados / cidades)
-app.get('/api/estados', getEstadoHandler);
-app.post('/api/estados', postEstadoHandler);
-app.delete('/api/estados', deleteAllEstadoHandler);
-app.delete('/api/estados/:id', deleteSingleEstadoHandler);
-
-app.get('/api/cidades', getEstadoHandler);
-app.post('/api/cidades', postEstadoHandler);
-app.delete('/api/cidades', deleteAllEstadoHandler);
-app.delete('/api/cidades/:id', deleteSingleEstadoHandler);
-
-// 7. Supervisors (CRUD na tabela supervisor do SQLite)
-app.get('/api/supervisors', (req, res) => {
+app.get('/api/supervisors', async (_req, res) => {
   try {
-    const rows = db.prepare('SELECT id, nome, senha, criado_em FROM supervisor ORDER BY id ASC;').all() as any[];
-    const supervisors = rows.map((r) => ({
-      id: r.id,
-      nome: r.nome,
-      senha: r.senha || '',
-      criadoEm: r.criado_em,
-    }));
-    res.json(supervisors);
+    res.json(await getSupervisorsList());
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.post('/api/supervisors', (req, res) => {
+app.post('/api/supervisors', async (req, res) => {
   try {
     const { nome, senha } = req.body;
-    if (!nome || !nome.trim()) {
-      return res.status(400).json({ error: 'Nome do supervisor é obrigatório' });
+    if (!nome?.trim() || !senha?.trim()) {
+      return res.status(400).json({ error: 'Nome e senha são obrigatórios' });
     }
-    const stmt = db.prepare(`
-      INSERT INTO supervisor (nome, senha)
-      VALUES (?, ?);
-    `);
-    const result = stmt.run(nome.trim(), senha ? String(senha).trim() : null);
-    const newSup = {
-      id: Number(result.lastInsertRowid),
-      nome: nome.trim(),
-      senha: senha ? String(senha).trim() : '',
-      criadoEm: new Date().toISOString(),
-    };
-    res.status(201).json(newSup);
+    const created = await createSupervisorRecord(nome, senha);
+    res.status(201).json(created);
   } catch (error: any) {
-    if (error.message?.includes('UNIQUE')) {
-      return res.status(409).json({ error: 'Supervisor já cadastrado com este nome' });
+    if (error.message === 'UNIQUE_SUPERVISOR') {
+      return res.status(409).json({ error: 'Já existe um supervisor cadastrado com este nome.' });
     }
     res.status(500).json({ error: error.message });
   }
 });
 
-app.put('/api/supervisors/:id', (req, res) => {
+app.put('/api/supervisors/:id', async (req, res) => {
   try {
-    const { id } = req.params;
     const { nome, senha } = req.body;
-    if (!nome || !nome.trim()) {
-      return res.status(400).json({ error: 'Nome do supervisor é obrigatório' });
-    }
-    const stmt = db.prepare(`
-      UPDATE supervisor SET nome = ?, senha = ? WHERE id = ?;
-    `);
-    const result = stmt.run(nome.trim(), senha ? String(senha).trim() : null, id);
-    res.json({ success: true, changes: result.changes, id: Number(id), nome: nome.trim() });
+    const changes = await updateSupervisorRecord(Number(req.params.id), nome, senha);
+    res.json({ success: true, changes });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.delete('/api/supervisors/:id', (req, res) => {
+app.delete('/api/supervisors/:id', async (req, res) => {
   try {
-    const { id } = req.params;
-    const stmt = db.prepare('DELETE FROM supervisor WHERE id = ?;');
-    const result = stmt.run(id);
-    res.json({ success: true, changes: result.changes });
+    const changes = await deleteSupervisorRecord(Number(req.params.id));
+    res.json({ success: true, changes });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// ==================== MERCADO PAGO PIX ENDPOINTS ====================
+// ==================== MERCADO PAGO PIX & PATROCINADORES ====================
 
-// Criar cobrança Pix R$ 100 para o Patrocinador
-app.post('/api/sponsors/pix/create', async (req, res) => {
+app.all(['/api/webhook/mercadopago', '/api/mercadopago/webhook'], async (req, res) => {
+  try {
+    const paymentId = req.body?.data?.id || req.query['data.id'] || req.query.id || req.body?.id;
+    if (paymentId) {
+      const check = await checkMercadoPagoPaymentStatus(String(paymentId));
+      if (check.isPaid) {
+        await markPixPaymentApprovedPg(String(paymentId)).catch(() => {});
+      }
+    }
+    res.status(200).json({ received: true });
+  } catch (err: any) {
+    res.status(200).json({ received: true, error: err.message });
+  }
+});
+
+app.post('/api/sponsors/pix/create', pixCreateRateLimiter, async (req, res) => {
   try {
     const { sponsorId, name, phone, address, city, state, category, description, badge, imageUrl } = req.body;
-
     if (!name || !phone) {
       return res.status(400).json({ error: 'Nome e Telefone são obrigatórios para gerar o Pix.' });
     }
-
     const cleanPhone = String(phone).replace(/\D/g, '');
     const cleanId = sponsorId || `sp-${Date.now()}`;
     const valor = 100.0;
     const protocolo = `PROT-${Date.now().toString().slice(-6)}`;
 
-    // 1. Salva ou atualiza o patrocinador no banco SQLite (com ativo = 0 e liberado = 'pendente')
-    try {
-      const upsertSp = db.prepare(`
-        INSERT INTO patrocinadores (
-          id, nome, categoria, descricao, telefone, endereco, cidade, estado, badge, imagem_url, valor_mensal, ativo, liberado, status_pagamento, protocolo
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pendente', 'pendente', ?)
-        ON CONFLICT(id) DO UPDATE SET
-          nome = excluded.nome,
-          categoria = excluded.categoria,
-          descricao = excluded.descricao,
-          telefone = excluded.telefone,
-          endereco = excluded.endereco,
-          cidade = excluded.cidade,
-          estado = excluded.estado,
-          badge = excluded.badge,
-          imagem_url = excluded.imagem_url,
-          protocolo = excluded.protocolo;
-      `);
-      upsertSp.run(
-        cleanId,
-        name.trim(),
-        category || 'Comércio Local',
-        description || '',
-        cleanPhone,
-        address || '',
-        city || '',
-        state || 'SP',
-        badge || '',
-        imageUrl || '',
-        protocolo
-      );
-    } catch (dbErr) {
-      console.warn('Aviso ao salvar patrocinador no SQLite:', dbErr);
-    }
+    await upsertSponsorForPix({
+      id: cleanId,
+      nome: name.trim(),
+      categoria: category || 'Comércio Local',
+      descricao: description || '',
+      telefone: cleanPhone,
+      endereco: address || '',
+      cidade: city || '',
+      estado: state || 'SP',
+      badge: badge || '',
+      imagem_url: imageUrl || '',
+      valor_mensal: valor,
+      protocolo,
+    });
 
-    // 2. Cria pagamento Pix via Mercado Pago
+    const host = req.get('host');
+    const webhookUrl = `${req.protocol}://${host}/api/webhook/mercadopago`;
+
     const pixRes = await createMercadoPagoPixPayment({
       transactionAmount: valor,
       description: `Patrocínio Vitrine (R$ 100/mês) - ${name.trim()}`,
@@ -3295,33 +2793,24 @@ app.post('/api/sponsors/pix/create', async (req, res) => {
       payerName: name.trim(),
       payerPhone: cleanPhone,
       externalReference: cleanId,
+      notificationUrl: webhookUrl,
     });
 
     if (!pixRes.success) {
-      return res.status(500).json({ error: pixRes.errorMessage || 'Falha ao gerar o código Pix no Mercado Pago.' });
+      return res.status(500).json({ error: pixRes.errorMessage || 'Falha ao gerar o código Pix.' });
     }
 
-    // 3. Registra na tabela pagamentos_pix
-    try {
-      const insertPix = db.prepare(`
-        INSERT INTO pagamentos_pix (
-          id, patrocinador_id, mercado_pago_id, status, valor, qr_code, qr_code_base64, ticket_url, telefone_notificado
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-      `);
-      insertPix.run(
-        `pix-${Date.now()}`,
-        cleanId,
-        pixRes.paymentId,
-        pixRes.status,
-        valor,
-        pixRes.qrCode,
-        pixRes.qrCodeBase64,
-        pixRes.ticketUrl,
-        cleanPhone
-      );
-    } catch (e) {
-      console.warn('Aviso ao registrar pagamento no SQLite:', e);
-    }
+    await insertPixPaymentRecord({
+      id: `pix-${Date.now()}`,
+      patrocinador_id: cleanId,
+      mercado_pago_id: pixRes.paymentId,
+      status: pixRes.status,
+      valor,
+      qr_code: pixRes.qrCode,
+      qr_code_base64: pixRes.qrCodeBase64,
+      ticket_url: pixRes.ticketUrl,
+      telefone_notificado: cleanPhone,
+    });
 
     res.json({
       success: true,
@@ -3335,175 +2824,128 @@ app.post('/api/sponsors/pix/create', async (req, res) => {
       isSimulated: pixRes.isSimulated,
       advertiserPhone: cleanPhone,
       advertiserName: name.trim(),
+      chavePix: pixRes.chavePix,
+      tipoChave: pixRes.tipoChave,
+      nomeBeneficiario: pixRes.nomeBeneficiario,
+      cidadeBeneficiario: pixRes.cidadeBeneficiario,
     });
   } catch (error: any) {
-    console.error('Erro na rota /api/sponsors/pix/create:', error);
     res.status(500).json({ error: error.message || 'Erro interno ao processar Pix' });
   }
 });
 
-// Verificar status do pagamento Pix e atualizar status de pagamento
+app.get('/api/pix/platform-key', async (_req, res) => {
+  try {
+    const cfg = await getPixConfigPg();
+    res.json({
+      success: true,
+      chavePix: cfg.chavePix,
+      tipoChave: cfg.tipoChave,
+      nomeBeneficiario: cfg.nomeBeneficiario,
+      cidadeBeneficiario: cfg.cidadeBeneficiario,
+      hasMercadoPago: !!cfg.mercadoPagoToken,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/pix-config', adminRateLimiter, async (_req, res) => {
+  try {
+    const cfg = await getPixConfigPg();
+    res.json({ success: true, ...cfg });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/pix-config', adminRateLimiter, async (req, res) => {
+  try {
+    const { chavePix, tipoChave, nomeBeneficiario, cidadeBeneficiario, mercadoPagoToken } = req.body;
+    if (!chavePix?.trim()) {
+      return res.status(400).json({ error: 'A Chave Pix é obrigatória.' });
+    }
+    const updated = await savePixConfigPg({
+      chavePix,
+      tipoChave,
+      nomeBeneficiario,
+      cidadeBeneficiario,
+      mercadoPagoToken,
+    });
+    res.json({ success: true, message: 'Configurações de Pix salvas com sucesso!', config: updated });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/sponsors/pix/status/:paymentId', async (req, res) => {
   try {
     const { paymentId } = req.params;
-    const check = await checkMercadoPagoPaymentStatus(paymentId);
+    const { pix: localPix, sponsor: localSponsor } = await getPixPaymentWithSponsor(paymentId);
 
-    if (check.isPaid) {
-      // Atualiza o pagamento para 'pago', MAS MANTÉM liberado = 'pendente' e ativo = 0 para revisão humana de segurança
-      try {
-        db.prepare(`
-          UPDATE patrocinadores 
-          SET status_pagamento = 'pago', data_pagamento = CURRENT_TIMESTAMP 
-          WHERE id IN (SELECT patrocinador_id FROM pagamentos_pix WHERE mercado_pago_id = ?);
-        `).run(paymentId);
-
-        db.prepare(`
-          UPDATE pagamentos_pix 
-          SET status = 'approved', pago_em = CURRENT_TIMESTAMP 
-          WHERE mercado_pago_id = ?;
-        `).run(paymentId);
-      } catch (e) {
-        console.warn('Erro ao atualizar status pago:', e);
-      }
+    if (localPix && (localPix.status === 'approved' || localPix.status === 'pago')) {
+      return res.json({
+        paymentId,
+        status: 'approved',
+        statusDetail: 'accredited',
+        isPaid: true,
+        sponsor: localSponsor,
+      });
     }
 
-    // Obter dados do patrocinador relacionado
-    let sponsorInfo: any = null;
-    try {
-      sponsorInfo = db.prepare(`
-        SELECT p.* FROM patrocinadores p
-        JOIN pagamentos_pix px ON px.patrocinador_id = p.id
-        WHERE px.mercado_pago_id = ?
-        LIMIT 1;
-      `).get(paymentId);
-    } catch {}
+    const check = await checkMercadoPagoPaymentStatus(paymentId);
+    if (check.isPaid) {
+      await markPixPaymentApprovedPg(paymentId).catch(() => {});
+    }
 
+    const { sponsor } = await getPixPaymentWithSponsor(paymentId);
     res.json({
       paymentId,
       status: check.status,
       statusDetail: check.statusDetail,
       isPaid: check.isPaid,
-      sponsor: sponsorInfo,
+      sponsor,
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Erro ao checar status Pix' });
   }
 });
 
-// Enviar mensagem de aguardo de liberação em até 48h para o celular do anunciante
-app.post('/api/sponsors/notify-confirmation', (req, res) => {
+app.post('/api/sponsors/notify-confirmation', async (req, res) => {
   try {
     const { phone, sponsorName, protocol } = req.body;
     const cleanPhone = String(phone || '').replace(/\D/g, '');
     const protText = protocol ? `\n📋 *Protocolo:* ${protocol}` : '';
-
     const message = `✅ *Olá, ${sponsorName}! Recebemos seu Pix de R$ 100,00 com sucesso!*\n\n🔒 *Por motivos de segurança*, o seu anúncio passará pela nossa análise cadastral e será liberado na vitrine do app *Pra onde eu vou* em até *48 horas*.\n${protText}\n\nAssim que nossa equipe concluir a verificação, você receberá o aviso de ativação. Obrigado pela confiança! 🚀`;
 
-    // Marca no banco que a notificação foi emitida
-    try {
-      db.prepare(`
-        UPDATE pagamentos_pix 
-        SET mensagem_enviada = 1 
-        WHERE telefone_notificado = ?;
-      `).run(cleanPhone);
-    } catch {}
-
+    await markPixNotificationSentPg(cleanPhone);
     const whatsappUrl = `https://wa.me/55${cleanPhone}?text=${encodeURIComponent(message)}`;
-
-    res.json({
-      success: true,
-      phone: cleanPhone,
-      message,
-      whatsappUrl,
-    });
+    res.json({ success: true, phone: cleanPhone, message, whatsappUrl });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// ==================== LIBERAÇÃO DE PATROCINADORES (CENTRAL DE GERENCIAMENTO) ====================
-
-// Listar todos os patrocinadores para a Central de Gerenciamento (com filtro de liberado/pendente)
-app.get('/api/admin/sponsors', (req, res) => {
+app.get('/api/admin/sponsors', async (req, res) => {
   try {
-    const { status, liberado } = req.query;
-    let sql = 'SELECT * FROM patrocinadores WHERE 1=1';
-    const params: any[] = [];
-
-    if (liberado && liberado !== 'all') {
-      sql += ' AND liberado = ?';
-      params.push(String(liberado));
-    }
-
-    if (status && status !== 'all') {
-      sql += ' AND status_pagamento = ?';
-      params.push(String(status));
-    }
-
-    sql += ' ORDER BY criado_em DESC;';
-
-    const rows = db.prepare(sql).all(...params) as any[];
-
-    res.json(rows.map(r => ({
-      id: r.id,
-      name: r.nome,
-      category: r.categoria,
-      description: r.descricao,
-      phone: r.telefone,
-      address: r.endereco,
-      city: r.cidade,
-      state: r.estado,
-      badge: r.badge,
-      latitude: r.latitude,
-      longitude: r.longitude,
-      imageUrl: r.imagem_url,
-      monthlyFee: r.valor_mensal,
-      active: Boolean(r.ativo),
-      liberado: r.liberado || 'pendente',
-      statusPagamento: r.status_pagamento || 'pendente',
-      protocolo: r.protocolo,
-      dataPagamento: r.data_pagamento,
-      dataLiberacao: r.data_liberacao,
-      createdAt: r.criado_em,
-    })));
+    const items = await listSponsorsPg({
+      status: req.query.status ? String(req.query.status) : undefined,
+      liberado: req.query.liberado ? String(req.query.liberado) : undefined,
+    });
+    res.json(items);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Liberar (aprovar) ou Rejeitar Patrocinador na Central de Gerenciamento
-app.post('/api/admin/sponsors/:id/liberacao', (req, res) => {
+app.post('/api/admin/sponsors/:id/liberacao', async (req, res) => {
   try {
     const { id } = req.params;
-    const { action, motivo } = req.body; // action: 'aprovar' | 'rejeitar' | 'pausar'
+    const { action, motivo } = req.body;
+    const { changes, novoLiberado, novoAtivo, updated } = await updateSponsorLiberationPg(id, action);
 
-    let novoLiberado = 'pendente';
-    let novoAtivo = 0;
-
-    if (action === 'aprovar') {
-      novoLiberado = 'S';
-      novoAtivo = 1;
-    } else if (action === 'rejeitar') {
-      novoLiberado = 'N';
-      novoAtivo = 0;
-    } else if (action === 'pausar') {
-      novoLiberado = 'pendente';
-      novoAtivo = 0;
-    }
-
-    const stmt = db.prepare(`
-      UPDATE patrocinadores 
-      SET liberado = ?, ativo = ?, data_liberacao = CURRENT_TIMESTAMP
-      WHERE id = ?;
-    `);
-    const result = stmt.run(novoLiberado, novoAtivo, id);
-
-    // Buscar patrocinador atualizado
-    const updated = db.prepare('SELECT * FROM patrocinadores WHERE id = ?;').get(id) as any;
-
-    // Gerar mensagem de WhatsApp para envio manual ou automático
     let whatsappNotifyUrl = '';
-    if (updated && updated.telefone) {
+    if (updated?.telefone) {
       const cleanPhone = String(updated.telefone).replace(/\D/g, '');
       let msg = '';
       if (novoLiberado === 'S') {
@@ -3516,7 +2958,7 @@ app.post('/api/admin/sponsors/:id/liberacao', (req, res) => {
 
     res.json({
       success: true,
-      changes: result.changes,
+      changes,
       id,
       liberado: novoLiberado,
       active: novoAtivo === 1,
@@ -3527,35 +2969,39 @@ app.post('/api/admin/sponsors/:id/liberacao', (req, res) => {
   }
 });
 
-// 8. Verificação de Senha Administrativa (Padrão 0612 ou senha na tabela supervisor)
-app.post('/api/admin/verify-password', (req, res) => {
+// ==================== ESTATÍSTICAS & ADMIN AUTH ====================
+
+app.get('/api/admin/estatisticas', async (_req, res) => {
   try {
-    const { password } = req.body;
-    const clean = String(password || '').trim();
+    const data = await getEstatisticasPg();
+    res.json({ success: true, data });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/api/admin/estatisticas', async (_req, res) => {
+  try {
+    const changes = await clearEstatisticasPg();
+    res.json({ success: true, message: 'Estatísticas zeradas com sucesso', changes });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/admin/verify-password', async (req, res) => {
+  try {
+    const clean = String(req.body?.password || '').trim();
     if (!clean) {
       return res.status(400).json({ valid: false, message: 'Senha é obrigatória' });
     }
-
-    // A. Senha padrão default: 0612
     if (clean === '0612') {
-      return res.json({
-        valid: true,
-        user: 'Administrador Master',
-        role: 'master',
-      });
+      return res.json({ valid: true, user: 'Administrador Master', role: 'master' });
     }
-
-    // B. Senha cadastrada na tabela supervisor
-    const supervisor = db.prepare('SELECT id, nome, senha FROM supervisor WHERE senha = ?;').get(clean) as any;
-    if (supervisor) {
-      return res.json({
-        valid: true,
-        user: supervisor.nome,
-        supervisorId: supervisor.id,
-        role: 'supervisor',
-      });
+    const sup = await verifySupervisorByPassword(clean);
+    if (sup) {
+      return res.json({ valid: true, user: sup.nome, supervisorId: sup.id, role: 'supervisor' });
     }
-
     return res.status(401).json({
       valid: false,
       message: 'Senha incorreta. Digite a senha padrão (0612) ou a senha cadastrada na tabela supervisor.',
@@ -3565,263 +3011,101 @@ app.post('/api/admin/verify-password', (req, res) => {
   }
 });
 
-// ==================== SQL CONSOLE / EXPLORER ROUTES ====================
+// ==================== SQL CONSOLE & LIMPEZA (CLOUD SQL POSTGRESQL) ====================
 
-// Obter schema completo das tabelas existentes no SQLite
-app.get('/api/sql/schema', (req, res) => {
+app.get('/api/sql/schema', async (_req, res) => {
   try {
-    const schema = getDatabaseSchema();
+    const tables = await getPostgresSchemaInfo();
     res.json({
-      databaseName: 'praondeeu.db',
-      engine: 'SQLite 3 (Node.js Native)',
-      tables: schema,
+      databaseName: process.env.SQL_DB_NAME || 'Cloud SQL PostgreSQL',
+      engine: 'Cloud SQL PostgreSQL (Drizzle ORM)',
+      tables,
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Executar comando SQL arbitrário
 app.post('/api/sql/query', async (req, res) => {
   try {
     const { query } = req.body;
     if (!query || typeof query !== 'string') {
       return res.status(400).json({ error: 'Comando SQL não informado' });
     }
-
-    // Se for DELETE ou TRUNCATE em tabelas de eventos, detecta os IDs antes de executar
-    let eventIdsToDelete: string[] = [];
-    const isEventDelete = /\b(DELETE\s+FROM|TRUNCATE\s+(?:TABLE\s+)?)\s*(eventos[a-zA-Z0-9_]*|v_eventos_completos)\b/i.test(query);
-
-    if (isEventDelete) {
-      try {
-        const tableMatch = query.match(/\b(?:DELETE\s+FROM|TRUNCATE\s+(?:TABLE\s+)?)\s*([a-zA-Z0-9_]+)/i);
-        const tblName = tableMatch ? tableMatch[1] : '';
-        if (tblName) {
-          const whereMatch = query.match(/\bWHERE\s+([^;]+)/i);
-          const whereClause = whereMatch ? `WHERE ${whereMatch[1].trim()}` : '';
-
-          let selectSql = '';
-          if (tblName.toLowerCase() === 'eventos' || tblName.toLowerCase() === 'v_eventos_completos') {
-            selectSql = `SELECT id FROM v_eventos_completos ${whereClause};`;
-          } else {
-            selectSql = `SELECT id FROM ${tblName} ${whereClause};`;
-          }
-          const rows = db.prepare(selectSql).all() as { id: string }[];
-          eventIdsToDelete = rows.map(r => String(r.id)).filter(Boolean);
-        }
-      } catch (errCapture) {
-        console.warn('[SQL Console] Aviso ao capturar IDs para sincronizar com Firestore:', errCapture);
-      }
-    }
-
     const startTime = performance.now();
-    const result = executeSqlQuery(query);
+    const result = await executePostgresSqlQuery(query);
     const durationMs = (performance.now() - startTime).toFixed(2);
-
-    // Se o comando excluiu eventos, remove-os do Firestore para que o listener em tempo real não os recrie
-    if (eventIdsToDelete.length > 0) {
-      try {
-        const { db: fDb } = await import('./src/lib/firebase.js');
-        const { doc, writeBatch } = await import('firebase/firestore');
-        for (let i = 0; i < eventIdsToDelete.length; i += 450) {
-          const chunk = eventIdsToDelete.slice(i, i + 450);
-          const batch = writeBatch(fDb);
-          for (const eid of chunk) {
-            batch.delete(doc(fDb, 'eventos', eid));
-          }
-          await batch.commit();
-        }
-        console.log(`[Firestore] ${eventIdsToDelete.length} evento(s) excluído(s) em sincronia com o SQLite.`);
-      } catch (fErr) {
-        console.warn('[Firestore] Erro ao sincronizar exclusão com Firestore:', fErr);
-      }
-
-      // Remove também da tabela favoritos do SQLite
-      try {
-        const placeholders = eventIdsToDelete.map(() => '?').join(',');
-        db.prepare(`DELETE FROM favoritos WHERE evento_id IN (${placeholders});`).run(...eventIdsToDelete);
-      } catch {}
-    }
-
-    res.json({
-      ...result,
-      deletedEventIds: eventIdsToDelete,
-      durationMs: `${durationMs}ms`,
-    });
+    res.json({ ...result, durationMs: `${durationMs}ms` });
   } catch (error: any) {
-    res.status(400).json({
-      error: error.message || 'Erro de sintaxe ou execução no SQLite',
-    });
+    res.status(400).json({ error: error.message || 'Erro de sintaxe ou execução no PostgreSQL' });
   }
 });
 
-// Rota administrativa para acionar manualmente a limpeza e reorganização de tabelas
 app.post('/api/admin/cleanup-database', async (req, res) => {
   try {
-    const result = await runDailyDatabaseCleanup();
+    const scope =
+      req.body?.type === 'diaria' || req.body?.type === 'manual' ? req.body.type : 'quinzenal';
+    const result = await runPostgresCleanup(scope);
     res.json(result);
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// Função robusta de limpeza diária de eventos anteriores ao dia de hoje e reorganização de tabelas
-async function runDailyDatabaseCleanup(): Promise<{ success: boolean; deletedCount: number; reorganized: boolean; expiredIds: string[]; dateStr: string }> {
+app.get('/api/admin/cleanup-status', async (_req, res) => {
   try {
-    // 1. Obtém a data de hoje no fuso horário de São Paulo (America/Sao_Paulo)
-    const now = new Date();
-    const spString = now.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' });
-    const spDate = new Date(spString);
-    const year = spDate.getFullYear();
-    const month = String(spDate.getMonth() + 1).padStart(2, '0');
-    const day = String(spDate.getDate()).padStart(2, '0');
-    const todayString = `${year}-${month}-${day}`;
-
-    console.log(`[Cron Cleanup] Iniciando processo automático de limpeza diária para eventos anteriores a ${todayString}...`);
-
-    // 2. Coleta todos os IDs de eventos expirados para sincronizar a remoção com o Firestore
-    let expiredEventIds: string[] = [];
-    try {
-      const rows = db.prepare('SELECT id FROM eventos WHERE data_evento < ?;').all(todayString) as { id: string }[];
-      expiredEventIds = rows.map((r: any) => String(r.id)).filter(Boolean);
-    } catch (eGet) {
-      console.warn('[Cron Cleanup] Erro ao listar IDs da tabela mestre:', eGet);
-      // Tenta na view unificada se a tabela mestre apresentar falhas
-      try {
-        const rowsView = db.prepare('SELECT id FROM v_eventos_completos WHERE data_evento < ?;').all(todayString) as { id: string }[];
-        expiredEventIds = rowsView.map((r: any) => String(r.id)).filter(Boolean);
-      } catch {}
-    }
-
-    let totalDeleted = 0;
-
-    // Tabelas solicitadas explicitamente pelo usuário para limpeza
-    const explicitTables = [
-      'eventos_baile_nostalgia',
-      'eventos_baile_terceira_idade',
-      'eventos_bailes',
-      'eventos_festas',
-      'eventos_forro',
-      'eventos_forro_pe_de_serra',
-      'eventos_samba_e_pagode',
-      'eventos_show',
-      'eventos',
-      'eventos_importados'
-    ];
-
-    console.log('[Cron Cleanup] Executando limpeza explícita nas tabelas configuradas...');
-
-    for (const tName of explicitTables) {
-      try {
-        const tableCheck = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?;").get(tName);
-        if (tableCheck) {
-          const res = db.prepare(`DELETE FROM ${tName} WHERE data_evento < ?;`).run(todayString);
-          totalDeleted += res.changes;
-          if (res.changes > 0) {
-            console.log(`[Cron Cleanup] Tabela "${tName}": ${res.changes} registro(s) expirado(s) removido(s).`);
-          }
-        }
-      } catch (errTable) {
-        console.warn(`[Cron Cleanup] Erro ao limpar tabela específica ${tName}:`, errTable);
-      }
-    }
-
-    // 5. Deleta de todas as tabelas dedicadas de categorias adicionais (caso existam)
-    try {
-      const tables = db.prepare(`
-        SELECT name FROM sqlite_master 
-        WHERE type='table' AND name LIKE 'eventos_%' AND name != 'eventos_importados';
-      `).all() as { name: string }[];
-
-      for (const t of tables) {
-        if (explicitTables.includes(t.name)) continue; // Já limpa acima
-        try {
-          const resCat = db.prepare(`DELETE FROM ${t.name} WHERE data_evento < ?;`).run(todayString);
-          totalDeleted += resCat.changes;
-          if (resCat.changes > 0) {
-            console.log(`[Cron Cleanup] Tabela adicional "${t.name}": ${resCat.changes} registro(s) expirado(s) removido(s).`);
-          }
-        } catch (eCat) {
-          console.warn(`[Cron Cleanup] Erro ao limpar tabela dedicada ${t.name}:`, eCat);
-        }
-      }
-    } catch (eList) {
-      console.warn('[Cron Cleanup] Erro ao listar tabelas para limpeza:', eList);
-    }
-
-    // 6. Remove referências dos favoritos
-    if (expiredEventIds.length > 0) {
-      try {
-        const placeholders = expiredEventIds.map(() => '?').join(',');
-        db.prepare(`DELETE FROM favoritos WHERE evento_id IN (${placeholders});`).run(...expiredEventIds);
-      } catch (eFav) {
-        console.warn('[Cron Cleanup] Erro ao limpar tabela favoritos:', eFav);
-      }
-    }
-
-    // 7. Sincroniza em lotes com o Firestore (removendo os registros deletados)
-    if (expiredEventIds.length > 0) {
-      try {
-        const { db: fDb } = await import('./src/lib/firebase.js');
-        const { doc, writeBatch } = await import('firebase/firestore');
-        for (let i = 0; i < expiredEventIds.length; i += 450) {
-          const chunk = expiredEventIds.slice(i, i + 450);
-          const batch = writeBatch(fDb);
-          for (const eid of chunk) {
-            batch.delete(doc(fDb, 'eventos', eid));
-          }
-          await batch.commit();
-        }
-        console.log(`[Cron Cleanup] ${expiredEventIds.length} evento(s) removido(s) do Firestore em tempo real.`);
-      } catch (fErr) {
-        console.warn('[Cron Cleanup] Erro ao sincronizar com Firestore:', fErr);
-      }
-    }
-
-    // 8. Reorganização das tabelas e compactação física do arquivo .db (VACUUM)
-    console.log('[Cron Cleanup] Executando VACUUM para reorganizar e desfragmentar as tabelas no SQLite...');
-    try {
-      db.exec('VACUUM;');
-      console.log('[Cron Cleanup] Reorganização (VACUUM) concluída com sucesso!');
-    } catch (eVac) {
-      console.error('[Cron Cleanup] Erro ao reorganizar tabelas com VACUUM:', eVac);
-    }
-
-    // 9. Reconstrói a view unificada para garantir consistência
-    try {
-      rebuildUnifiedEventsView(db);
-    } catch {}
-
-    console.log(`[Cron Cleanup] Processo diário concluído! Total de alterações: ${totalDeleted} registros limpos. Banco de dados reorganizado.`);
-
-    return {
-      success: true,
-      deletedCount: totalDeleted,
-      reorganized: true,
-      expiredIds: expiredEventIds,
-      dateStr: todayString,
-    };
-  } catch (error: any) {
-    console.error('[Cron Cleanup] Erro fatal no processo de limpeza automática:', error);
-    return {
-      success: false,
-      deletedCount: 0,
-      reorganized: false,
-      expiredIds: [],
-      dateStr: new Date().toISOString(),
-    };
-  }
-}
-
-// Endpoint explícito para recriar e sincronizar a tabela física 'eventos'
-app.post('/api/admin/create-eventos-table', (req, res) => {
-  try {
-    const result = createEventosTable(db);
+    const { monitoredTables, lastExecution, history } = await getCleanupStatusPg();
+    const spString = new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' });
     res.json({
       success: true,
-      message: 'Tabela eventos criada e sincronizada com sucesso!',
-      rowCount: result.rowCount,
+      currentServerTimeSP: spString,
+      executionHour: '06:00 da manhã',
+      executionReason:
+        'Horário selecionado de menor ou quase nenhum fluxo de usuários para garantir execução silenciosa, segura e sem concorrência.',
+      protectedTables: [],
+      activeSchedules: {
+        quinzenal: {
+          cron: '0 6 1,15 * *',
+          time: '06:00 da manhã',
+          description: 'Todo dia 15 e todo dia 1 de cada mês às 06:00 (America/Sao_Paulo)',
+          action: 'Exclusão de registros expirados e atualização de índices no Cloud SQL PostgreSQL',
+        },
+        diaria: {
+          cron: '0 6 * * *',
+          time: '06:00 da manhã',
+          description: 'Todos os dias às 06:00 (America/Sao_Paulo)',
+          action: 'Exclusão diária de eventos anteriores à data de hoje no Cloud SQL PostgreSQL',
+        },
+      },
+      monitoredTables,
+      lastExecution,
+      history,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/admin/create-eventos-table', async (_req, res) => {
+  try {
+    const rows = await getRawEventosPg();
+    res.json({
+      success: true,
+      message: 'Tabela eventos ativa e sincronizada no Cloud SQL PostgreSQL!',
+      rowCount: rows.length,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.all(['/api/admin/sync-from-firestore', '/api/events/reload-from-firestore'], async (_req, res) => {
+  try {
+    const rows = await getRawEventosPg();
+    res.json({
+      success: true,
+      count: rows.length,
+      totalInDb: rows.length,
     });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -3831,102 +3115,68 @@ app.post('/api/admin/create-eventos-table', (req, res) => {
 // ==================== VITE MIDDLEWARE & SERVER START ====================
 
 async function startServer() {
+  const runningCompiledDist =
+    (typeof __filename !== 'undefined' && __filename.includes(`${path.sep}dist${path.sep}`)) ||
+    (process.argv[1] && process.argv[1].includes(`${path.sep}dist${path.sep}`));
+  const hasSourceEntry = fs.existsSync(path.join(process.cwd(), 'src', 'main.tsx'));
+  const distPath = path.join(process.cwd(), 'dist');
+  const hasDistBuild = fs.existsSync(path.join(distPath, 'index.html'));
+
   const isProduction =
     process.env.NODE_ENV === 'production' ||
-    (typeof __filename !== 'undefined' && __filename.includes('dist')) ||
-    (process.argv[1] && process.argv[1].includes('dist')) ||
-    !fs.existsSync(path.join(process.cwd(), 'src', 'main.tsx'));
+    runningCompiledDist ||
+    !hasSourceEntry;
 
-  if (!isProduction) {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
+  let servedWithVite = false;
+  if (!isProduction || (!hasDistBuild && hasSourceEntry)) {
+    try {
+      const { createServer: createViteServer } = await import('vite');
+      const vite = await createViteServer({
+        server: { middlewareMode: true, hmr: false },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+      servedWithVite = true;
+    } catch (viteErr) {
+      console.error('[Pra onde eu vou] Falha ao iniciar Vite middleware:', viteErr);
+      servedWithVite = false;
+    }
+  }
+
+  if (!servedWithVite) {
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
+      if (req.path.startsWith('/api/') || req.path.startsWith('/uploads/')) {
+        return res.status(404).json({ error: 'Recurso não encontrado' });
+      }
+      if (!fs.existsSync(path.join(distPath, 'index.html'))) {
+        return res.status(503).send('Aplicação compilando. Atualize a página em instantes.');
+      }
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Pra onde eu vou] Servidor SQLite + Express rodando na porta ${PORT}`);
-    
-    // Agenda a limpeza e reorganização automática diária para as 06h00 da manhã (fuso de São Paulo)
-    cron.schedule('0 6 * * *', () => {
-      runDailyDatabaseCleanup().catch((err) => {
-        console.error('[Cron schedule] Erro ao executar limpeza diária:', err);
-      });
-    }, {
-      timezone: 'America/Sao_Paulo'
-    });
-    console.log('[Cron] Limpeza automática diária agendada com sucesso para as 06:00 (America/Sao_Paulo)!');
+    console.log(`[Pra onde eu vou] Servidor Cloud SQL PostgreSQL + Express rodando na porta ${PORT}`);
 
-    // Sincronização inicial automática em segundo plano
-    syncFirestoreEventsOnStartup().catch((err) => {
-      console.warn('[Startup] Sincronização em segundo plano:', err);
-    });
+    cron.schedule(
+      '0 6 1,15 * *',
+      () => {
+        runPostgresCleanup('quinzenal').catch((err) =>
+          console.error('[Cron Quinzenal] Erro:', err)
+        );
+      },
+      { timezone: 'America/Sao_Paulo' }
+    );
+
+    cron.schedule(
+      '0 6 * * *',
+      () => {
+        runPostgresCleanup('diaria').catch((err) => console.error('[Cron Diário] Erro:', err));
+      },
+      { timezone: 'America/Sao_Paulo' }
+    );
   });
-}
-
-async function syncFirestoreEventsOnStartup() {
-  try {
-    const row = db.prepare('SELECT COUNT(*) as c FROM v_eventos_completos;').get() as any;
-    if (row && row.c > 0) {
-      console.log(`[Startup] Banco SQLite já possui ${row.c} eventos.`);
-      return;
-    }
-    console.log('[Startup] Sincronizando eventos do Firestore para as tabelas de categorias...');
-    const { db: firestoreDb } = await import('./src/lib/firebase.js');
-    const { collection, getDocs } = await import('firebase/firestore');
-    const snap = await getDocs(collection(firestoreDb, 'eventos'));
-    if (snap.empty) {
-      console.log('[Startup] Nenhum evento no Firestore para sincronizar.');
-      return;
-    }
-
-    let count = 0;
-    for (const d of snap.docs) {
-      const data = d.data();
-      saveEventToCategoryTable(db, {
-        id: d.id,
-        advertiserId: data.advertiserId || null,
-        categoryId: data.categoryId || null,
-        category: data.category || 'Categoria',
-        title: data.title || 'Evento',
-        description: data.description || '',
-        date: data.date || '2026-09-20',
-        time: data.time || '20:00',
-        endTime: data.endTime || null,
-        locationName: data.locationName || 'Local',
-        address: data.address || '',
-        city: data.city || 'São Paulo',
-        state: data.state || 'SP',
-        latitude: data.latitude ? String(data.latitude) : null,
-        longitude: data.longitude ? String(data.longitude) : null,
-        liberado: data.liberado || 'S',
-        isFree: data.isFree ? 1 : 0,
-        price: data.price || 0,
-        priceDetails: data.priceDetails || '',
-        imageUrl: data.imageUrl || '',
-        videoUrl: data.videoUrl || null,
-        url: data.url || data.videoUrl || null,
-        mediaType: data.mediaType || (data.videoUrl ? 'video' : 'image'),
-        organizer: data.organizer || '',
-        contact: data.contact || '',
-        tags: data.tags || [],
-        featured: data.featured ? 1 : 0,
-        status: 'aprovado',
-        createdAt: data.createdAt || new Date().toISOString()
-      });
-      count++;
-    }
-    console.log(`[Startup] ${count} eventos sincronizados com sucesso do Firestore para as tabelas de categorias!`);
-  } catch (err) {
-    console.warn('[Startup] Erro ao sincronizar eventos do Firestore:', err);
-  }
 }
 
 startServer();

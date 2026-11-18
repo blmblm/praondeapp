@@ -4,28 +4,43 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <script>
-      // Redirecionamento automático e seguro para a URL de produção limpa (ais-pre-)
-      // caso o link de desenvolvimento (ais-dev-) seja aberto diretamente no navegador (fora do iframe do AI Studio)
-      if (window.location.hostname.includes('ais-dev-') && window.self === window.top) {
-        window.location.replace(window.location.href.replace('ais-dev-', 'ais-pre-'));
-      }
+      // Captura antecipada do evento nativo de instalação PWA caso dispare antes do React montar
+      window.__deferredPWAInstallPrompt = null;
+      window.addEventListener('beforeinstallprompt', function(e) {
+        e.preventDefault();
+        window.__deferredPWAInstallPrompt = e;
+      });
+      (function() {
+        setTimeout(function() {
+          var el = document.getElementById('app-initial-loader');
+          if (el) {
+            el.style.transition = 'opacity 0.4s ease';
+            el.style.opacity = '0';
+            setTimeout(function() {
+              if (el && el.parentNode) el.parentNode.removeChild(el);
+            }, 400);
+          }
+        }, 3500);
+      })();
     </script>
-    <title>Pra onde eu vou</title>
-    <meta name="description" content="Aplicativo de cadastro e consulta de eventos para descobrir shows, festivais e experiências." />
-    <meta property="og:title" content="Pra onde eu vou" />
-    <meta property="og:description" content="Aplicativo de cadastro e consulta de eventos para descobrir shows, festivais e experiências." />
+    <title>Pra onde eu vou - Guia de Eventos de São Paulo</title>
+    <meta name="description" content="Guia exclusivo de eventos, shows, festas e bailes do Estado de São Paulo (SP)." />
+    <meta property="og:title" content="Pra onde eu vou - Eventos em São Paulo (SP)" />
+    <meta property="og:description" content="Guia exclusivo de eventos, shows, festas e bailes do Estado de São Paulo (SP)." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="theme-color" content="#0b0d17" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="apple-mobile-web-app-title" content="Pra onde eu vou" />
-    <link rel="manifest" href="/manifest.json" />
-    <link rel="apple-touch-icon" href="/app-icon.jpg" />
-    <link rel="icon" type="image/jpeg" href="/app-icon.jpg" />
+    <meta name="apple-mobile-web-app-title" content="Pra onde eu" />
+    <meta name="application-name" content="Pra onde eu" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192.png" />
+    <link rel="shortcut icon" href="/apple-touch-icon.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=Plus+Jakarta+Sans:ital,wght@0,300..800;1,300..800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=Plus+Jakarta+Sans:ital,wght@0,300..800;1,300..800&family=Pacifico&family=Caveat:wght@400;700&display=swap" rel="stylesheet">
   </head>
   <body class="bg-[#0b0d17] text-slate-100 font-sans antialiased min-h-screen selection:bg-amber-500 selection:text-slate-950">
     <div id="root">
