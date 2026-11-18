@@ -3115,6 +3115,26 @@ app.all(['/api/admin/sync-from-firestore', '/api/events/reload-from-firestore'],
   }
 });
 
+app.get('/api/db-status', async (_req, res) => {
+  try {
+    await ensureDatabaseSchema();
+    const tables = await getPostgresSchemaInfo();
+    const eventosTbl = tables.find((t) => t.name === 'eventos');
+    res.json({
+      connected: true,
+      usingDatabaseUrl: Boolean((process.env.DATABASE_URL || '').trim()),
+      tablesCount: tables.length,
+      eventosCount: eventosTbl?.rowCount ?? 0,
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      connected: false,
+      usingDatabaseUrl: Boolean((process.env.DATABASE_URL || '').trim()),
+      error: err?.message || 'Erro ao conectar no banco PostgreSQL',
+    });
+  }
+});
+
 app.get('/api/admin/export-backup', async (_req, res) => {
   try {
     const backup = await exportFullDatabaseBackupPg();

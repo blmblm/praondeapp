@@ -19,6 +19,16 @@ export const createPool = () => {
         !databaseUrl.includes('localhost') &&
         !databaseUrl.includes('127.0.0.1') &&
         process.env.SQL_SSL !== 'false';
+      if (useSsl) {
+        try {
+          const parsedUrl = new URL(databaseUrl);
+          parsedUrl.searchParams.delete('channel_binding');
+          parsedUrl.searchParams.delete('sslmode');
+          databaseUrl = parsedUrl.toString();
+        } catch {
+          // keep sanitized string as-is if URL parser rejects custom format
+        }
+      }
       global._postgresPool = new Pool({
         connectionString: databaseUrl,
         ssl: useSsl ? { rejectUnauthorized: false } : undefined,
