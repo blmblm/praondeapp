@@ -4,7 +4,6 @@ import {
   Filter, 
   Calendar,
   MapPin, 
-  ArrowLeft, 
   Heart, 
   DollarSign,
   Sparkles,
@@ -221,12 +220,14 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
     date: string;
     query: string;
     sortByProximity: boolean;
+    onlyVideos: boolean;
   }>(() => ({
     category: initialCategory || 'Todas',
     estado: initialEstado || 'Todos',
     date: initialDate || todayStr,
     query: initialQuery,
     sortByProximity: initialSortByProximity !== undefined ? initialSortByProximity : true,
+    onlyVideos: false,
   }));
 
   // Dynamic category options from default list, DB categories, props, and any events registered
@@ -297,6 +298,7 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
           date: todayStr,
           query: '',
           sortByProximity: sortByProximity,
+          onlyVideos: filterOnlyVideos,
         });
         setSelectionNotice(`Ritmo "${chosenCategory}" selecionado. Exibindo eventos a partir dos mais próximos.`);
         setTimeout(() => {
@@ -313,6 +315,7 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
           date: todayStr,
           query: initialQuery,
           sortByProximity: sortByProximity,
+          onlyVideos: filterOnlyVideos,
         });
         setSelectionNotice(`Filtro de busca "${initialQuery}" configurado.`);
         setTimeout(() => {
@@ -345,9 +348,10 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
           date: dt,
           query: '',
           sortByProximity: prox,
+          onlyVideos: false,
         });
         setTimeout(() => {
-          handleSelectEvents({ category: cat, estado: est, date: dt, query: '', sortByProximity: prox });
+          handleSelectEvents({ category: cat, estado: est, date: dt, query: '', sortByProximity: prox, onlyVideos: false });
         }, 20);
       }
     }
@@ -513,7 +517,7 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
     if (dbEvents !== null) {
       const serverList = dbEvents.filter((event) => {
         if (!event) return false;
-        if (filterOnlyVideos && !getEventVideoUrl(event)) return false;
+        if (appliedFilters.onlyVideos && !getEventVideoUrl(event)) return false;
         return true;
       });
       return serverList.slice(0, visibleLimit);
@@ -525,8 +529,8 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
         return false;
       }
 
-      // Filtro opcional: apenas com vídeo
-      if (filterOnlyVideos && !getEventVideoUrl(event)) {
+      // Filtro opcional: apenas com vídeo (aplicado ao clicar em Consultar)
+      if (appliedFilters.onlyVideos && !getEventVideoUrl(event)) {
         return false;
       }
 
@@ -740,6 +744,7 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
     date?: string;
     query?: string;
     sortByProximity?: boolean;
+    onlyVideos?: boolean;
     limit?: number;
   }) => {
     // Mantém os eventos anteriores visíveis enquanto busca para nunca deixar a tela em branco/preta
@@ -749,6 +754,7 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
     const dateToUse = overrideFilters?.date !== undefined ? overrideFilters.date : selectedDate;
     const queryToUse = overrideFilters?.query !== undefined ? overrideFilters.query : searchQuery;
     const proximityToUse = overrideFilters?.sortByProximity !== undefined ? overrideFilters.sortByProximity : sortByProximity;
+    const onlyVideosToUse = overrideFilters?.onlyVideos !== undefined ? overrideFilters.onlyVideos : filterOnlyVideos;
     const limitToUse = overrideFilters?.limit !== undefined ? overrideFilters.limit : (overrideFilters?.category !== undefined || overrideFilters?.query !== undefined ? 200 : visibleLimit);
     if (overrideFilters?.category !== undefined || overrideFilters?.query !== undefined) {
       setVisibleLimit(200);
@@ -772,6 +778,7 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
       date: effectiveDate,
       query: queryToUse,
       sortByProximity: proximityToUse,
+      onlyVideos: onlyVideosToUse,
     });
 
     setIsSearchingDb(true);
@@ -950,6 +957,7 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
     setSelectedEstado('Todos');
     setSelectedDate(todayStr);
     setSortByProximity(true);
+    setFilterOnlyVideos(false);
     setDateError('');
     setCityError(false);
     setSelectionNotice('Filtros limpos. Exibindo todos os eventos.');
@@ -960,18 +968,16 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
       date: todayStr,
       query: '',
       sortByProximity: true,
+      onlyVideos: false,
     });
-    handleSelectEvents({ category: defaultCat, estado: 'Todos', date: todayStr, query: '' });
+    handleSelectEvents({ category: defaultCat, estado: 'Todos', date: todayStr, query: '', onlyVideos: false });
   };
 
-  // Verifica se há alteração pendente nos campos para o usuário clicar em "Consultar Eventos"
-  const isPendingSelection =
-    !hasExecutedSelection ||
+  // Ativa o botão "Consultar" SOMENTE quando houver alteração na Categoria, Data inicial ou Com Vídeo
+  const isConsultaButtonActive =
     selectedCategory !== appliedFilters.category ||
-    selectedEstado !== appliedFilters.estado ||
     selectedDate !== appliedFilters.date ||
-    sortByProximity !== appliedFilters.sortByProximity ||
-    searchQuery.trim() !== appliedFilters.query.trim();
+    filterOnlyVideos !== appliedFilters.onlyVideos;
 
   const defaultCat = categoryOptions[0] || 'Show';
   const hasActiveFilters =
@@ -981,63 +987,17 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
     selectedEstado !== 'Todos' ||
     (selectedDate !== '' && selectedDate !== todayStr) ||
     !sortByProximity ||
+    filterOnlyVideos ||
     appliedFilters.query.trim() !== '' ||
     appliedFilters.category !== defaultCat ||
     appliedFilters.estado !== 'Todos' ||
-    (appliedFilters.date !== '' && appliedFilters.date !== todayStr);
-
-  const handleExitAndClear = () => {
-    const defaultCat = categoryOptions[0] || 'Show';
-    setSearchQuery('');
-    setSelectedCategory(defaultCat);
-    setSelectedEstado('Todos');
-    setSelectedDate(todayStr);
-    setSortByProximity(true);
-    setDateError('');
-    setSelectionNotice('');
-    setHasExecutedSelection(true);
-    setDbEvents(null);
-    setAppliedFilters({
-      category: defaultCat,
-      estado: 'Todos',
-      date: todayStr,
-      query: '',
-      sortByProximity: true,
-    });
-    onNavigate('home');
-  };
+    (appliedFilters.date !== '' && appliedFilters.date !== todayStr) ||
+    appliedFilters.onlyVideos;
 
   return (
-    <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-3 sm:py-5 w-full">
-      {/* Top Header & Navigation */}
-      <div className="flex flex-wrap items-center justify-between gap-2.5 pb-3 border-b border-slate-800">
-        <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
-          <button
-            id="btn-catalog-sair"
-            onClick={handleExitAndClear}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800/90 hover:bg-rose-500/20 text-slate-200 hover:text-rose-300 border border-slate-700 hover:border-rose-500/40 text-xs font-bold transition-colors cursor-pointer shadow-sm"
-            title="Sair desta tela e limpar toda a visualização"
-          >
-            <X className="w-4 h-4 text-rose-400" />
-            <span>Sair</span>
-          </button>
-          <button
-            id="btn-catalog-back-home"
-            onClick={handleExitAndClear}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs font-semibold border border-slate-800 transition-colors cursor-pointer"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            <span>Voltar ao Início</span>
-          </button>
-          <div className="h-4 w-px bg-slate-800 hidden sm:block" />
-          <h1 className="text-lg sm:text-2xl font-extrabold text-white">
-            Consultar Eventos
-          </h1>
-        </div>
-      </div>
-
+    <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 pt-2 pb-4 sm:pt-3 sm:pb-6 w-full">
       {/* Filter Toolbar (compacta para exibir os eventos logo de cara) */}
-      <div className="pt-3 pb-2 space-y-2.5">
+      <div className="pt-1 pb-2 space-y-2.5">
         <div className="flex flex-col lg:flex-row items-stretch lg:items-center gap-2">
           <div className="grid grid-cols-2 lg:flex items-center gap-2 flex-1">
             {/* 1. Índice Categoria (Dropdown) */}
@@ -1050,7 +1010,6 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
                     const newCat = e.target.value;
                     setSelectedCategory(newCat);
                     setSearchQuery('');
-                    handleSelectEvents({ category: newCat, query: '' });
                   }}
                   className="w-full h-10 pl-3 pr-8 bg-slate-900 border border-slate-800 rounded-xl text-xs sm:text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500/60 appearance-none cursor-pointer"
                   title="Categoria"
@@ -1084,7 +1043,7 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
                   onChange={handleDateChange}
                   onBlur={handleDateBlur}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleSelectEvents();
+                    if (e.key === 'Enter' && isConsultaButtonActive) handleSelectEvents();
                   }}
                   title="Data a partir de"
                   className="w-full min-w-0 bg-transparent text-xs sm:text-sm text-slate-200 focus:outline-none cursor-pointer [color-scheme:dark]"
@@ -1135,18 +1094,31 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
             <button
               id="btn-catalog-select-events"
               type="button"
-              onClick={() => handleSelectEvents()}
-              disabled={isSearchingDb}
-              className="flex-1 sm:flex-none px-4 h-10 rounded-xl text-slate-950 text-xs sm:text-sm font-bold bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 shadow-md shadow-amber-500/20 transition-all flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer active:scale-95 disabled:opacity-70"
+              onClick={() => {
+                if (isConsultaButtonActive) {
+                  handleSelectEvents();
+                }
+              }}
+              disabled={isSearchingDb || !isConsultaButtonActive}
+              title={
+                isConsultaButtonActive
+                  ? 'Aplicar filtros selecionados'
+                  : 'Altere a categoria, a data inicial ou Com Vídeo para consultar'
+              }
+              className={`flex-1 sm:flex-none px-4 h-10 rounded-xl text-xs sm:text-sm font-bold transition-all flex items-center justify-center gap-1.5 whitespace-nowrap ${
+                isConsultaButtonActive && !isSearchingDb
+                  ? 'text-slate-950 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 shadow-md shadow-amber-500/20 cursor-pointer active:scale-95'
+                  : 'text-slate-500 bg-slate-800/80 border border-slate-700/70 cursor-not-allowed opacity-70'
+              }`}
             >
               {isSearchingDb ? (
                 <>
-                  <RefreshCw className="w-3.5 h-3.5 text-slate-950 animate-spin" />
-                  <span>Buscando...</span>
+                  <RefreshCw className="w-3.5 h-3.5 text-amber-400 animate-spin" />
+                  <span className="text-slate-300">Buscando...</span>
                 </>
               ) : (
                 <>
-                  <Filter className="w-3.5 h-3.5 text-slate-950" />
+                  <Filter className={`w-3.5 h-3.5 ${isConsultaButtonActive ? 'text-slate-950' : 'text-slate-500'}`} />
                   <span>Consultar</span>
                 </>
               )}

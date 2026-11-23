@@ -11,8 +11,6 @@ import {
   Menu,
   X,
   MapPin,
-  ChevronDown,
-  Check,
   Smartphone,
   LogIn,
   LogOut
@@ -59,7 +57,6 @@ export const Navbar: React.FC<NavbarProps> = ({
   onCloseHomeMenu,
 }) => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const [isCityMenuOpen, setIsCityMenuOpen] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
   const { userOriginCity, setUserOriginCity, refreshLocation } = useUserLocation();
   const { user, signInWithGoogle, signOutUser } = useAuth();
@@ -296,7 +293,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
   return (
     <header className="sticky top-0 z-40 bg-slate-950/90 backdrop-blur-md border-b border-slate-800/80">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-2">
         {/* Brand */}
         <button
           id="nav-brand-btn"
@@ -304,7 +301,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             onNavigate('home');
             setIsMobileMenuOpen(false);
           }}
-          className="flex items-center gap-2.5 sm:gap-3 text-left group focus:outline-none"
+          className="flex items-center gap-2 sm:gap-3 text-left group focus:outline-none shrink-0 cursor-pointer"
         >
           <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl overflow-hidden ring-1 ring-amber-500/30 group-hover:ring-amber-400 transition-all shadow-md shadow-amber-500/10 flex-shrink-0">
             <img
@@ -316,109 +313,54 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
           <div>
             <div className="flex items-center gap-1.5">
-              <span className="font-bold text-base sm:text-lg tracking-tight text-white group-hover:text-amber-400 transition-colors whitespace-nowrap">
+              <span className="font-bold text-sm sm:text-lg tracking-tight text-white group-hover:text-amber-400 transition-colors whitespace-nowrap">
                 Pra onde eu vou
               </span>
-              <span className="hidden sm:inline-flex items-center text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
+              <span className="hidden lg:inline-flex items-center text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
                 São Paulo (SP)
               </span>
             </div>
-            <p className="text-[11px] text-slate-400 hidden sm:block">
+            <p className="text-[11px] text-slate-400 hidden lg:block">
               Guia oficial de eventos no Estado de São Paulo
             </p>
           </div>
         </button>
 
+        {/* Botão Sair centralizado e bem visível (Mobile e Desktop) */}
+        <div className="flex-1 flex items-center justify-center px-1">
+          <button
+            id="nav-exit-clear-btn"
+            onClick={onExitAndClear || (() => onNavigate('home'))}
+            className="inline-flex items-center justify-center gap-1.5 min-h-[40px] px-4 sm:px-5 py-2 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-200 hover:text-white border border-rose-500/45 hover:border-rose-400 font-bold text-xs sm:text-sm shadow-sm whitespace-nowrap shrink-0 cursor-pointer transition-all active:scale-95"
+            title="Sair desta tela e voltar ao início"
+          >
+            <X className="w-4 h-4 text-rose-300 shrink-0" />
+            <span>Sair</span>
+          </button>
+        </div>
+
         {/* Desktop Navigation Actions (md and up) */}
-        <nav className="hidden md:flex items-center gap-1.5 lg:gap-2">
-          {/* Seletor de Onde Você Está (Referência de Proximidade e Cálculo de Distâncias) */}
-          <div className="relative">
-            <button
-              id="nav-city-btn"
-              type="button"
-              onClick={() => setIsCityMenuOpen(!isCityMenuOpen)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 hover:border-amber-400 text-xs font-semibold text-slate-200 hover:text-white transition-all cursor-pointer shadow-sm group"
-              title="Sua localização atual para calcular distâncias até os eventos"
-            >
-              <MapPin className="w-3.5 h-3.5 text-amber-400 shrink-0 group-hover:scale-110 transition-transform" />
-              <span className="max-w-[120px] truncate">{userOriginCity || 'Praia Grande'}</span>
-              <ChevronDown className={`w-3.5 h-3.5 text-slate-400 group-hover:text-amber-400 transition-transform duration-200 ${isCityMenuOpen ? 'rotate-180' : ''}`} />
-            </button>
-
-            {isCityMenuOpen && (
-              <div className="absolute left-0 top-full mt-2 w-64 bg-slate-900/98 backdrop-blur-xl border border-amber-500/40 rounded-2xl shadow-2xl p-3 z-50 animate-in fade-in zoom-in-95 duration-150">
-                <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-800">
-                  <span className="text-xs font-bold text-white flex items-center gap-1.5">
-                    <MapPin className="w-3.5 h-3.5 text-amber-400" />
-                    Você está em:
-                  </span>
-                  <span className="text-[10px] text-amber-400 font-medium">Distâncias</span>
-                </div>
-                
-                <p className="text-[11px] text-slate-400 mb-2 leading-tight">
-                  Selecione sua cidade para calcular a distância exata até os eventos:
-                </p>
-
-                <div className="space-y-1 max-h-48 overflow-y-auto pr-1 custom-scrollbar">
-                  {['Praia Grande', 'São Paulo', 'Santos', 'Santo André', 'Campinas', 'São Bernardo do Campo', 'São José dos Campos', 'Osasco', 'Guarulhos', 'Ribeirão Preto', 'Sorocaba'].map((cName) => {
-                    const isSelected = (userOriginCity || '').toLowerCase() === cName.toLowerCase();
-                    return (
-                      <button
-                        key={`nav-city-${cName}`}
-                        type="button"
-                        onClick={() => {
-                          setUserOriginCity(cName);
-                          setIsCityMenuOpen(false);
-                        }}
-                        className={`w-full px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between text-left transition-colors cursor-pointer ${
-                          isSelected
-                            ? 'bg-amber-500/20 text-amber-300 font-bold border border-amber-500/40'
-                            : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                        }`}
-                      >
-                        <span>{cName}</span>
-                        {isSelected && <Check className="w-3.5 h-3.5 text-amber-400" />}
-                      </button>
-                    );
-                  })}
-                </div>
-
-                <div className="pt-2 mt-2 border-t border-slate-800">
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      setIsCityMenuOpen(false);
-                      await refreshLocation();
-                    }}
-                    className="w-full py-1.5 px-2 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-[11px] font-bold transition-all text-center flex items-center justify-center gap-1 cursor-pointer"
-                  >
-                    <span>🛰️ Atualizar via GPS do Celular</span>
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-
+        <nav className="hidden md:flex items-center gap-1.5 lg:gap-2 shrink-0">
           <button
             id="nav-home-btn"
             onClick={() => onNavigate('home')}
-            className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-all text-slate-400 hover:text-white hover:bg-slate-900"
+            className="flex items-center gap-1.5 px-2.5 lg:px-3 py-2 rounded-lg text-xs lg:text-sm font-medium transition-all text-slate-400 hover:text-white hover:bg-slate-900 whitespace-nowrap shrink-0 cursor-pointer"
           >
-            <Home className="w-4 h-4" />
+            <Home className="w-4 h-4 shrink-0" />
             <span>Início</span>
           </button>
 
           <button
             id="nav-events-btn"
             onClick={() => onNavigate('events')}
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-sm font-medium transition-all relative ${
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs lg:text-sm font-medium transition-all relative whitespace-nowrap shrink-0 cursor-pointer ${
               currentScreen === 'events'
                 ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
                 : 'text-slate-300 hover:text-white hover:bg-slate-900'
             }`}
           >
-            <Compass className="w-4 h-4 text-amber-400" />
-            <span>Consultar Eventos</span>
+            <Compass className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>Eventos</span>
             {eventCount > 0 && (
               <span className="ml-0.5 text-[11px] font-bold px-1.5 py-0.2 rounded-full bg-slate-800 text-amber-400 border border-slate-700">
                 {eventCount}
@@ -429,21 +371,21 @@ export const Navbar: React.FC<NavbarProps> = ({
           <button
             id="nav-divulgar-evento-btn"
             onClick={() => onNavigate('register')}
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-sm font-semibold transition-all cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs lg:text-sm font-semibold transition-all whitespace-nowrap shrink-0 cursor-pointer ${
               currentScreen === 'register' || currentScreen === 'advertiser_auth'
                 ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 font-bold shadow-md shadow-amber-500/20'
                 : 'text-amber-400 hover:text-amber-300 hover:bg-slate-900 border border-amber-500/30'
             }`}
           >
-            <PlusCircle className="w-4 h-4" />
-            <span>Divulgar Evento</span>
+            <PlusCircle className="w-4 h-4 shrink-0" />
+            <span>Divulgar</span>
           </button>
 
           {onOpenInstall && !isAppInstalled && (
             <button
               id="nav-install-pwa-btn"
               onClick={handleInstallClick}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold text-amber-300 hover:text-white bg-amber-500/15 hover:bg-amber-500/30 border border-amber-500/40 transition-all cursor-pointer shadow-sm group"
+              className="hidden xl:flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold text-amber-300 hover:text-white bg-amber-500/15 hover:bg-amber-500/30 border border-amber-500/40 transition-all cursor-pointer shadow-sm group whitespace-nowrap shrink-0"
               title="Gravar ícone do aplicativo na tela inicial do celular"
             >
               <Smartphone className="w-3.5 h-3.5 text-amber-400 group-hover:scale-110 transition-transform" />
@@ -455,10 +397,9 @@ export const Navbar: React.FC<NavbarProps> = ({
             <button
               onClick={onOpenAdvertiserAuth}
               title="Anunciante conectado - Clique para trocar ou gerenciar"
-              className="hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-amber-500/30 text-xs text-slate-300 hover:text-white hover:border-amber-400 transition-colors"
+              className="hidden xl:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-amber-500/30 text-xs text-slate-300 hover:text-white hover:border-amber-400 transition-colors shrink-0"
             >
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="max-w-[130px] truncate font-medium text-amber-400">
+              <span className="max-w-[110px] truncate font-medium text-amber-400">
                 {currentAdvertiser.name || currentAdvertiser.email.split('@')[0]}
               </span>
             </button>
@@ -469,15 +410,15 @@ export const Navbar: React.FC<NavbarProps> = ({
               id="nav-admin-btn"
               onClick={onOpenAdmin}
               title="Central de Gerenciamento"
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-slate-300 hover:text-amber-300 hover:bg-slate-900 border border-slate-800 transition-all cursor-pointer shadow-sm"
+              className="flex items-center gap-1.5 px-2.5 lg:px-3 py-2 rounded-lg text-xs font-semibold text-slate-300 hover:text-amber-300 hover:bg-slate-900 border border-slate-800 transition-all cursor-pointer shadow-sm whitespace-nowrap shrink-0"
             >
-              <ShieldCheck className="w-4 h-4 text-amber-400" />
-              <span>Central de Gerenciamento</span>
+              <ShieldCheck className="w-4 h-4 text-amber-400 shrink-0" />
+              <span className="hidden lg:inline">Admin</span>
             </button>
           )}
 
           {user ? (
-            <div className="flex items-center gap-1.5 pl-2 pr-1.5 py-1 rounded-xl bg-slate-900 border border-slate-700/80">
+            <div className="flex items-center gap-1.5 pl-2 pr-1.5 py-1 rounded-xl bg-slate-900 border border-slate-700/80 shrink-0">
               {user.photoURL ? (
                 <img
                   src={user.photoURL}
@@ -488,7 +429,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               ) : (
                 <User className="w-4 h-4 text-amber-400" />
               )}
-              <span className="max-w-[95px] truncate text-xs font-medium text-slate-200">
+              <span className="max-w-[85px] truncate text-xs font-medium text-slate-200">
                 {user.displayName?.split(' ')[0] || user.email?.split('@')[0] || 'Conta'}
               </span>
               <button
@@ -506,53 +447,21 @@ export const Navbar: React.FC<NavbarProps> = ({
               type="button"
               disabled={authBusy}
               onClick={handleGoogleLogin}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-slate-200 hover:text-white bg-slate-900 hover:bg-slate-800 border border-slate-700 hover:border-amber-400/60 transition-all cursor-pointer disabled:opacity-50"
+              className="flex items-center gap-1.5 px-2.5 lg:px-3 py-2 rounded-lg text-xs font-semibold text-slate-200 hover:text-white bg-slate-900 hover:bg-slate-800 border border-slate-700 hover:border-amber-400/60 transition-all cursor-pointer disabled:opacity-50 whitespace-nowrap shrink-0"
               title="Entrar com sua conta Google"
             >
-              <LogIn className="w-3.5 h-3.5 text-amber-400" />
+              <LogIn className="w-3.5 h-3.5 text-amber-400 shrink-0" />
               <span>{authBusy ? 'Entrando...' : 'Entrar'}</span>
             </button>
           )}
-
-          <button
-            id="nav-exit-clear-btn"
-            onClick={onExitAndClear || (() => onNavigate('home'))}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800/90 hover:bg-rose-500/20 text-slate-200 hover:text-rose-300 border border-slate-700 hover:border-rose-500/40 font-bold text-xs shadow-sm cursor-pointer transition-colors"
-            title="Sair desta tela e limpar o aplicativo"
-          >
-            <X className="w-4 h-4 text-rose-400" />
-            <span>Sair</span>
-          </button>
         </nav>
 
-        {/* Mobile Right Bar (md:hidden) */}
-        <div className="flex md:hidden items-center gap-2">
-          {/* Botão de Cidade no Mobile */}
-          <button
-            type="button"
-            onClick={() => setIsCityMenuOpen(!isCityMenuOpen)}
-            className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-slate-900 border border-slate-700 text-xs text-amber-300 font-bold shadow-sm"
-            title="Sua localização atual para cálculo de distância"
-          >
-            <MapPin className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-            <span className="max-w-[80px] truncate">{userOriginCity || 'Praia Grande'}</span>
-            <ChevronDown className={`w-3 h-3 text-slate-400 transition-transform ${isCityMenuOpen ? 'rotate-180' : ''}`} />
-          </button>
-
-          <button
-            id="mobile-nav-exit-clear-btn"
-            onClick={onExitAndClear || (() => onNavigate('home'))}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-800/90 hover:bg-rose-500/20 text-slate-200 hover:text-rose-300 border border-slate-700 hover:border-rose-500/40 font-bold text-xs shadow-sm cursor-pointer transition-colors"
-            title="Sair desta tela e limpar o aplicativo"
-          >
-            <X className="w-4 h-4 text-rose-400" />
-            <span>Sair</span>
-          </button>
-
+        {/* Mobile Menu Button (md:hidden) */}
+        <div className="flex md:hidden items-center shrink-0">
           <button
             id="btn-mobile-menu-toggle"
             onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-            className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800 transition-colors focus:outline-none"
+            className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl bg-slate-900 border border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800 transition-colors focus:outline-none cursor-pointer"
             aria-label="Abrir menu de navegação"
           >
             {isMobileMenuOpen ? <X className="w-5 h-5 text-amber-400" /> : <Menu className="w-5 h-5" />}
