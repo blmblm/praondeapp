@@ -587,7 +587,6 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
-      fetchDbSponsors();
       fetchPixConfig();
     }
   }, [isOpen]);
@@ -2328,56 +2327,6 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   </div>
                 </button>
 
-                {/* BOTÃO 5: CADASTRAR PATROCINADORES (NOVIDADE MONETIZAÇÃO) */}
-                <button
-                  id="btn-admin-cadastrar-patrocinadores"
-                  onClick={() => setCurrentView('sponsors')}
-                  className="group relative flex flex-col items-center text-center p-5 rounded-2xl bg-gradient-to-b from-slate-800/80 to-slate-950 border border-slate-700/80 hover:border-amber-500/60 hover:shadow-xl hover:shadow-amber-500/10 transition-all duration-200 cursor-pointer"
-                >
-                  <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-amber-500/20 to-orange-500/20 border border-amber-500/40 flex items-center justify-center text-amber-300 group-hover:scale-105 transition-all mb-3 shadow-inner">
-                    <Sparkles className="w-7 h-7" />
-                  </div>
-                  <h4 className="text-base font-bold text-white group-hover:text-amber-300 transition-colors mb-1.5">
-                    Patrocinadores Locais
-                  </h4>
-                  <p className="text-xs text-slate-400 leading-relaxed flex-1">
-                    Cadastre novos parceiros e gerencie comércios da vitrine (R$ 100/mês).
-                  </p>
-                  <div className="mt-4 inline-flex items-center gap-1 text-xs font-bold text-amber-400">
-                    <span>Acessar ({localSponsors.length})</span>
-                    <span className="group-hover:translate-x-1 transition-transform">→</span>
-                  </div>
-                </button>
-
-                {/* BOTÃO NOVO: LIBERAR PATROCINADORES (REVISÃO DE SEGURANÇA ATÉ 48 HORAS) */}
-                <button
-                  id="btn-admin-liberar-patrocinadores"
-                  onClick={() => {
-                    fetchDbSponsors();
-                    setCurrentView('liberar_patrocinadores');
-                  }}
-                  className="group relative flex flex-col items-center text-center p-5 rounded-2xl bg-gradient-to-b from-slate-800/80 to-slate-950 border border-amber-500/50 hover:border-amber-400 hover:shadow-xl hover:shadow-amber-500/15 transition-all duration-200 cursor-pointer"
-                >
-                  <div className="relative w-14 h-14 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-300 group-hover:scale-105 group-hover:bg-amber-500/25 transition-all mb-3 shadow-inner">
-                    <ShieldCheck className="w-7 h-7" />
-                    {dbSponsors.filter((s) => s.liberado === 'pendente' || (s.statusPagamento === 'pago' && !s.active)).length > 0 && (
-                      <span className="absolute -top-1.5 -right-1.5 px-2 py-0.5 rounded-full bg-amber-500 text-slate-950 text-[10px] font-black animate-pulse shadow-md">
-                        {dbSponsors.filter((s) => s.liberado === 'pendente' || (s.statusPagamento === 'pago' && !s.active)).length}
-                      </span>
-                    )}
-                  </div>
-                  <h4 className="text-base font-bold text-white group-hover:text-amber-300 transition-colors mb-1.5">
-                    Liberar Patrocinadores
-                  </h4>
-                  <p className="text-xs text-slate-400 leading-relaxed flex-1">
-                    Análise e liberação de segurança em até 48h ({dbSponsors.filter((s) => s.liberado === 'pendente').length} aguardando análise).
-                  </p>
-                  <div className="mt-4 inline-flex items-center gap-1 text-xs font-bold text-amber-400">
-                    <span>Liberar Anúncios</span>
-                    <span className="group-hover:translate-x-1 transition-transform">→</span>
-                  </div>
-                </button>
-
                 {/* BOTÃO NOVO: FILTRO SYMPLA (BLACKLIST) */}
                 <button
                   id="btn-admin-filtro-sympla"
@@ -2412,7 +2361,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                     Desempenho & Métricas
                   </h4>
                   <p className="text-xs text-slate-400 leading-relaxed flex-1">
-                    Monitore o total de consultas por ano, estado e mês. Dados estatísticos ricos para captação de patrocinadores.
+                    Monitore o total de consultas por ano, estado e mês para acompanhar o crescimento e alcance do aplicativo.
                   </p>
                   <div className="mt-4 inline-flex items-center gap-1 text-xs font-bold text-violet-400">
                     <span>Ver Painel</span>
@@ -2846,48 +2795,6 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                             </div>
                           </div>
                         )}
-                      </div>
-
-                      {/* Guia Comercial / Pitch de Captação de Patrocinadores (Destaque Monetização) */}
-                      <div className="p-6 rounded-2xl bg-gradient-to-r from-violet-950/30 via-slate-900 to-purple-950/20 border-2 border-violet-500/30">
-                        <div className="flex items-start gap-4 text-left">
-                          <div className="w-12 h-12 rounded-xl bg-violet-500/10 border border-violet-500/20 flex items-center justify-center text-violet-400 shrink-0">
-                            <Sparkles className="w-6 h-6" />
-                          </div>
-                          <div className="space-y-3 min-w-0 flex-1">
-                            <h4 className="text-base font-bold text-violet-300">Guia Comercial — Captação de Patrocinadores 🚀</h4>
-                            <p className="text-xs text-slate-300 leading-relaxed">
-                              Use estes dados consolidados reais para fechar parcerias comerciais com adegas, bares, lanchonetes e organizadores locais. Mostre como anunciar por apenas <strong>R$ 100,00 por mês</strong> é extremamente barato e lucrativo:
-                            </p>
-                            
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
-                              <div className="p-3.5 rounded-xl bg-slate-950/80 border border-slate-850">
-                                <span className="block text-[10px] font-bold text-violet-400 uppercase tracking-widest">Exposição por R$ 100/mês</span>
-                                <p className="text-xs text-slate-300 mt-1 leading-normal">
-                                  Com <strong className="text-white">{totalConsultas.toLocaleString('pt-BR')} buscas</strong> neste filtro, cada exibição da marca de um patrocinador custa apenas:
-                                </p>
-                                <span className="block text-lg font-black text-emerald-400 mt-1.5">
-                                  R$ {totalConsultas > 0 ? (100 / totalConsultas).toFixed(3) : '0.000'} <span className="text-xs font-normal text-slate-400">por visualização!</span>
-                                </span>
-                              </div>
-
-                              <div className="p-3.5 rounded-xl bg-slate-950/80 border border-slate-850">
-                                <span className="block text-[10px] font-bold text-violet-400 uppercase tracking-widest">Custo por Mil Visualizações (CPM)</span>
-                                <p className="text-xs text-slate-300 mt-1 leading-normal">
-                                  O valor pago pelo patrocinador para ser exibido a cada 1.000 buscas segmentadas dos clientes é de:
-                                </p>
-                                <span className="block text-lg font-black text-emerald-400 mt-1.5">
-                                  R$ {totalConsultas > 0 ? ((100 / totalConsultas) * 1000).toFixed(2) : '0.00'} <span className="text-xs font-normal text-slate-400">por 1.000 exibições!</span>
-                                </span>
-                              </div>
-                            </div>
-
-                            {/* Pitch de Vendas Sugerido */}
-                            <div className="p-3 rounded-lg bg-slate-950/40 border border-slate-850 text-xs text-slate-400 italic">
-                              💡 <strong>Argumento de Vendas:</strong> "O Pra Onde Eu Vou já teve {totalConsultas.toLocaleString('pt-BR')} buscas qualificadas neste período. Ao anunciar sua adega conosco por apenas R$ 100/mês, sua marca é exibida para as pessoas certas que já decidiram sair de casa, custando menos de {totalConsultas > 0 ? (100 / totalConsultas * 100).toFixed(1) : '1'} centavo por exibição garantida!"
-                            </div>
-                          </div>
-                        </div>
                       </div>
 
                       {/* Tabela de Relatório Detalhado de Consultas */}

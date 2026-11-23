@@ -8,9 +8,11 @@ import {
   Smartphone
 } from 'lucide-react';
 import { EventItem, ActiveScreen } from '../types';
-import { SponsorsShowcase } from './SponsorsShowcase';
-import { SponsorItem } from '../data/sponsors';
+import { HomeUpcomingEventsFeed } from './HomeUpcomingEventsFeed';
 import { useUserLocation } from '../context/LocationContext';
+
+// Backup integral da tela inicial original guardado em PresentationScreen.original.tsx
+const SHOW_HOME_UPCOMING_EVENTS = true;
 
 interface PresentationScreenProps {
   onNavigate: (screen: ActiveScreen) => void;
@@ -18,7 +20,6 @@ interface PresentationScreenProps {
   onSelectEvent: (event: EventItem) => void;
   onSearchRedirect: (term: string) => void;
   onOpenAdmin?: () => void;
-  sponsors?: SponsorItem[];
   categories?: string[];
   cidadesList?: any[];
   onDiscoverySearch?: (filters: { category: string; estado: string; date: string; sortByProximity: boolean }) => void;
@@ -98,7 +99,6 @@ export const PresentationScreen: React.FC<PresentationScreenProps> = (props) => 
     onNavigate,
     onSearchRedirect,
     onOpenAdmin,
-    sponsors = [],
     onOpenInstall,
     onPromptInstall,
     hasNativePrompt = false,
@@ -280,6 +280,14 @@ export const PresentationScreen: React.FC<PresentationScreenProps> = (props) => 
           </button>
         </div>
 
+        {/* Opção 1: Cartazes dos eventos exibidos diretamente abaixo de Divulgar Evento */}
+        {SHOW_HOME_UPCOMING_EVENTS && (
+          <HomeUpcomingEventsFeed
+            onSelectEvent={props.onSelectEvent}
+            onExploreAll={() => handleVibeClick('Todas')}
+          />
+        )}
+
         {/* Pergunta direta e simples: Quer gravar o ícone no celular? Sim ou Não */}
         {!isAppInstalled && !dismissedIconPrompt && (onOpenInstall || onPromptInstall) && (
           <div className="w-full max-w-xl mb-2.5 sm:mb-3 px-2">
@@ -320,14 +328,6 @@ export const PresentationScreen: React.FC<PresentationScreenProps> = (props) => 
             </div>
           </div>
         )}
-
-        {/* Vitrine de 5 Patrocinadores Recomendados por Proximidade */}
-        <div className="w-full">
-          <SponsorsShowcase 
-            sponsors={sponsors} 
-            onOpenRegisterSponsor={() => onNavigate('sponsor_register')}
-          />
-        </div>
 
         {/* Central de Gerenciamento (Administrative discrete button) */}
         {onOpenAdmin && (

@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { EventItem, EventCategory, ActiveScreen, Advertiser, CategoryItem, CidadeItem } from './types';
 import { INITIAL_EVENTS } from './data/initialEvents';
 import { INITIAL_ADVERTISERS } from './data/initialAdvertisers';
-import { INITIAL_SPONSORS, SponsorItem } from './data/sponsors';
 import { Navbar } from './components/Navbar';
 import { PresentationScreen } from './components/PresentationScreen';
 import { EventCatalog } from './components/EventCatalog';
@@ -13,7 +12,6 @@ import { SqlConsoleModal } from './components/SqlConsoleModal';
 import { AdminModal } from './components/AdminModal';
 import { EventLiberationModal } from './components/EventLiberationModal';
 import { MasterPasswordModal } from './components/MasterPasswordModal';
-import { SponsorRegistrationScreen } from './components/SponsorRegistrationScreen';
 import { PWAInstallModal } from './components/PWAInstallModal';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { usePWAInstall } from './hooks/usePWAInstall';
@@ -120,20 +118,6 @@ export default function App() {
   const [isSqlConsoleOpen, setIsSqlConsoleOpen] = useState<boolean>(false);
   const [isAdminOpen, setIsAdminOpen] = useState<boolean>(false);
   const [isHomeMenuOpen, setIsHomeMenuOpen] = useState<boolean>(false);
-  const [sponsors, setSponsors] = useState<SponsorItem[]>(() => {
-    try {
-      const saved = localStorage.getItem('praonde_sponsors_v1');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
-        }
-      }
-    } catch {
-      // ignore
-    }
-    return INITIAL_SPONSORS;
-  });
 
   const [isMasterAdmin, setIsMasterAdmin] = useState<boolean>(() => {
     try {
@@ -241,25 +225,6 @@ export default function App() {
     }
   };
 
-  const loadSponsorsFromApi = async () => {
-    try {
-      const res = await fetch('/api/admin/sponsors');
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data) && data.length > 0) {
-          setSponsors((prev) => {
-            const map = new Map<string, SponsorItem>();
-            prev.forEach((s) => map.set(s.id, s));
-            data.forEach((s: SponsorItem) => map.set(s.id, s));
-            return Array.from(map.values());
-          });
-        }
-      }
-    } catch (e) {
-      console.warn('Usando patrocinadores locais:', e);
-    }
-  };
-
   const loadAdvertisersFromApi = async () => {
     try {
       const res = await fetch('/api/advertisers');
@@ -294,7 +259,6 @@ export default function App() {
     // Carga inicial leve: carrega apenas dados auxiliares necessários na Home (sem baixar todos os eventos/cartazes)
     loadCategoriesFromApi();
     loadCidadesFromApi();
-    loadSponsorsFromApi();
 
     const handleQuarantineCleared = () => {
       if (isAdminOpen) {
@@ -683,7 +647,6 @@ export default function App() {
             onSelectEvent={setSelectedEvent}
             onSearchRedirect={handleSearchRedirect}
             onOpenAdmin={() => setIsAdminOpen(true)}
-            sponsors={sponsors}
             categories={categories}
             cidadesList={cidadesList}
             onOpenInstall={openInstallModal}
@@ -754,20 +717,6 @@ export default function App() {
             onChangeAdvertiser={handleChangeAdvertiser}
             categoryItems={categoryItems}
             cidadesList={cidadesList}
-          />
-        )}
-
-        {currentScreen === 'sponsor_register' && (
-          <SponsorRegistrationScreen
-            onBack={() => handleNavigate('home')}
-            cidadesList={cidadesList}
-            onSponsorCreated={(newSponsor) => {
-              const updated = [newSponsor, ...sponsors];
-              setSponsors(updated);
-              try {
-                localStorage.setItem('praonde_sponsors_v1', JSON.stringify(updated));
-              } catch {}
-            }}
           />
         )}
       </main>
@@ -888,13 +837,6 @@ export default function App() {
         isMasterAdminState={isMasterAdmin}
         onMasterAuthChange={(isMaster) => setIsMasterAdmin(isMaster)}
         onOpenSqlConsole={() => setIsSqlConsoleOpen(true)}
-        sponsors={sponsors}
-        onUpdateSponsors={(newSponsors) => {
-          setSponsors(newSponsors);
-          try {
-            localStorage.setItem('praonde_sponsors_v1', JSON.stringify(newSponsors));
-          } catch {}
-        }}
         onEventsUpdated={loadEventsFromApi}
         onEventApproved={handleEventApproved}
       />
