@@ -558,7 +558,7 @@ export const EventCatalog: React.FC<EventCatalogProps> = ({
         const selNorm = appliedFilters.category.toLowerCase().replace(/\s+e\s+/g, ' ').trim();
         const evtNorm = (event.category || '').toLowerCase().replace(/\s+e\s+/g, ' ').trim();
         const isShowMatch = (selNorm === 'show' || selNorm === 'shows') && (evtNorm === 'show' || evtNorm === 'shows');
-        const isBaileMatch = (selNorm === 'bailes' && (evtNorm.includes('baile') || evtNorm.includes('melhor idade') || evtNorm.includes('terceira idade')));
+        const isBaileMatch = (selNorm === 'baile' || selNorm === 'bailes') && (evtNorm === 'baile' || evtNorm === 'bailes');
         
         if (
           appliedFilters.category.trim().toLowerCase() !== (event.category || '').trim().toLowerCase() &&

@@ -7,6 +7,8 @@ import { isVideoFormatUrl, parseVideoUrl } from '../lib/videoUtils';
 interface HomeUpcomingEventsFeedProps {
   onSelectEvent: (event: EventItem) => void;
   onExploreAll: () => void;
+  preloadedEvents?: EventItem[];
+  isPreloaded?: boolean;
 }
 
 const getTodayIsoSp = (): string => {
@@ -131,10 +133,12 @@ const isDirectPlayableVideo = (url: string): boolean => {
 export const HomeUpcomingEventsFeed: React.FC<HomeUpcomingEventsFeedProps> = ({
   onSelectEvent,
   onExploreAll,
+  preloadedEvents,
+  isPreloaded = false,
 }) => {
   const { userCoords, getDistanceKmTo } = useUserLocation();
-  const [events, setEvents] = useState<EventItem[]>([]);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [events, setEvents] = useState<EventItem[]>(() => (isPreloaded && Array.isArray(preloadedEvents) ? preloadedEvents : []));
+  const [isLoading, setIsLoading] = useState<boolean>(() => !isPreloaded);
   const [visibleCount, setVisibleCount] = useState<number>(6);
   const [failedImages, setFailedImages] = useState<Record<string, boolean>>({});
 
@@ -142,6 +146,14 @@ export const HomeUpcomingEventsFeed: React.FC<HomeUpcomingEventsFeedProps> = ({
   const tomorrowIso = useMemo(() => getTomorrowIsoSp(todayIso), [todayIso]);
 
   useEffect(() => {
+    if (isPreloaded && Array.isArray(preloadedEvents)) {
+      setEvents(preloadedEvents);
+      setIsLoading(false);
+    }
+  }, [isPreloaded, preloadedEvents]);
+
+  useEffect(() => {
+    if (isPreloaded) return;
     let cancelled = false;
 
     const loadUpcomingEvents = async () => {
@@ -219,7 +231,7 @@ export const HomeUpcomingEventsFeed: React.FC<HomeUpcomingEventsFeedProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [todayIso, userCoords?.latitude, userCoords?.longitude]);
+  }, [isPreloaded, todayIso, userCoords?.latitude, userCoords?.longitude]);
 
   // Ordena por data mais próxima primeiro (hoje e fim de semana no topo), depois proximidade
   const orderedEvents = useMemo(() => {

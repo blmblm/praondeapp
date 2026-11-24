@@ -14,6 +14,7 @@ import { EventLiberationModal } from './components/EventLiberationModal';
 import { MasterPasswordModal } from './components/MasterPasswordModal';
 import { PWAInstallModal } from './components/PWAInstallModal';
 import { OfflineIndicator } from './components/OfflineIndicator';
+import { InitialLoadingScreen } from './components/InitialLoadingScreen';
 import { usePWAInstall } from './hooks/usePWAInstall';
 import {
   saveEventToFirestore,
@@ -105,6 +106,10 @@ export default function App() {
 
   // Events State (fonte oficial: servidor /api/events, sem cache localStorage truncado)
   const [events, setEvents] = useState<EventItem[]>([]);
+  const [homeFeedEvents, setHomeFeedEvents] = useState<EventItem[]>([]);
+  const [isInitialAppLoading, setIsInitialAppLoading] = useState<boolean>(true);
+  const [initialLoadProgress, setInitialLoadProgress] = useState<number>(18);
+  const [initialLoadStatus, setInitialLoadStatus] = useState<string>('Carregando os eventos...');
 
   const [selectedEvent, setSelectedEvent] = useState<EventItem | null>(null);
   const [editingEvent, setEditingEvent] = useState<EventItem | null>(null);
@@ -242,8 +247,64 @@ export default function App() {
     }
   };
 
+  const loadHomeFeedEvents = async (): Promise<EventItem[]> => {
+    try {
+      const todayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+      const buildParams = (withDate: boolean) => {
+        const params = new URLSearchParams();
+        params.set('liberado', 'S');
+        params.set('limit', '18');
+        params.set('mais_proximos', 'true');
+        params.set('order_by', 'proximidade');
+        if (withDate && todayIso) {
+          params.set('date', todayIso);
+        }
+        return params;
+      };
+
+      let data: EventItem[] = [];
+      const res = await fetch(`/api/events?${buildParams(true).toString()}`, { cache: 'no-store' });
+      if (res.ok) {
+        const parsed = await res.json();
+        if (Array.isArray(parsed)) data = parsed;
+      }
+
+      if (data.length === 0) {
+        const fbRes = await fetch(`/api/events?${buildParams(false).toString()}`, { cache: 'no-store' });
+        if (fbRes.ok) {
+          const parsed = await fbRes.json();
+          if (Array.isArray(parsed)) data = parsed;
+        }
+      }
+
+      const seen = new Set<string>();
+      const cleaned = data.filter((ev) => {
+        if (!ev || !hasRealMedia(ev)) return false;
+        const idKey = (ev.id || '').trim().toLowerCase();
+        const titleKey = (ev.title || '').trim().toLowerCase();
+        const dateKey = (ev.date || '').split('T')[0].trim();
+        const cityKey = (ev.city || '').trim().toLowerCase();
+        const semKey = `${titleKey}__${dateKey}__${cityKey}`;
+        if (idKey && seen.has(`id:${idKey}`)) return false;
+        if (titleKey && dateKey && seen.has(`sem:${semKey}`)) return false;
+        if (idKey) seen.add(`id:${idKey}`);
+        if (titleKey && dateKey) seen.add(`sem:${semKey}`);
+        return true;
+      });
+
+      setHomeFeedEvents(cleaned);
+      return cleaned;
+    } catch (e) {
+      console.warn('Erro ao pré-carregar eventos da tela inicial:', e);
+      return [];
+    }
+  };
+
   useEffect(() => {
-    // Limpa caches antigos de eventos (v1 a v8) para evitar ressurreição de dados de abas antigas
+    let isMounted = true;
+    let finished = false;
+
+    // Limpa caches antigos de eventos (v1 a v9) para evitar ressurreição de dados de abas antigas
     try {
       localStorage.removeItem('praonde_events_data_v9');
       localStorage.removeItem('praonde_events_data_v8');
@@ -256,18 +317,81 @@ export default function App() {
       localStorage.removeItem('praonde_events_data_v1');
     } catch {}
 
-    // Carga inicial leve: carrega apenas dados auxiliares necessários na Home (sem baixar todos os eventos/cartazes)
-    loadCategoriesFromApi();
-    loadCidadesFromApi();
+    const finishLoading = () => {
+      if (finished || !isMounted) return;
+      finished = true;
+      setInitialLoadProgress(100);
+      setInitialLoadStatus('Tudo pronto!');
+      setTimeout(() => {
+        if (isMounted) setIsInitialAppLoading(false);
+      }, 180);
+    };
+
+    // Anima suavemente a barra enquanto aguarda a rede móvel (4G)
+    const progressTimer = setInterval(() => {
+      if (!isMounted || finished) return;
+      setInitialLoadProgress((prev) => (prev < 78 ? prev + 6 : prev));
+    }, 320);
+
+    // Segurança: nunca travar na tela de carregamento mesmo se a conexão cair
+    const safetyTimer = setTimeout(() => {
+      finishLoading();
+    }, 7000);
+
+    const bootstrapApp = async () => {
+      setInitialLoadProgress(28);
+      setInitialLoadStatus('Conectando aos eventos...');
+
+      const [, , loadedEvents] = await Promise.all([
+        loadCategoriesFromApi().catch(() => {}),
+        loadCidadesFromApi().catch(() => {}),
+        loadHomeFeedEvents(),
+      ]);
+
+      if (!isMounted || finished) return;
+      setInitialLoadProgress(85);
+      setInitialLoadStatus('Preparando os cartazes...');
+
+      // Pré-carrega os 3 primeiros cartazes (espera no máximo 900ms para não atrasar)
+      const firstPosters = (loadedEvents || [])
+        .map((ev) => String(ev.imageUrl || (ev as any).imagem_url || ev.url || '').trim())
+        .filter((u) => u && (u.startsWith('http://') || u.startsWith('https://') || u.startsWith('/api/') || u.startsWith('/uploads/')))
+        .slice(0, 3);
+
+      if (firstPosters.length > 0) {
+        await Promise.race([
+          Promise.allSettled(
+            firstPosters.map(
+              (src) =>
+                new Promise<void>((resolve) => {
+                  const img = new Image();
+                  img.onload = () => resolve();
+                  img.onerror = () => resolve();
+                  img.src = src;
+                })
+            )
+          ),
+          new Promise<void>((resolve) => setTimeout(resolve, 900)),
+        ]);
+      }
+
+      finishLoading();
+    };
+
+    bootstrapApp();
 
     const handleQuarantineCleared = () => {
       if (isAdminOpen) {
         loadEventsFromApi({ admin: true });
       }
+      loadHomeFeedEvents();
     };
     window.addEventListener('praonde:quarantine-cleared', handleQuarantineCleared);
 
     return () => {
+      isMounted = false;
+      clearInterval(progressTimer);
+      clearTimeout(safetyTimer);
       window.removeEventListener('praonde:quarantine-cleared', handleQuarantineCleared);
     };
   }, []);
@@ -616,6 +740,15 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  if (isInitialAppLoading) {
+    return (
+      <InitialLoadingScreen
+        progress={initialLoadProgress}
+        statusText={initialLoadStatus}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-amber-500 selection:text-slate-950">
       {/* Top Navbar */}
@@ -655,6 +788,8 @@ export default function App() {
             isAppInstalled={isInstalled}
             isHomeMenuOpen={isHomeMenuOpen}
             onToggleHomeMenu={() => setIsHomeMenuOpen((prev) => !prev)}
+            homeFeedEvents={homeFeedEvents}
+            isHomeFeedLoaded={!isInitialAppLoading}
             onDiscoverySearch={({ category, estado, date, sortByProximity }) => {
               setCatalogInitialCategory(category);
               setCatalogInitialEstado(estado);

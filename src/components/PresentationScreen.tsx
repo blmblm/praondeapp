@@ -29,6 +29,8 @@ interface PresentationScreenProps {
   isAppInstalled?: boolean;
   isHomeMenuOpen?: boolean;
   onToggleHomeMenu?: () => void;
+  homeFeedEvents?: EventItem[];
+  isHomeFeedLoaded?: boolean;
 }
 
 const POPULAR_VIBES = [
@@ -285,6 +287,8 @@ export const PresentationScreen: React.FC<PresentationScreenProps> = (props) => 
           <HomeUpcomingEventsFeed
             onSelectEvent={props.onSelectEvent}
             onExploreAll={() => handleVibeClick('Todas')}
+            preloadedEvents={props.homeFeedEvents}
+            isPreloaded={props.isHomeFeedLoaded}
           />
         )}
 

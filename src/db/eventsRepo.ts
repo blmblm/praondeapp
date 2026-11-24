@@ -218,10 +218,8 @@ export async function listEventsPg(queryParams: Record<string, any>) {
     if (catClean) {
       const targetCat = normalizeText(catClean);
       const pgNormCat = sql`translate(LOWER(TRIM(${eventos.categoria})), 'áàãâäéèêëíìîïóòõôöúùûüç', 'aaaaaeeeeiiiiooooouuuuc')`;
-      if (targetCat === 'bailes') {
-        whereConditions.push(
-          sql`(${pgNormCat} LIKE '%baile%' OR ${pgNormCat} LIKE '%melhor idade%' OR ${pgNormCat} LIKE '%terceira idade%')`
-        );
+      if (targetCat === 'bailes' || targetCat === 'baile') {
+        whereConditions.push(sql`${pgNormCat} IN ('baile', 'bailes')`);
       } else if (targetCat === 'show' || targetCat === 'shows') {
         whereConditions.push(sql`${pgNormCat} IN ('show', 'shows')`);
       } else {
@@ -331,8 +329,8 @@ export async function listEventsPg(queryParams: Record<string, any>) {
       if (catClean) {
         const evtCat = normalizeText(evt.categoria);
         const targetCat = normalizeText(catClean);
-        if (targetCat === 'bailes') {
-          if (!evtCat.includes('baile') && !evtCat.includes('melhor idade') && !evtCat.includes('terceira idade')) {
+        if (targetCat === 'bailes' || targetCat === 'baile') {
+          if (evtCat !== 'baile' && evtCat !== 'bailes') {
             return false;
           }
         } else if (
