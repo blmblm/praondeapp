@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { asc, desc, eq, ilike, inArray, or, sql, and } from 'drizzle-orm';
+import { asc, desc, eq, gte, ilike, inArray, lte, or, sql, and } from 'drizzle-orm';
 import { db } from './index.ts';
 import {
   anunciantes,
@@ -41,6 +41,80 @@ function calculateDistanceKm(lat1: number, lon1: number, lat2: number, lon2: num
       Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return Math.round(R * c * 10) / 10;
+}
+
+function parseFiniteCoord(val: unknown, min: number, max: number): number | null {
+  if (val === null || val === undefined) return null;
+  const str = String(val).trim().replace(',', '.');
+  if (!str) return null;
+  const num = Number(str);
+  if (!Number.isFinite(num) || num < min || num > max) return null;
+  return num;
+}
+
+function resolveNumericCoords(
+  latitude?: string | number | null,
+  longitude?: string | number | null,
+  cidade?: string | null
+): { latNum: number | null; lngNum: number | null; latStr: string | null; lngStr: string | null } {
+  let latNum = parseFiniteCoord(latitude, -90, 90);
+  let lngNum = parseFiniteCoord(longitude, -180, 180);
+  let latStr = latNum !== null ? String(latitude).trim() : null;
+  let lngStr = lngNum !== null ? String(longitude).trim() : null;
+
+  if ((latNum === null || lngNum === null) && cidade) {
+    const cityCoord = BRAZIL_CITY_COORDINATES[normalizeCityKey(cidade)];
+    if (cityCoord) {
+      latNum = parseFiniteCoord(cityCoord.latitude, -90, 90);
+      lngNum = parseFiniteCoord(cityCoord.longitude, -180, 180);
+      latStr = latStr || cityCoord.latitude;
+      lngStr = lngStr || cityCoord.longitude;
+    }
+  }
+
+  return { latNum, lngNum, latStr, lngStr };
+}
+
+function normalizeCategoryText(s?: string | null): string {
+  return (s || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+async function resolveMatchingCategoryFilter(catClean: string): Promise<{ ids: number[]; exactLowerNames: string[] }> {
+  const targetCat = normalizeCategoryText(catClean);
+  const allCats = await db.select({ id: categorias.id, nome: categorias.nome }).from(categorias);
+  const ids: number[] = [];
+  const lowerNames = new Set<string>();
+
+  if (targetCat === 'bailes' || targetCat === 'baile') {
+    lowerNames.add('baile');
+    lowerNames.add('bailes');
+  } else if (targetCat === 'show' || targetCat === 'shows') {
+    lowerNames.add('show');
+    lowerNames.add('shows');
+  } else {
+    lowerNames.add(catClean.trim().toLowerCase());
+  }
+
+  for (const c of allCats) {
+    const norm = normalizeCategoryText(c.nome);
+    const isMatch =
+      targetCat === 'bailes' || targetCat === 'baile'
+        ? norm === 'baile' || norm === 'bailes'
+        : targetCat === 'show' || targetCat === 'shows'
+          ? norm === 'show' || norm === 'shows'
+          : norm === targetCat;
+
+    if (isMatch) {
+      ids.push(c.id);
+      lowerNames.add((c.nome || '').trim().toLowerCase());
+    }
+  }
+
+  return { ids, exactLowerNames: Array.from(lowerNames).filter(Boolean) };
 }
 
 function checkLocalVideoFileExists(p: string, mediaFileSet?: Set<string>): boolean {
@@ -188,119 +262,74 @@ export async function listEventsPg(queryParams: Record<string, any>) {
     );
     const catClean = hasCategoryFilter ? String(category).trim().toLowerCase() : null;
 
-    const normalizeText = (s?: string | null) =>
-      (s || '')
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .toLowerCase()
-        .trim();
+    const normalizeText = normalizeCategoryText;
 
     const minDate =
       (data_min || date) && !search
-        ? String(data_min || date)
+        ? String(data_min || date).trim()
         : data_atual === 'true' || somente_futuros === 'true'
           ? new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
           : null;
 
-    const whereConditions: any[] = [];
+    const rawUserLat = user_lat ?? lat;
+    const rawUserLng = user_lng ?? lng;
+    const userLat = parseFiniteCoord(rawUserLat, -90, 90);
+    const userLng = parseFiniteCoord(rawUserLng, -180, 180);
+    const hasValidUserCoords = userLat !== null && userLng !== null;
+    const isProximityRequested =
+      (mais_proximos === 'true' || order_by === 'proximidade') && hasValidUserCoords;
+
+    const hasDateQuery = Boolean(date || data_min || data_atual === 'true' || somente_futuros === 'true');
+    const rawLimit = limit ? parseInt(String(limit), 10) : undefined;
+    const limitCount =
+      rawLimit !== undefined && !isNaN(rawLimit)
+        ? rawLimit
+        : hasDateQuery || isProximityRequested
+          ? 20
+          : undefined;
+    const finalLimit = isAdmin && !limit ? undefined : limitCount && limitCount > 0 ? limitCount : 20;
+    const sqlFetchLimit =
+      isAdmin && !limit ? undefined : finalLimit ? Math.min(Math.max(finalLimit * 2 + 20, 60), 1000) : undefined;
+
+    const baseWhereConditions: any[] = [];
     if (status) {
-      whereConditions.push(eq(eventos.status, String(status)));
+      baseWhereConditions.push(eq(eventos.status, String(status)));
     }
     if (liberado) {
-      whereConditions.push(sql`UPPER(TRIM(${eventos.liberado})) = ${String(liberado).trim().toUpperCase()}`);
+      // Igualdade direta (sem UPPER/TRIM) para aproveitar os índices parciais WHERE liberado = 'S'
+      const liberadoNorm = String(liberado).trim().toUpperCase().slice(0, 1);
+      baseWhereConditions.push(eq(eventos.liberado, liberadoNorm));
     }
     if (minDate) {
-      whereConditions.push(sql`COALESCE(${eventos.data_evento}, '') >= ${minDate}`);
+      // Comparação direta (sem COALESCE) para aproveitar o B-tree em data_evento
+      baseWhereConditions.push(gte(eventos.data_evento, minDate));
     }
-    if (city && city !== 'Todas' && city !== 'Cidades') {
-      whereConditions.push(sql`TRIM(${eventos.cidade}) = ${String(city).trim()}`);
+    const hasExplicitCity = Boolean(city && city !== 'Todas' && city !== 'Cidades');
+    if (hasExplicitCity) {
+      baseWhereConditions.push(eq(eventos.cidade, String(city).trim()));
     }
     if (catClean) {
-      const targetCat = normalizeText(catClean);
-      const pgNormCat = sql`translate(LOWER(TRIM(${eventos.categoria})), 'áàãâäéèêëíìîïóòõôöúùûüç', 'aaaaaeeeeiiiiooooouuuuc')`;
-      if (targetCat === 'bailes' || targetCat === 'baile') {
-        whereConditions.push(sql`${pgNormCat} IN ('baile', 'bailes')`);
-      } else if (targetCat === 'show' || targetCat === 'shows') {
-        whereConditions.push(sql`${pgNormCat} IN ('show', 'shows')`);
+      const { ids: matchedCatIds, exactLowerNames } = await resolveMatchingCategoryFilter(catClean);
+      const lowerNamesSql =
+        exactLowerNames.length > 0
+          ? sql`LOWER(TRIM(${eventos.categoria})) IN (${sql.join(
+              exactLowerNames.map((n) => sql`${n}`),
+              sql`, `
+            )})`
+          : null;
+
+      if (matchedCatIds.length > 0 && lowerNamesSql) {
+        baseWhereConditions.push(or(inArray(eventos.categoria_id, matchedCatIds), lowerNamesSql));
+      } else if (matchedCatIds.length > 0) {
+        baseWhereConditions.push(inArray(eventos.categoria_id, matchedCatIds));
+      } else if (lowerNamesSql) {
+        baseWhereConditions.push(lowerNamesSql);
       } else {
-        whereConditions.push(sql`${pgNormCat} = ${targetCat}`);
+        const targetCat = normalizeText(catClean);
+        const pgNormCat = sql`translate(LOWER(TRIM(${eventos.categoria})), 'áàãâäéèêëíìîïóòõôöúùûüç', 'aaaaaeeeeiiiiooooouuuuc')`;
+        baseWhereConditions.push(sql`${pgNormCat} = ${targetCat}`);
       }
     }
-
-    const baseQuery = includeBase64
-      ? db
-          .select({
-            evt: eventos,
-            catNome: categorias.nome,
-            catDesc: categorias.descricao,
-            catAtiva: categorias.ativa,
-            advNome: anunciantes.nome,
-            advEmail: anunciantes.email,
-            advTel: anunciantes.telefone,
-            advVerif: anunciantes.verificado,
-            estNome: estado.nome,
-            estUf: estado.estado,
-            estRegiao: estado.regiao,
-          })
-          .from(eventos)
-          .leftJoin(categorias, eq(eventos.categoria_id, categorias.id))
-          .leftJoin(anunciantes, eq(eventos.anunciante_id, anunciantes.id))
-          .leftJoin(estado, eq(eventos.estado_id, estado.id))
-      : db
-          .select({
-            evt: {
-              id: eventos.id,
-              anunciante_id: eventos.anunciante_id,
-              categoria_id: eventos.categoria_id,
-              categoria: eventos.categoria,
-              titulo: eventos.titulo,
-              descricao: sql<string | null>`CASE WHEN ${eventos.descricao} LIKE 'data:image/%' OR ${eventos.descricao} LIKE 'data:video/%' THEN '' ELSE ${eventos.descricao} END`,
-              data_evento: eventos.data_evento,
-              horario: eventos.horario,
-              horario_fim: eventos.horario_fim,
-              local_nome: eventos.local_nome,
-              endereco: eventos.endereco,
-              cidade: eventos.cidade,
-              estado: eventos.estado,
-              estado_id: eventos.estado_id,
-              cidade_id: eventos.cidade_id,
-              latitude: eventos.latitude,
-              longitude: eventos.longitude,
-              liberado: eventos.liberado,
-              is_gratuito: eventos.is_gratuito,
-              preco: eventos.preco,
-              detalhes_preco: sql<string | null>`CASE WHEN ${eventos.detalhes_preco} LIKE '%data:image/%' OR ${eventos.detalhes_preco} LIKE '%data:video/%' THEN '' ELSE ${eventos.detalhes_preco} END`,
-              imagem_url: sql<string | null>`CASE WHEN ${eventos.imagem_url} LIKE 'data:image/%' THEN '__DATA_IMAGE__' ELSE ${eventos.imagem_url} END`,
-              video_url: eventos.video_url,
-              url: sql<string | null>`CASE WHEN ${eventos.url} LIKE 'data:image/%' THEN '__DATA_IMAGE__' ELSE ${eventos.url} END`,
-              organizador: eventos.organizador,
-              contato: sql<string | null>`CASE WHEN ${eventos.contato} LIKE 'data:image/%' OR ${eventos.contato} LIKE 'data:video/%' THEN '' ELSE ${eventos.contato} END`,
-              tags: eventos.tags,
-              destaque: eventos.destaque,
-              status: eventos.status,
-              criado_em: eventos.criado_em,
-              updated_at: eventos.updated_at,
-            },
-            catNome: categorias.nome,
-            catDesc: categorias.descricao,
-            catAtiva: categorias.ativa,
-            advNome: anunciantes.nome,
-            advEmail: anunciantes.email,
-            advTel: anunciantes.telefone,
-            advVerif: anunciantes.verificado,
-            estNome: estado.nome,
-            estUf: estado.estado,
-            estRegiao: estado.regiao,
-          })
-          .from(eventos)
-          .leftJoin(categorias, eq(eventos.categoria_id, categorias.id))
-          .leftJoin(anunciantes, eq(eventos.anunciante_id, anunciantes.id))
-          .leftJoin(estado, eq(eventos.estado_id, estado.id));
-
-    const allRows =
-      whereConditions.length > 0 ? await baseQuery.where(and(...whereConditions)) : await baseQuery;
-
-    const mediaFileSet = await listMediaFilenamesPg();
 
     let estadoFilter: { ufVal: string; nomeVal: string; isNumericId: boolean; rawId: number } | null = null;
     const estadoParam = estadoQ || state;
@@ -325,308 +354,433 @@ export async function listEventsPg(queryParams: Record<string, any>) {
         ).filter(Boolean)
       : [];
 
-    const filteredRows = allRows.filter(({ evt, estNome }) => {
-      if (catClean) {
-        const evtCat = normalizeText(evt.categoria);
-        const targetCat = normalizeText(catClean);
-        if (targetCat === 'bailes' || targetCat === 'baile') {
-          if (evtCat !== 'baile' && evtCat !== 'bailes') {
+    const mediaFileSet = await listMediaFilenamesPg();
+
+    const executeSelectQuery = async (extraConditions: any[], orderByExprs: any[], rowLimit?: number) => {
+      const allConds = [...baseWhereConditions, ...extraConditions];
+      const base = includeBase64
+        ? db
+            .select({
+              evt: eventos,
+              catNome: categorias.nome,
+              catDesc: categorias.descricao,
+              catAtiva: categorias.ativa,
+              advNome: anunciantes.nome,
+              advEmail: anunciantes.email,
+              advTel: anunciantes.telefone,
+              advVerif: anunciantes.verificado,
+              estNome: estado.nome,
+              estUf: estado.estado,
+              estRegiao: estado.regiao,
+            })
+            .from(eventos)
+            .leftJoin(categorias, eq(eventos.categoria_id, categorias.id))
+            .leftJoin(anunciantes, eq(eventos.anunciante_id, anunciantes.id))
+            .leftJoin(estado, eq(eventos.estado_id, estado.id))
+        : db
+            .select({
+              evt: {
+                id: eventos.id,
+                anunciante_id: eventos.anunciante_id,
+                categoria_id: eventos.categoria_id,
+                categoria: eventos.categoria,
+                titulo: eventos.titulo,
+                descricao: sql<string | null>`CASE WHEN ${eventos.descricao} LIKE 'data:image/%' OR ${eventos.descricao} LIKE 'data:video/%' THEN '' ELSE ${eventos.descricao} END`,
+                data_evento: eventos.data_evento,
+                horario: eventos.horario,
+                horario_fim: eventos.horario_fim,
+                local_nome: eventos.local_nome,
+                endereco: eventos.endereco,
+                cidade: eventos.cidade,
+                estado: eventos.estado,
+                estado_id: eventos.estado_id,
+                cidade_id: eventos.cidade_id,
+                latitude: eventos.latitude,
+                longitude: eventos.longitude,
+                lat_num: eventos.lat_num,
+                lng_num: eventos.lng_num,
+                liberado: eventos.liberado,
+                is_gratuito: eventos.is_gratuito,
+                preco: eventos.preco,
+                detalhes_preco: sql<string | null>`CASE WHEN ${eventos.detalhes_preco} LIKE '%data:image/%' OR ${eventos.detalhes_preco} LIKE '%data:video/%' THEN '' ELSE ${eventos.detalhes_preco} END`,
+                imagem_url: sql<string | null>`CASE WHEN ${eventos.imagem_url} LIKE 'data:image/%' THEN '__DATA_IMAGE__' ELSE ${eventos.imagem_url} END`,
+                video_url: eventos.video_url,
+                url: sql<string | null>`CASE WHEN ${eventos.url} LIKE 'data:image/%' THEN '__DATA_IMAGE__' ELSE ${eventos.url} END`,
+                organizador: eventos.organizador,
+                contato: sql<string | null>`CASE WHEN ${eventos.contato} LIKE 'data:image/%' OR ${eventos.contato} LIKE 'data:video/%' THEN '' ELSE ${eventos.contato} END`,
+                tags: eventos.tags,
+                destaque: eventos.destaque,
+                status: eventos.status,
+                criado_em: eventos.criado_em,
+                updated_at: eventos.updated_at,
+              },
+              catNome: categorias.nome,
+              catDesc: categorias.descricao,
+              catAtiva: categorias.ativa,
+              advNome: anunciantes.nome,
+              advEmail: anunciantes.email,
+              advTel: anunciantes.telefone,
+              advVerif: anunciantes.verificado,
+              estNome: estado.nome,
+              estUf: estado.estado,
+              estRegiao: estado.regiao,
+            })
+            .from(eventos)
+            .leftJoin(categorias, eq(eventos.categoria_id, categorias.id))
+            .leftJoin(anunciantes, eq(eventos.anunciante_id, anunciantes.id))
+            .leftJoin(estado, eq(eventos.estado_id, estado.id));
+
+      let q: any = allConds.length > 0 ? base.where(and(...allConds)) : base;
+      if (orderByExprs.length > 0) {
+        q = q.orderBy(...orderByExprs);
+      }
+      if (rowLimit && rowLimit > 0) {
+        q = q.limit(rowLimit);
+      }
+      return await q;
+    };
+
+    const filterAndMapRows = (rows: any[]) => {
+      const filteredRows = rows.filter(({ evt, estNome }) => {
+        if (catClean) {
+          const evtCat = normalizeText(evt.categoria);
+          const targetCat = normalizeText(catClean);
+          if (targetCat === 'bailes' || targetCat === 'baile') {
+            if (evtCat !== 'baile' && evtCat !== 'bailes') {
+              return false;
+            }
+          } else if (
+            evtCat !== targetCat &&
+            !(
+              (evtCat === 'show' || evtCat === 'shows') &&
+              (targetCat === 'show' || targetCat === 'shows')
+            )
+          ) {
             return false;
           }
-        } else if (
-          evtCat !== targetCat &&
-          !(
-            (evtCat === 'show' || evtCat === 'shows') &&
-            (targetCat === 'show' || targetCat === 'shows')
-          )
-        ) {
-          return false;
         }
-      }
 
-      if (city && city !== 'Todas' && city !== 'Cidades') {
-        if ((evt.cidade || '').trim() !== String(city).trim()) return false;
-      }
-
-      if (estadoFilter) {
-        const { ufVal, nomeVal, isNumericId, rawId } = estadoFilter;
-        const evtEst = (evt.estado || '').trim().toLowerCase();
-        const evtCid = (evt.cidade || '').trim().toLowerCase();
-        const joinEstNome = (estNome || '').trim().toLowerCase();
-        const ufLow = ufVal.toLowerCase();
-        const nomLow = nomeVal.toLowerCase();
-
-        if (isNumericId) {
-          const matchNum = evt.estado_id === rawId || evt.cidade_id === rawId;
-          const matchUfNome = ufLow && nomLow && evtEst === ufLow && (evtCid === nomLow || joinEstNome === nomLow);
-          const matchUf = ufLow && !nomLow && (evtEst === ufLow || joinEstNome === ufLow);
-          if (!matchNum && !matchUfNome && !matchUf) return false;
-        } else if (ufLow && nomLow) {
-          if (!(evtEst === ufLow && (evtCid === nomLow || joinEstNome === nomLow))) return false;
-        } else if (ufLow) {
-          if (evtEst !== ufLow && joinEstNome !== ufLow) return false;
-        } else if (nomLow) {
-          if (evtCid !== nomLow && joinEstNome !== nomLow) return false;
+        if (hasExplicitCity) {
+          if ((evt.cidade || '').trim() !== String(city).trim()) return false;
         }
-      }
 
-      if (searchVariants.length > 0) {
-        const haystack = normalizeText(
-          `${evt.titulo} ${evt.descricao} ${evt.local_nome} ${evt.endereco} ${evt.cidade} ${evt.categoria} ${evt.organizador}`
-        );
-        if (!searchVariants.some((v) => haystack.includes(v))) return false;
-      }
+        if (estadoFilter) {
+          const { ufVal, nomeVal, isNumericId, rawId } = estadoFilter;
+          const evtEst = (evt.estado || '').trim().toLowerCase();
+          const evtCid = (evt.cidade || '').trim().toLowerCase();
+          const joinEstNome = (estNome || '').trim().toLowerCase();
+          const ufLow = ufVal.toLowerCase();
+          const nomLow = nomeVal.toLowerCase();
 
-      if (status && evt.status !== status) return false;
-      if (liberado && (evt.liberado || '').toUpperCase() !== String(liberado).toUpperCase()) {
-        return false;
-      }
-
-      if (requireMedia) {
-        const img = (evt.imagem_url || '').trim();
-        const vid = (evt.video_url || '').trim();
-        const urlVal = (evt.url || '').trim();
-        const okImg =
-          img &&
-          img !== 'null' &&
-          img !== 'undefined' &&
-          (img === '__DATA_IMAGE__' ||
-            img.startsWith('/api/event-poster/') ||
-            img.startsWith('http://') ||
-            img.startsWith('https://') ||
-            img.startsWith('data:image/') ||
-            img.startsWith('/uploads/') ||
-            img.startsWith('./uploads/') ||
-            img.startsWith('/assets/'));
-        const okVid = vid && vid !== '[video_local_sqlite]';
-        const okUrl =
-          urlVal &&
-          urlVal !== '[video_local_sqlite]' &&
-          (urlVal === '__DATA_IMAGE__' || !/^http/i.test(urlVal));
-        if (!okImg && !okVid && !okUrl) return false;
-      }
-
-      if (minDate && (evt.data_evento || '') < minDate) {
-        return false;
-      }
-
-      return true;
-    });
-
-    const rawUserLat = user_lat ?? lat;
-    const rawUserLng = user_lng ?? lng;
-    const userLat = rawUserLat !== undefined && rawUserLat !== '' ? parseFloat(String(rawUserLat)) : undefined;
-    const userLng = rawUserLng !== undefined && rawUserLng !== '' ? parseFloat(String(rawUserLng)) : undefined;
-    const hasValidUserCoords =
-      userLat !== undefined && userLng !== undefined && !isNaN(userLat) && !isNaN(userLng);
-    const isProximityRequested =
-      (mais_proximos === 'true' || order_by === 'proximidade') && hasValidUserCoords;
-
-    const mapped = filteredRows.map(({ evt, catNome, catDesc, advNome, advEmail, advTel, advVerif, estNome, estRegiao }) => {
-      let latVal = evt.latitude;
-      let lngVal = evt.longitude;
-      if ((!latVal || !lngVal) && evt.cidade) {
-        const cityCoord = BRAZIL_CITY_COORDINATES[normalizeCityKey(evt.cidade)];
-        if (cityCoord) {
-          latVal = cityCoord.latitude;
-          lngVal = cityCoord.longitude;
-        }
-      }
-
-      let distanceKm: number | undefined = undefined;
-      if (hasValidUserCoords && latVal && lngVal) {
-        const evLat = parseFloat(String(latVal));
-        const evLng = parseFloat(String(lngVal));
-        if (!isNaN(evLat) && !isNaN(evLng)) {
-          distanceKm = calculateDistanceKm(userLat!, userLng!, evLat, evLng);
-        }
-      }
-
-      let rawVideoUrl = String(evt.video_url || '').trim();
-      let rawUrl = String(evt.url || '').trim();
-      if (rawVideoUrl === '[video_local_sqlite]') rawVideoUrl = '';
-      if (rawUrl === '[video_local_sqlite]') rawUrl = '';
-
-      if (rawVideoUrl && (rawVideoUrl.startsWith('/uploads/') || rawVideoUrl.startsWith('/assets/') || rawVideoUrl.startsWith('/api/video/'))) {
-        if (!checkLocalVideoFileExists(rawVideoUrl, mediaFileSet)) rawVideoUrl = '';
-      }
-      if (rawUrl && (rawUrl.startsWith('/uploads/') || rawUrl.startsWith('/assets/') || rawUrl.startsWith('/api/video/'))) {
-        if (!checkLocalVideoFileExists(rawUrl, mediaFileSet)) rawUrl = '';
-      }
-
-      const isUrlVideo = Boolean(
-        rawUrl &&
-          (rawUrl.startsWith('data:video/') ||
-            rawUrl.startsWith('data:application/octet-stream') ||
-            rawUrl.startsWith('blob:') ||
-            /\.(mp4|webm|ogg|mov|m4v)($|\?|#)/i.test(rawUrl) ||
-            /video\/mp4/i.test(rawUrl) ||
-            rawUrl.includes('youtube.com') ||
-            rawUrl.includes('youtu.be') ||
-            rawUrl.includes('facebook.com') ||
-            rawUrl.includes('fb.watch') ||
-            rawUrl.includes('fb.') ||
-            rawUrl.includes('instagram.com') ||
-            rawUrl.includes('tiktok.com') ||
-            rawUrl.includes('vimeo.com'))
-      );
-
-      const resolvedVideoUrl = rawVideoUrl || (isUrlVideo ? rawUrl : undefined);
-      const finalVideoUrl =
-        resolvedVideoUrl && resolvedVideoUrl !== 'null' && resolvedVideoUrl !== '[video_local_sqlite]'
-          ? resolvedVideoUrl
-          : null;
-
-      const rawImgUrl = String(evt.imagem_url || '').trim();
-      const hasInlineDataImage = rawImgUrl === '__DATA_IMAGE__' || rawUrl === '__DATA_IMAGE__';
-      let finalImageUrl =
-        rawImgUrl && rawImgUrl !== 'null' && rawImgUrl !== 'undefined' && rawImgUrl !== '__DATA_IMAGE__'
-          ? rawImgUrl
-          : '';
-
-      if (
-        !hasInlineDataImage &&
-        (!finalImageUrl || finalImageUrl.includes('images.unsplash.com/photo-1514525253161-7a46d19cd819'))
-      ) {
-        for (const ext of ['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'svg']) {
-          const candidatePath = `/uploads/images/${evt.id}.${ext}`;
-          if (
-            fs.existsSync(path.join(process.cwd(), candidatePath)) ||
-            fs.existsSync(path.join(process.cwd(), 'public', candidatePath))
-          ) {
-            finalImageUrl = candidatePath;
-            break;
+          if (isNumericId) {
+            const matchNum = evt.estado_id === rawId || evt.cidade_id === rawId;
+            const matchUfNome = ufLow && nomLow && evtEst === ufLow && (evtCid === nomLow || joinEstNome === nomLow);
+            const matchUf = ufLow && !nomLow && (evtEst === ufLow || joinEstNome === ufLow);
+            if (!matchNum && !matchUfNome && !matchUf) return false;
+          } else if (ufLow && nomLow) {
+            if (!(evtEst === ufLow && (evtCid === nomLow || joinEstNome === nomLow))) return false;
+          } else if (ufLow) {
+            if (evtEst !== ufLow && joinEstNome !== ufLow) return false;
+          } else if (nomLow) {
+            if (evtCid !== nomLow && joinEstNome !== nomLow) return false;
           }
         }
-      }
 
-      if (!includeBase64) {
-        const isLocalHostedImage =
-          hasInlineDataImage ||
-          (finalImageUrl &&
-            (finalImageUrl.startsWith('data:image/') ||
-              finalImageUrl.startsWith('/uploads/') ||
-              finalImageUrl.startsWith('./uploads/')));
-        if (isLocalHostedImage) {
-          const ver = evt.updated_at ? new Date(evt.updated_at).getTime() : '';
-          finalImageUrl = `/api/event-poster/${encodeURIComponent(evt.id)}${ver ? `?v=${ver}` : ''}`;
+        if (searchVariants.length > 0) {
+          const haystack = normalizeText(
+            `${evt.titulo} ${evt.descricao} ${evt.local_nome} ${evt.endereco} ${evt.cidade} ${evt.categoria} ${evt.organizador}`
+          );
+          if (!searchVariants.some((v) => haystack.includes(v))) return false;
         }
-      } else if (finalImageUrl && (finalImageUrl.startsWith('/uploads/') || finalImageUrl.startsWith('./uploads/'))) {
-        try {
-          const filename = path.basename(finalImageUrl.split('?')[0]);
-          const candidates = [
-            path.join(process.cwd(), 'public', 'uploads', 'images', filename),
-            path.join(process.cwd(), 'uploads', 'images', filename),
-            path.join('/tmp', 'uploads', 'images', filename),
-          ];
-          for (const cand of candidates) {
-            if (fs.existsSync(cand)) {
-              const fileBuf = fs.readFileSync(cand);
-              const ext = path.extname(cand).toLowerCase().replace('.', '') || 'jpeg';
-              const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
-              finalImageUrl = `data:${mime};base64,${fileBuf.toString('base64')}`;
+
+        if (status && evt.status !== status) return false;
+        if (liberado && (evt.liberado || '').toUpperCase() !== String(liberado).toUpperCase()) {
+          return false;
+        }
+
+        if (requireMedia) {
+          const img = (evt.imagem_url || '').trim();
+          const vid = (evt.video_url || '').trim();
+          const urlVal = (evt.url || '').trim();
+          const okImg =
+            img &&
+            img !== 'null' &&
+            img !== 'undefined' &&
+            (img === '__DATA_IMAGE__' ||
+              img.startsWith('/api/event-poster/') ||
+              img.startsWith('http://') ||
+              img.startsWith('https://') ||
+              img.startsWith('data:image/') ||
+              img.startsWith('/uploads/') ||
+              img.startsWith('./uploads/') ||
+              img.startsWith('/assets/'));
+          const okVid = vid && vid !== '[video_local_sqlite]';
+          const okUrl =
+            urlVal &&
+            urlVal !== '[video_local_sqlite]' &&
+            (urlVal === '__DATA_IMAGE__' || !/^http/i.test(urlVal));
+          if (!okImg && !okVid && !okUrl) return false;
+        }
+
+        if (minDate && (evt.data_evento || '') < minDate) {
+          return false;
+        }
+
+        return true;
+      });
+
+      const mapped = filteredRows.map(({ evt, catNome, catDesc, advNome, advEmail, advTel, advVerif, estNome, estRegiao }) => {
+        const resolvedGeo = resolveNumericCoords(
+          evt.lat_num ?? evt.latitude,
+          evt.lng_num ?? evt.longitude,
+          evt.cidade
+        );
+        const latVal = resolvedGeo.latStr ?? (evt.latitude || undefined);
+        const lngVal = resolvedGeo.lngStr ?? (evt.longitude || undefined);
+
+        let distanceKm: number | undefined = undefined;
+        if (hasValidUserCoords && resolvedGeo.latNum !== null && resolvedGeo.lngNum !== null) {
+          distanceKm = calculateDistanceKm(userLat!, userLng!, resolvedGeo.latNum, resolvedGeo.lngNum);
+        }
+
+        let rawVideoUrl = String(evt.video_url || '').trim();
+        let rawUrl = String(evt.url || '').trim();
+        if (rawVideoUrl === '[video_local_sqlite]') rawVideoUrl = '';
+        if (rawUrl === '[video_local_sqlite]') rawUrl = '';
+
+        if (rawVideoUrl && (rawVideoUrl.startsWith('/uploads/') || rawVideoUrl.startsWith('/assets/') || rawVideoUrl.startsWith('/api/video/'))) {
+          if (!checkLocalVideoFileExists(rawVideoUrl, mediaFileSet)) rawVideoUrl = '';
+        }
+        if (rawUrl && (rawUrl.startsWith('/uploads/') || rawUrl.startsWith('/assets/') || rawUrl.startsWith('/api/video/'))) {
+          if (!checkLocalVideoFileExists(rawUrl, mediaFileSet)) rawUrl = '';
+        }
+
+        const isUrlVideo = Boolean(
+          rawUrl &&
+            (rawUrl.startsWith('data:video/') ||
+              rawUrl.startsWith('data:application/octet-stream') ||
+              rawUrl.startsWith('blob:') ||
+              /\.(mp4|webm|ogg|mov|m4v)($|\?|#)/i.test(rawUrl) ||
+              /video\/mp4/i.test(rawUrl) ||
+              rawUrl.includes('youtube.com') ||
+              rawUrl.includes('youtu.be') ||
+              rawUrl.includes('facebook.com') ||
+              rawUrl.includes('fb.watch') ||
+              rawUrl.includes('fb.') ||
+              rawUrl.includes('instagram.com') ||
+              rawUrl.includes('tiktok.com') ||
+              rawUrl.includes('vimeo.com'))
+        );
+
+        const resolvedVideoUrl = rawVideoUrl || (isUrlVideo ? rawUrl : undefined);
+        const finalVideoUrl =
+          resolvedVideoUrl && resolvedVideoUrl !== 'null' && resolvedVideoUrl !== '[video_local_sqlite]'
+            ? resolvedVideoUrl
+            : null;
+
+        const rawImgUrl = String(evt.imagem_url || '').trim();
+        const hasInlineDataImage = rawImgUrl === '__DATA_IMAGE__' || rawUrl === '__DATA_IMAGE__';
+        let finalImageUrl =
+          rawImgUrl && rawImgUrl !== 'null' && rawImgUrl !== 'undefined' && rawImgUrl !== '__DATA_IMAGE__'
+            ? rawImgUrl
+            : '';
+
+        if (
+          !hasInlineDataImage &&
+          (!finalImageUrl || finalImageUrl.includes('images.unsplash.com/photo-1514525253161-7a46d19cd819'))
+        ) {
+          for (const ext of ['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'svg']) {
+            const candidatePath = `/uploads/images/${evt.id}.${ext}`;
+            if (
+              fs.existsSync(path.join(process.cwd(), candidatePath)) ||
+              fs.existsSync(path.join(process.cwd(), 'public', candidatePath))
+            ) {
+              finalImageUrl = candidatePath;
               break;
             }
           }
-        } catch {
-          // keep original path
         }
-      }
 
-      return {
-        id: evt.id,
-        title: evt.titulo,
-        description: evt.descricao || '',
-        category: evt.categoria,
-        categoryId: evt.categoria_id ?? undefined,
-        categoryOfficialName: catNome || evt.categoria,
-        categoryDescription: catDesc || undefined,
-        advertiserId: evt.anunciante_id || undefined,
-        advertiserName: advNome || undefined,
-        advertiserEmail: advEmail || undefined,
-        advertiserPhone: advTel || undefined,
-        advertiserVerified: Boolean(advVerif),
-        estadoId: evt.estado_id ?? undefined,
-        estadoNomeCompleto: estNome || undefined,
-        regiao: estRegiao || undefined,
-        date: evt.data_evento,
-        time: evt.horario,
-        endDate: evt.data_evento,
-        endTime: evt.horario_fim || undefined,
-        locationName: evt.local_nome,
-        address: evt.endereco || '',
-        city: evt.cidade,
-        state: evt.estado,
-        stateName: estNome || evt.estado,
-        latitude: latVal || undefined,
-        longitude: lngVal || undefined,
-        distanceKm,
-        liberado: evt.liberado || 'N',
-        isFree: Boolean(evt.is_gratuito),
-        price: evt.preco ?? undefined,
-        priceDetails: evt.detalhes_preco || undefined,
-        imageUrl: finalImageUrl,
-        imagem_url: finalImageUrl || null,
-        mediaType: finalVideoUrl ? ('video' as const) : ('image' as const),
-        videoUrl: finalVideoUrl,
-        video_url: finalVideoUrl,
-        video_utl: finalVideoUrl,
-        url: finalVideoUrl || finalImageUrl || undefined,
-        Url: finalVideoUrl || finalImageUrl || undefined,
-        organizer: evt.organizador || '',
-        contact: evt.contato && !evt.contato.startsWith('data:') ? evt.contato : undefined,
-        tags: (() => {
-          if (!evt.tags) return [];
-          const trimmed = evt.tags.trim();
-          if (!trimmed) return [];
-          try {
-            const parsed = JSON.parse(trimmed);
-            return Array.isArray(parsed) ? parsed : [String(parsed)];
-          } catch {
-            return trimmed.includes(',')
-              ? trimmed.split(',').map((s: string) => s.trim()).filter(Boolean)
-              : [trimmed];
+        if (!includeBase64) {
+          const isLocalHostedImage =
+            hasInlineDataImage ||
+            (finalImageUrl &&
+              (finalImageUrl.startsWith('data:image/') ||
+                finalImageUrl.startsWith('/uploads/') ||
+                finalImageUrl.startsWith('./uploads/')));
+          if (isLocalHostedImage) {
+            const ver = evt.updated_at ? new Date(evt.updated_at).getTime() : '';
+            finalImageUrl = `/api/event-poster/${encodeURIComponent(evt.id)}${ver ? `?v=${ver}` : ''}`;
           }
-        })(),
-        featured: Boolean(evt.destaque),
-        status: evt.status || 'em_analise',
-        createdAt: evt.criado_em || '',
-      };
-    });
+        } else if (finalImageUrl && (finalImageUrl.startsWith('/uploads/') || finalImageUrl.startsWith('./uploads/'))) {
+          try {
+            const filename = path.basename(finalImageUrl.split('?')[0]);
+            const candidates = [
+              path.join(process.cwd(), 'public', 'uploads', 'images', filename),
+              path.join(process.cwd(), 'uploads', 'images', filename),
+              path.join('/tmp', 'uploads', 'images', filename),
+            ];
+            for (const cand of candidates) {
+              if (fs.existsSync(cand)) {
+                const fileBuf = fs.readFileSync(cand);
+                const ext = path.extname(cand).toLowerCase().replace('.', '') || 'jpeg';
+                const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+                finalImageUrl = `data:${mime};base64,${fileBuf.toString('base64')}`;
+                break;
+              }
+            }
+          } catch {
+            // keep original path
+          }
+        }
 
-    const seenEventKeys = new Set<string>();
-    const uniqueEvents: typeof mapped = [];
+        return {
+          id: evt.id,
+          title: evt.titulo,
+          description: evt.descricao || '',
+          category: evt.categoria,
+          categoryId: evt.categoria_id ?? undefined,
+          categoryOfficialName: catNome || evt.categoria,
+          categoryDescription: catDesc || undefined,
+          advertiserId: evt.anunciante_id || undefined,
+          advertiserName: advNome || undefined,
+          advertiserEmail: advEmail || undefined,
+          advertiserPhone: advTel || undefined,
+          advertiserVerified: Boolean(advVerif),
+          estadoId: evt.estado_id ?? undefined,
+          estadoNomeCompleto: estNome || undefined,
+          regiao: estRegiao || undefined,
+          date: evt.data_evento,
+          time: evt.horario,
+          endDate: evt.data_evento,
+          endTime: evt.horario_fim || undefined,
+          locationName: evt.local_nome,
+          address: evt.endereco || '',
+          city: evt.cidade,
+          state: evt.estado,
+          stateName: estNome || evt.estado,
+          latitude: latVal || undefined,
+          longitude: lngVal || undefined,
+          distanceKm,
+          liberado: evt.liberado || 'N',
+          isFree: Boolean(evt.is_gratuito),
+          price: evt.preco ?? undefined,
+          priceDetails: evt.detalhes_preco || undefined,
+          imageUrl: finalImageUrl,
+          imagem_url: finalImageUrl || null,
+          mediaType: finalVideoUrl ? ('video' as const) : ('image' as const),
+          videoUrl: finalVideoUrl,
+          video_url: finalVideoUrl,
+          video_utl: finalVideoUrl,
+          url: finalVideoUrl || finalImageUrl || undefined,
+          Url: finalVideoUrl || finalImageUrl || undefined,
+          organizer: evt.organizador || '',
+          contact: evt.contato && !evt.contato.startsWith('data:') ? evt.contato : undefined,
+          tags: (() => {
+            if (!evt.tags) return [];
+            const trimmed = evt.tags.trim();
+            if (!trimmed) return [];
+            try {
+              const parsed = JSON.parse(trimmed);
+              return Array.isArray(parsed) ? parsed : [String(parsed)];
+            } catch {
+              return trimmed.includes(',')
+                ? trimmed.split(',').map((s: string) => s.trim()).filter(Boolean)
+                : [trimmed];
+            }
+          })(),
+          featured: Boolean(evt.destaque),
+          status: evt.status || 'em_analise',
+          createdAt: evt.criado_em || '',
+        };
+      });
 
-    for (const ev of mapped) {
-      if (!isAdmin) {
-        const hasImg = hasRealImageFile(ev.imageUrl) || hasRealImageFile(ev.imagem_url);
-        const hasVid = Boolean(ev.videoUrl && ev.videoUrl !== '[video_local_sqlite]');
-        if (!hasImg && !hasVid) continue;
-      } else if ((has_image === 'true' || com_imagem === 'true') && !isValidImageUrl(ev.imageUrl) && !ev.videoUrl && !ev.url) {
-        continue;
+      const seenEventKeys = new Set<string>();
+      const unique: typeof mapped = [];
+
+      for (const ev of mapped) {
+        if (!isAdmin) {
+          const hasImg = hasRealImageFile(ev.imageUrl) || hasRealImageFile(ev.imagem_url);
+          const hasVid = Boolean(ev.videoUrl && ev.videoUrl !== '[video_local_sqlite]');
+          if (!hasImg && !hasVid) continue;
+        } else if ((has_image === 'true' || com_imagem === 'true') && !isValidImageUrl(ev.imageUrl) && !ev.videoUrl && !ev.url) {
+          continue;
+        }
+
+        const idKey = (ev.id || '').trim().toLowerCase();
+        const normTitle = normalizeText(ev.title).replace(/[^\w\s]/gi, '').replace(/\s+/g, ' ');
+        const dateKey = (ev.date || '').split('T')[0].trim();
+        const normCity = normalizeText(ev.city);
+        const semanticKey = `${normTitle}__${dateKey}__${normCity}`;
+        const titleDateKey = `${normTitle}__${dateKey}`;
+
+        if (idKey && seenEventKeys.has(`id:${idKey}`)) continue;
+        if (normTitle && dateKey && (seenEventKeys.has(`sem:${semanticKey}`) || seenEventKeys.has(`td:${titleDateKey}`))) {
+          continue;
+        }
+
+        if (idKey) seenEventKeys.add(`id:${idKey}`);
+        if (normTitle && dateKey) {
+          seenEventKeys.add(`sem:${semanticKey}`);
+          seenEventKeys.add(`td:${titleDateKey}`);
+        }
+        unique.push(ev);
       }
 
-      const idKey = (ev.id || '').trim().toLowerCase();
-      const normTitle = normalizeText(ev.title).replace(/[^\w\s]/gi, '').replace(/\s+/g, ' ');
-      const dateKey = (ev.date || '').split('T')[0].trim();
-      const normCity = normalizeText(ev.city);
-      const semanticKey = `${normTitle}__${dateKey}__${normCity}`;
-      const titleDateKey = `${normTitle}__${dateKey}`;
-
-      if (idKey && seenEventKeys.has(`id:${idKey}`)) continue;
-      if (normTitle && dateKey && (seenEventKeys.has(`sem:${semanticKey}`) || seenEventKeys.has(`td:${titleDateKey}`))) {
-        continue;
-      }
-
-      if (idKey) seenEventKeys.add(`id:${idKey}`);
-      if (normTitle && dateKey) {
-        seenEventKeys.add(`sem:${semanticKey}`);
-        seenEventKeys.add(`td:${titleDateKey}`);
-      }
-      uniqueEvents.push(ev);
-    }
+      return unique;
+    };
 
     const isAdminOrRecents = order_by === 'criado_em' || order_by === 'recentes' || isAdmin;
+    let uniqueEvents: ReturnType<typeof filterAndMapRows> = [];
+
+    // Busca progressiva por raio geográfico direto no PostgreSQL (50 km -> 150 km -> todo o estado)
+    if (isProximityRequested && !isAdmin && !search && !hasExplicitCity && !estadoFilter) {
+      const distKmSql = sql<number>`CASE
+        WHEN ${eventos.lat_num} IS NOT NULL AND ${eventos.lng_num} IS NOT NULL THEN
+          6371.0 * acos(LEAST(1.0, GREATEST(-1.0,
+            cos(radians(${userLat})) * cos(radians(${eventos.lat_num})) *
+            cos(radians(${eventos.lng_num}) - radians(${userLng})) +
+            sin(radians(${userLat})) * sin(radians(${eventos.lat_num}))
+          )))
+        ELSE 999999.0
+      END`;
+
+      const radiusTiersKm: Array<number | null> = [50, 150, null];
+      const cosLat = Math.max(0.2, Math.cos((userLat! * Math.PI) / 180));
+      const targetMin = finalLimit || 20;
+
+      for (const radiusKm of radiusTiersKm) {
+        const geoConds: any[] = [];
+        if (radiusKm !== null) {
+          const latDelta = radiusKm / 111.0;
+          const lngDelta = radiusKm / (111.0 * cosLat);
+          geoConds.push(
+            gte(eventos.lat_num, userLat! - latDelta),
+            lte(eventos.lat_num, userLat! + latDelta),
+            gte(eventos.lng_num, userLng! - lngDelta),
+            lte(eventos.lng_num, userLng! + lngDelta)
+          );
+        }
+
+        const tierRows = await executeSelectQuery(
+          geoConds,
+          [asc(distKmSql), asc(eventos.data_evento), asc(eventos.horario)],
+          sqlFetchLimit
+        );
+        uniqueEvents = filterAndMapRows(tierRows);
+        if (uniqueEvents.length >= targetMin || radiusKm === null) {
+          break;
+        }
+      }
+    } else {
+      const sqlOrder = isAdminOrRecents
+        ? [desc(eventos.criado_em)]
+        : [asc(eventos.data_evento), asc(eventos.horario)];
+      const applyLimitInSql = !isAdmin && !search && !estadoFilter;
+      const rows = await executeSelectQuery([], sqlOrder, applyLimitInSql ? sqlFetchLimit : undefined);
+      uniqueEvents = filterAndMapRows(rows);
+    }
+
     if (isAdminOrRecents) {
       uniqueEvents.sort((a, b) => {
         const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
@@ -656,11 +810,6 @@ export async function listEventsPg(queryParams: Record<string, any>) {
         return (a.id || '').localeCompare(b.id || '');
       });
     }
-
-    const hasDateQuery = Boolean(date || data_min || data_atual === 'true' || somente_futuros === 'true');
-    const rawLimit = limit ? parseInt(String(limit), 10) : undefined;
-    const limitCount = rawLimit !== undefined && !isNaN(rawLimit) ? rawLimit : hasDateQuery || isProximityRequested ? 20 : undefined;
-    const finalLimit = isAdmin && !limit ? undefined : limitCount && limitCount > 0 ? limitCount : 20;
 
     return finalLimit ? uniqueEvents.slice(0, finalLimit) : uniqueEvents;
   } catch (error) {
@@ -703,6 +852,11 @@ export async function upsertEventPg(data: {
 }) {
   try {
     const estId = data.estado_id ?? (await getEstadoIdByText(data.estado, data.cidade));
+    const resolvedCat =
+      data.categoria_id
+        ? { id: data.categoria_id, nome: data.categoria || 'Shows' }
+        : await resolveCategoryRecord(data.categoria || 'Shows', null, false);
+    const resolvedCoords = resolveNumericCoords(data.latitude, data.longitude, data.cidade);
 
     let finalImg = data.imagem_url ?? null;
     if (finalImg && (finalImg.startsWith('/api/event-poster/') || finalImg === '__DATA_IMAGE__')) {
@@ -732,8 +886,8 @@ export async function upsertEventPg(data: {
       .values({
         id: data.id,
         anunciante_id: data.anunciante_id || null,
-        categoria_id: data.categoria_id || null,
-        categoria: data.categoria || 'Shows',
+        categoria_id: resolvedCat.id || null,
+        categoria: data.categoria || resolvedCat.nome || 'Shows',
         titulo: data.titulo || 'Evento',
         descricao: data.descricao || '',
         data_evento: data.data_evento,
@@ -745,8 +899,10 @@ export async function upsertEventPg(data: {
         estado: data.estado || 'SP',
         estado_id: estId,
         cidade_id: data.cidade_id || null,
-        latitude: data.latitude || null,
-        longitude: data.longitude || null,
+        latitude: resolvedCoords.latStr,
+        longitude: resolvedCoords.lngStr,
+        lat_num: resolvedCoords.latNum,
+        lng_num: resolvedCoords.lngNum,
         liberado: (data.liberado || 'N').slice(0, 1).toUpperCase(),
         is_gratuito: data.is_gratuito ?? 0,
         preco: data.preco ?? 0,
@@ -766,8 +922,8 @@ export async function upsertEventPg(data: {
         target: eventos.id,
         set: {
           anunciante_id: data.anunciante_id || null,
-          categoria_id: data.categoria_id || null,
-          categoria: data.categoria || 'Shows',
+          categoria_id: resolvedCat.id || null,
+          categoria: data.categoria || resolvedCat.nome || 'Shows',
           titulo: data.titulo || 'Evento',
           descricao: data.descricao || '',
           data_evento: data.data_evento,
@@ -778,8 +934,10 @@ export async function upsertEventPg(data: {
           cidade: data.cidade || 'São Paulo',
           estado: data.estado || 'SP',
           estado_id: estId,
-          latitude: data.latitude || null,
-          longitude: data.longitude || null,
+          latitude: resolvedCoords.latStr,
+          longitude: resolvedCoords.lngStr,
+          lat_num: resolvedCoords.latNum,
+          lng_num: resolvedCoords.lngNum,
           liberado: (data.liberado || 'N').slice(0, 1).toUpperCase(),
           is_gratuito: data.is_gratuito ?? 0,
           preco: data.preco ?? 0,

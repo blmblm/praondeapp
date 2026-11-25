@@ -1,4 +1,4 @@
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 import {
   customType,
   doublePrecision,
@@ -99,6 +99,8 @@ export const eventos = pgTable(
     cidade_id: integer('cidade_id'),
     latitude: varchar('latitude', { length: 50 }),
     longitude: varchar('longitude', { length: 50 }),
+    lat_num: doublePrecision('lat_num'),
+    lng_num: doublePrecision('lng_num'),
     liberado: varchar('liberado', { length: 1 }).default('N').notNull(),
     is_gratuito: integer('is_gratuito').default(0).notNull(),
     preco: doublePrecision('preco').default(0),
@@ -120,6 +122,15 @@ export const eventos = pgTable(
     index('idx_pg_eventos_cidade').on(table.cidade),
     index('idx_pg_eventos_estado').on(table.estado),
     index('idx_pg_eventos_categoria').on(table.categoria),
+    index('idx_pg_eventos_pub_catid_data_geo')
+      .on(table.categoria_id, table.data_evento, table.lat_num, table.lng_num)
+      .where(sql`${table.liberado} = 'S'`),
+    index('idx_pg_eventos_pub_data_geo')
+      .on(table.data_evento, table.lat_num, table.lng_num)
+      .where(sql`${table.liberado} = 'S'`),
+    index('idx_pg_eventos_pub_geo_data')
+      .on(table.lat_num, table.lng_num, table.data_evento)
+      .where(sql`${table.liberado} = 'S' AND ${table.lat_num} IS NOT NULL AND ${table.lng_num} IS NOT NULL`),
   ]
 );
 

@@ -255,14 +255,16 @@ export async function getCidadesList(estadoFilter?: string, search?: string) {
       )
       .orderBy(asc(cidades.nome));
 
-    return rows.map((r) => ({
-      id: r.id,
-      nome: r.nome,
-      estado: r.estado || 'SP',
-      regiao: r.regiao || '',
-      ativa: Boolean(r.ativa),
-      criadoEm: r.criado_em,
-    }));
+    return rows
+      .map((r) => ({
+        id: r.id,
+        nome: r.nome,
+        estado: r.estado || 'SP',
+        regiao: r.regiao || '',
+        ativa: Boolean(r.ativa),
+        criadoEm: r.criado_em,
+      }))
+      .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
   } catch (error) {
     console.error('Database query failed in getCidadesList:', error);
     throw new Error('Falha ao consultar cidades no banco de dados.', { cause: error });

@@ -1,6 +1,253 @@
+import type { PoolClient } from 'pg';
 import { pool } from './index.ts';
+import { SP_MUNICIPIOS } from '../data/spCities.ts';
+import { BRAZIL_CITY_COORDINATES, normalizeCityKey } from './mediaHelpers.ts';
 
 let schemaPromise: Promise<void> | null = null;
+const SP_CITIES_SEED_KEY = 'sp_cities_ibge_645_seeded_v1';
+const GEO_INDEX_MIGRATION_KEY = 'eventos_geo_partial_indexes_v1';
+
+function normalizeCityName(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ');
+}
+
+export async function ensureSpCitiesSeeded(client: PoolClient): Promise<number> {
+  try {
+    const metaRes = await client.query<{ value: string }>(
+      `SELECT value FROM sync_metadata WHERE key = $1 LIMIT 1`,
+      [SP_CITIES_SEED_KEY]
+    );
+    const countRes = await client.query<{ total: string }>(
+      `SELECT COUNT(*)::text AS total FROM cidades`
+    );
+    const currentTotal = parseInt(countRes.rows[0]?.total || '0', 10);
+
+    if (metaRes.rows[0]?.value === 'done' && currentTotal >= 50) {
+      return 0;
+    }
+
+    // Garante que o registro do estado SP exista na tabela estado
+    let spEstadoId: number | null = null;
+    const spEstRes = await client.query<{ id: number }>(
+      `SELECT id FROM estado WHERE UPPER(TRIM(estado)) = 'SP' ORDER BY id ASC LIMIT 1`
+    );
+    if (spEstRes.rows[0]?.id) {
+      spEstadoId = spEstRes.rows[0].id;
+    } else {
+      await client.query(
+        `SELECT setval(pg_get_serial_sequence('estado', 'id'), COALESCE((SELECT MAX(id) FROM estado), 0) + 1, false)`
+      );
+      const insertedEst = await client.query<{ id: number }>(
+        `INSERT INTO estado (nome, estado, regiao, ativa, criado_em)
+         VALUES ('São Paulo', 'SP', 'Sudeste', 1, $1)
+         ON CONFLICT (nome) DO NOTHING
+         RETURNING id`,
+        [new Date().toISOString()]
+      );
+      if (insertedEst.rows[0]?.id) {
+        spEstadoId = insertedEst.rows[0].id;
+      } else {
+        const fallbackEst = await client.query<{ id: number }>(
+          `SELECT id FROM estado WHERE UPPER(TRIM(estado)) = 'SP' OR LOWER(TRIM(nome)) = 'são paulo' LIMIT 1`
+        );
+        spEstadoId = fallbackEst.rows[0]?.id ?? null;
+      }
+    }
+
+    if (!spEstadoId) {
+      console.warn('[Pra onde eu vou] Não foi possível localizar ou criar o estado SP para popular cidades.');
+      return 0;
+    }
+
+    const existingRows = await client.query<{ nome: string }>(`SELECT nome FROM cidades`);
+    const existingSet = new Set(existingRows.rows.map((r) => normalizeCityName(r.nome || '')));
+
+    const missingCities = SP_MUNICIPIOS.filter((cityName) => !existingSet.has(normalizeCityName(cityName)));
+
+    let insertedCount = 0;
+    if (missingCities.length > 0) {
+      // Sincroniza a sequência SERIAL antes de inserir para evitar conflitos após restore de backup
+      await client.query(
+        `SELECT setval(pg_get_serial_sequence('cidades', 'id'), COALESCE((SELECT MAX(id) FROM cidades), 0) + 1, false)`
+      );
+      const nowIso = new Date().toISOString();
+      const insertRes = await client.query(
+        `INSERT INTO cidades (nome, estado_id, ativa, criado_em)
+         SELECT t.nome, $1, 1, $2
+         FROM unnest($3::text[]) AS t(nome)
+         ON CONFLICT (nome) DO NOTHING`,
+        [spEstadoId, nowIso, missingCities]
+      );
+      insertedCount = insertRes.rowCount || 0;
+      console.log(
+        `[Pra onde eu vou] Tabela de cidades/estado atualizada com ${insertedCount} municípios de São Paulo (total SP IBGE: ${SP_MUNICIPIOS.length}).`
+      );
+    }
+
+    await client.query(
+      `INSERT INTO sync_metadata (key, value) VALUES ($1, 'done')
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      [SP_CITIES_SEED_KEY]
+    );
+
+    return insertedCount;
+  } catch (err) {
+    console.error('[Pra onde eu vou] Aviso ao popular municípios de SP:', err);
+    return 0;
+  }
+}
+
+export async function ensureEventsGeoAndIndexes(client: PoolClient): Promise<void> {
+  try {
+    // 1. Verifica se lat_num e lng_num já existem; cria se necessário (ex.: Neon / DB próprio)
+    const colsRes = await client.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'eventos'
+         AND column_name IN ('lat_num', 'lng_num');`
+    );
+    const existingCols = new Set(colsRes.rows.map((r) => r.column_name));
+
+    if (!existingCols.has('lat_num') || !existingCols.has('lng_num')) {
+      try {
+        if (!existingCols.has('lat_num')) {
+          await client.query(`ALTER TABLE eventos ADD COLUMN IF NOT EXISTS lat_num DOUBLE PRECISION;`);
+        }
+        if (!existingCols.has('lng_num')) {
+          await client.query(`ALTER TABLE eventos ADD COLUMN IF NOT EXISTS lng_num DOUBLE PRECISION;`);
+        }
+      } catch (ddlErr: any) {
+        if (ddlErr?.code === '42501') {
+          console.warn('[Pra onde eu vou] Sem permissão DDL para adicionar lat_num/lng_num; aguardando schema push.');
+          return;
+        }
+        throw ddlErr;
+      }
+    }
+
+    // 2. Cria índices parciais compostos voltados para eventos liberados (liberado = 'S') se ainda não existirem
+    const existingIdxRes = await client.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'eventos';`
+    );
+    const existingIdx = new Set(existingIdxRes.rows.map((r) => r.indexname));
+    const indexDefs: Array<{ name: string; sql: string }> = [
+      {
+        name: 'idx_pg_eventos_pub_catid_data_geo',
+        sql: `CREATE INDEX IF NOT EXISTS idx_pg_eventos_pub_catid_data_geo
+              ON eventos (categoria_id, data_evento, lat_num, lng_num)
+              WHERE liberado = 'S';`,
+      },
+      {
+        name: 'idx_pg_eventos_pub_data_geo',
+        sql: `CREATE INDEX IF NOT EXISTS idx_pg_eventos_pub_data_geo
+              ON eventos (data_evento, lat_num, lng_num)
+              WHERE liberado = 'S';`,
+      },
+      {
+        name: 'idx_pg_eventos_pub_geo_data',
+        sql: `CREATE INDEX IF NOT EXISTS idx_pg_eventos_pub_geo_data
+              ON eventos (lat_num, lng_num, data_evento)
+              WHERE liberado = 'S' AND lat_num IS NOT NULL AND lng_num IS NOT NULL;`,
+      },
+      {
+        name: 'idx_pg_eventos_pub_catnorm_data',
+        sql: `CREATE INDEX IF NOT EXISTS idx_pg_eventos_pub_catnorm_data
+              ON eventos (LOWER(TRIM(categoria)), data_evento)
+              WHERE liberado = 'S';`,
+      },
+    ];
+    for (const idx of indexDefs) {
+      if (existingIdx.has(idx.name)) continue;
+      try {
+        await client.query(idx.sql);
+      } catch (idxErr: any) {
+        if (idxErr?.code !== '42501') {
+          console.warn(`[Pra onde eu vou] Aviso ao criar índice ${idx.name}:`, idxErr?.message);
+        }
+      }
+    }
+
+    const metaRes = await client.query<{ value: string }>(
+      `SELECT value FROM sync_metadata WHERE key = $1 LIMIT 1`,
+      [GEO_INDEX_MIGRATION_KEY]
+    );
+    if (metaRes.rows[0]?.value === 'done') {
+      return;
+    }
+
+    // 3. Padroniza liberado em maiúsculo sem espaços para garantir uso do índice parcial
+    await client.query(
+      `UPDATE eventos
+       SET liberado = UPPER(TRIM(liberado))
+       WHERE liberado IS NOT NULL AND liberado <> UPPER(TRIM(liberado));`
+    );
+
+    // 4. Preenche categoria_id ausente usando correspondência exata com a tabela categorias
+    await client.query(
+      `UPDATE eventos e
+       SET categoria_id = c.id
+       FROM categorias c
+       WHERE e.categoria_id IS NULL
+         AND LOWER(TRIM(e.categoria)) = LOWER(TRIM(c.nome));`
+    );
+
+    // 5. Converte latitude/longitude textuais válidas para lat_num/lng_num
+    await client.query(
+      `UPDATE eventos
+       SET lat_num = CAST(REPLACE(TRIM(latitude), ',', '.') AS DOUBLE PRECISION),
+           lng_num = CAST(REPLACE(TRIM(longitude), ',', '.') AS DOUBLE PRECISION)
+       WHERE (lat_num IS NULL OR lng_num IS NULL)
+         AND latitude IS NOT NULL AND longitude IS NOT NULL
+         AND TRIM(latitude) ~ '^-?[0-9]+([.,][0-9]+)?$'
+         AND TRIM(longitude) ~ '^-?[0-9]+([.,][0-9]+)?$'
+         AND CAST(REPLACE(TRIM(latitude), ',', '.') AS DOUBLE PRECISION) BETWEEN -90 AND 90
+         AND CAST(REPLACE(TRIM(longitude), ',', '.') AS DOUBLE PRECISION) BETWEEN -180 AND 180;`
+    );
+
+    // 6. Para eventos ainda sem lat_num/lng_num, preenche com a coordenada da cidade conhecida
+    const missingCoordsRes = await client.query<{ id: string; cidade: string | null }>(
+      `SELECT id, cidade FROM eventos WHERE lat_num IS NULL OR lng_num IS NULL`
+    );
+    for (const row of missingCoordsRes.rows) {
+      if (!row.cidade) continue;
+      const fallback = BRAZIL_CITY_COORDINATES[normalizeCityKey(row.cidade)];
+      if (!fallback) continue;
+      const latVal = parseFloat(fallback.latitude);
+      const lngVal = parseFloat(fallback.longitude);
+      if (Number.isFinite(latVal) && Number.isFinite(lngVal)) {
+        await client.query(
+          `UPDATE eventos
+           SET lat_num = $1,
+               lng_num = $2,
+               latitude = COALESCE(NULLIF(TRIM(latitude), ''), $3),
+               longitude = COALESCE(NULLIF(TRIM(longitude), ''), $4)
+           WHERE id = $5`,
+          [latVal, lngVal, fallback.latitude, fallback.longitude, row.id]
+        );
+      }
+    }
+
+    try {
+      await client.query(`ANALYZE eventos;`);
+    } catch {
+      // ANALYZE pode exigir owner em alguns ambientes
+    }
+
+    await client.query(
+      `INSERT INTO sync_metadata (key, value) VALUES ($1, 'done')
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      [GEO_INDEX_MIGRATION_KEY]
+    );
+
+    console.log('[Pra onde eu vou] Índices parciais geográficos e colunas lat_num/lng_num configurados na tabela eventos.');
+  } catch (err) {
+    console.error('[Pra onde eu vou] Aviso ao configurar índices geográficos de eventos:', err);
+  }
+}
 
 const SCHEMA_STATEMENTS: string[] = [
   `CREATE TABLE IF NOT EXISTS users (
@@ -69,6 +316,8 @@ const SCHEMA_STATEMENTS: string[] = [
     cidade_id INTEGER,
     latitude VARCHAR(50),
     longitude VARCHAR(50),
+    lat_num DOUBLE PRECISION,
+    lng_num DOUBLE PRECISION,
     liberado VARCHAR(1) NOT NULL DEFAULT 'N',
     is_gratuito INTEGER NOT NULL DEFAULT 0,
     preco DOUBLE PRECISION DEFAULT 0,
@@ -244,13 +493,15 @@ export async function ensureDatabaseSchema(force = false): Promise<void> {
         const missingTables = requiredTables.filter((t) => !existingTables.has(t));
         if (missingTables.length === 0) {
           console.log('[Pra onde eu vou] Schema PostgreSQL completo verificado (18 tabelas ativas).');
-          return;
+        } else {
+          for (const stmt of SCHEMA_STATEMENTS) {
+            await client.query(stmt);
+          }
+          console.log('[Pra onde eu vou] Schema PostgreSQL criado/inicializado com sucesso.');
         }
 
-        for (const stmt of SCHEMA_STATEMENTS) {
-          await client.query(stmt);
-        }
-        console.log('[Pra onde eu vou] Schema PostgreSQL criado/inicializado com sucesso.');
+        await ensureSpCitiesSeeded(client);
+        await ensureEventsGeoAndIndexes(client);
       } catch (err) {
         schemaPromise = null;
         console.error('[Pra onde eu vou] Erro ao inicializar schema PostgreSQL:', err);
